@@ -245,15 +245,11 @@ LOCAL_IMAGE_IMPORT_MAX_BYTES = int(os.getenv("LOCAL_IMAGE_IMPORT_MAX_BYTES", str
 LOCAL_IMAGE_IMPORT_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 RUNNINGHUB_THUMBNAIL_EXTS = (".jpg",)
 
-QUEUE = []
-QUEUE_LOCK = Lock()
 HISTORY_LOCK = Lock()
 GLOBAL_CONFIG_LOCK = Lock()
 CONVERSATION_LOCK = Lock()
 CANVAS_LOCK = Lock()
-LOAD_LOCK = Lock()
 RUNNINGHUB_WORKFLOW_LOCK = Lock()
-NEXT_TASK_ID = 1
 UPDATE_LOCK = Lock()
 JIMENG_LOGIN_SESSION = {
     "proc": None,
@@ -453,9 +449,6 @@ def load_env_file():
 ensure_runtime_config_files()
 load_env_file()
 
-COMFYUI_INSTANCES = [s.strip() for s in os.getenv("COMFYUI_INSTANCES", "127.0.0.1:8188").split(",") if s.strip()]
-COMFYUI_ADDRESS = COMFYUI_INSTANCES[0]
-
 AI_BASE_URL = os.getenv("COMFLY_BASE_URL", "https://ai.comfly.chat").rstrip("/")
 AI_API_KEY = os.getenv("COMFLY_API_KEY", "")
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
@@ -511,10 +504,6 @@ MAX_HISTORY_MESSAGES = int(os.getenv("MAX_HISTORY_MESSAGES", "30"))
 AI_REQUEST_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "1800"))
 IMAGE_POLL_INTERVAL = float(os.getenv("IMAGE_POLL_INTERVAL", "2"))
 IMAGE_TASK_TIMEOUT = float(os.getenv("IMAGE_TASK_TIMEOUT", str(AI_REQUEST_TIMEOUT)))
-COMFYUI_HISTORY_TIMEOUT = int(float(os.getenv("COMFYUI_HISTORY_TIMEOUT", "1800")))
-# 下载 ComfyUI 产物的 socket 超时（秒，作用于连接和每次 read）。没有它时一次网络卡顿会让 urlopen 永久挂起，
-# 导致 generate() 不返回、画布卡片一直转圈拿不到结果。给得足够大以容纳大视频/大图的正常下载。
-COMFYUI_DOWNLOAD_TIMEOUT = float(os.getenv("COMFYUI_DOWNLOAD_TIMEOUT", "120"))
 APIMART_IMAGE_TASK_TIMEOUT = float(os.getenv("APIMART_IMAGE_TASK_TIMEOUT", "1800"))
 APIMART_IMAGE_POLL_INTERVAL = float(os.getenv("APIMART_IMAGE_POLL_INTERVAL", "5"))
 APIMART_IMAGE_INITIAL_POLL_DELAY = float(os.getenv("APIMART_IMAGE_INITIAL_POLL_DELAY", "10"))
@@ -1301,8 +1290,6 @@ def update_env_values(updates):
     with open(API_ENV_FILE, "w", encoding="utf-8") as f:
         f.write("\n".join(next_lines).rstrip() + "\n")
 
-BACKEND_LOCAL_LOAD = {addr: 0 for addr in COMFYUI_INSTANCES}
-
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(ASSETS_DIR, exist_ok=True)
 os.makedirs(OUTPUT_INPUT_DIR, exist_ok=True)
@@ -1310,7 +1297,6 @@ os.makedirs(OUTPUT_OUTPUT_DIR, exist_ok=True)
 os.makedirs(ASSET_LIBRARY_DIR, exist_ok=True)
 os.makedirs(LOCAL_UPLOAD_DIR, exist_ok=True)
 os.makedirs(STATIC_DIR, exist_ok=True)
-os.makedirs(WORKFLOW_DIR, exist_ok=True)
 os.makedirs(CONVERSATION_DIR, exist_ok=True)
 os.makedirs(CANVAS_DIR, exist_ok=True)
 
@@ -1943,13 +1929,13 @@ def schedule_self_restart(delay_seconds: int = 3) -> bool:
                 "cd /d \"%APP_DIR%\"\r\n"
                 "if exist \"%LAUNCHER%\" (\r\n"
                 "  echo [%date% %time%] starting launcher: %LAUNCHER% >> \"%LOG_FILE%\"\r\n"
-                "  start \"ComfyUI-API-Modelscope\" /D \"%APP_DIR%\" cmd /k call \"%LAUNCHER%\"\r\n"
+                "  start \"Infinite-Canvas\" /D \"%APP_DIR%\" cmd /k call \"%LAUNCHER%\"\r\n"
                 ") else (\r\n"
                 "  echo [%date% %time%] launcher missing, fallback to python main.py >> \"%LOG_FILE%\"\r\n"
                 "  if exist \"%APP_DIR%\\python\\python.exe\" (\r\n"
-                "    start \"ComfyUI-API-Modelscope\" /D \"%APP_DIR%\" cmd /k \"\"%APP_DIR%\\python\\python.exe\" main.py\"\r\n"
+                "    start \"Infinite-Canvas\" /D \"%APP_DIR%\" cmd /k \"\"%APP_DIR%\\python\\python.exe\" main.py\"\r\n"
                 "  ) else (\r\n"
-                "    start \"ComfyUI-API-Modelscope\" /D \"%APP_DIR%\" cmd /k python main.py\r\n"
+                "    start \"Infinite-Canvas\" /D \"%APP_DIR%\" cmd /k python main.py\r\n"
                 "  )\r\n"
                 ")\r\n"
                 "del \"%~f0\"\r\n"
@@ -2501,6 +2487,18 @@ class CanvasLLMRequest(BaseModel):
     images: List[str] = []   # 可以是 /output/*.png、/assets/*.png 本地路径 或 http(s) URL 或 data URL
     videos: List[str] = []   # 可以是 /output/*.mp4、/assets/*.mp4 本地路径 或 http(s) URL 或 data URL
 
+class StyleLibrarySearchRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=800)
+    limit: int = 6
+    full_prompt: bool = False
+
+class StyleLibraryMatchImageRequest(BaseModel):
+    image: str = Field(min_length=1, max_length=2000000)
+    provider: str = "comfly"
+    model: str = ""
+    ms_model: str = ""
+    limit: int = 4
+
 class ConversationCreateRequest(BaseModel):
     title: str = "新对话"
 
@@ -2699,240 +2697,6 @@ class PromptLibraryCategoryRequest(BaseModel):
 
 # --- 负载均衡 ---
 
-def check_images_exist(backend_addr, images):
-    if not images: return True
-    for img in images:
-        try:
-            url = f"http://{backend_addr}/view?filename={urllib.parse.quote(img)}&type=input"
-            r = requests.get(url, stream=True, timeout=0.5)
-            r.close()
-            if r.status_code != 200: return False
-        except: return False
-    return True
-
-MEDIA_INPUT_KEYS = ("image", "video", "audio", "mask", "filename", "file")
-MEDIA_INPUT_EXT_RE = re.compile(r"\.(png|jpe?g|webp|gif|bmp|tiff?|mp4|webm|mov|m4v|avi|mkv|mp3|wav|m4a|aac|ogg|flac)(?:\?|$)", re.I)
-
-def is_comfy_input_media_value(input_name: str, value: Any) -> bool:
-    if not isinstance(value, str) or not value.strip():
-        return False
-    key = str(input_name or "").lower()
-    if any(token in key for token in MEDIA_INPUT_KEYS):
-        return True
-    return bool(MEDIA_INPUT_EXT_RE.search(value))
-
-def collect_required_comfy_media(params: Dict[str, Any]) -> List[str]:
-    required = []
-    for node_inputs in (params or {}).values():
-        if not isinstance(node_inputs, dict):
-            continue
-        for input_name, value in node_inputs.items():
-            if is_comfy_input_media_value(input_name, value):
-                required.append(value)
-    return list(dict.fromkeys(required))
-
-def get_best_backend(required_images: List[str] = None):
-    best_backend = COMFYUI_INSTANCES[0]
-    min_queue_size = float('inf')
-    backend_stats = {}
-
-    for addr in COMFYUI_INSTANCES:
-        try:
-            with urllib.request.urlopen(f"http://{addr}/queue", timeout=1) as response:
-                data = json.loads(response.read())
-                remote_load = len(data.get('queue_running', [])) + len(data.get('queue_pending', []))
-                with LOAD_LOCK:
-                    local_load = BACKEND_LOCAL_LOAD.get(addr, 0)
-                effective_load = max(remote_load, local_load)
-                has_images = check_images_exist(addr, required_images)
-                backend_stats[addr] = {"load": effective_load, "has_images": has_images}
-        except Exception as e:
-            print(f"Backend {addr} unreachable: {e}")
-            continue
-
-    if not backend_stats:
-        return COMFYUI_INSTANCES[0]
-
-    for addr, stats in backend_stats.items():
-        load = stats["load"]
-        if load < min_queue_size or (load == min_queue_size and stats.get("has_images") and not backend_stats.get(best_backend, {}).get("has_images")):
-            min_queue_size = load
-            best_backend = addr
-
-    return best_backend
-
-def reserve_best_backend(required_images: List[str] = None):
-    backend_stats = {}
-    for addr in COMFYUI_INSTANCES:
-        try:
-            with urllib.request.urlopen(f"http://{addr}/queue", timeout=1) as response:
-                data = json.loads(response.read())
-                remote_load = len(data.get('queue_running', [])) + len(data.get('queue_pending', []))
-                has_images = check_images_exist(addr, required_images)
-                backend_stats[addr] = {"remote_load": remote_load, "has_images": has_images}
-        except Exception as e:
-            print(f"Backend {addr} unreachable: {e}")
-            continue
-    with LOAD_LOCK:
-        best_backend = COMFYUI_INSTANCES[0]
-        min_load = float('inf')
-        if backend_stats:
-            for addr, stats in backend_stats.items():
-                load = max(stats["remote_load"], BACKEND_LOCAL_LOAD.get(addr, 0))
-                if load < min_load or (load == min_load and stats.get("has_images") and not backend_stats.get(best_backend, {}).get("has_images")):
-                    min_load = load
-                    best_backend = addr
-        BACKEND_LOCAL_LOAD[best_backend] = BACKEND_LOCAL_LOAD.get(best_backend, 0) + 1
-        return best_backend
-
-# --- 辅助工具 ---
-
-def download_image(comfy_address, comfy_url_path, prefix="studio_"):
-    filename = f"{prefix}{uuid.uuid4().hex[:10]}.png"
-    local_path = output_path_for(filename, "output")
-    full_url = f"http://{comfy_address}{comfy_url_path}"
-    try:
-        with urllib.request.urlopen(full_url, timeout=COMFYUI_DOWNLOAD_TIMEOUT) as response, open(local_path, 'wb') as out_file:
-            shutil.copyfileobj(response, out_file)
-        return output_url_for(filename, "output")
-    except Exception as e:
-        print(f"下载图片失败: {e}")
-        if comfy_url_path.startswith("/view"):
-            return comfy_url_path.replace("/view", "/api/view", 1)
-        return full_url
-
-def comfy_output_extension(item):
-    filename = str((item or {}).get("filename") or "")
-    ext = os.path.splitext(filename)[1].lower()
-    if ext in {
-        ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff",
-        ".mp4", ".webm", ".mov", ".m4v", ".avi", ".mkv",
-        ".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac",
-        ".txt", ".json", ".csv", ".srt", ".vtt", ".md",
-    }:
-        return ext
-    fmt = str((item or {}).get("format") or "").lower()
-    if "mpeg" in fmt or "mp3" in fmt:
-        return ".mp3"
-    if "wav" in fmt or "wave" in fmt:
-        return ".wav"
-    if "ogg" in fmt:
-        return ".ogg"
-    if "flac" in fmt:
-        return ".flac"
-    if "text" in fmt or "plain" in fmt:
-        return ".txt"
-    if "json" in fmt:
-        return ".json"
-    if "webm" in fmt:
-        return ".webm"
-    if "quicktime" in fmt or "mov" in fmt:
-        return ".mov"
-    if "mp4" in fmt or "h264" in fmt or "video" in fmt:
-        return ".mp4"
-    return ext or ".bin"
-
-def is_video_output_item(item):
-    ext = comfy_output_extension(item)
-    fmt = str((item or {}).get("format") or "").lower()
-    return ext in {".mp4", ".webm", ".mov", ".m4v", ".avi", ".mkv"} or "video" in fmt
-
-def comfy_output_kind(item):
-    ext = comfy_output_extension(item)
-    fmt = str((item or {}).get("format") or "").lower()
-    if ext in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff"} or "image" in fmt:
-        return "image"
-    if ext in {".mp4", ".webm", ".mov", ".m4v", ".avi", ".mkv"} or "video" in fmt:
-        return "video"
-    if ext in {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac"} or "audio" in fmt or "sound" in fmt:
-        return "audio"
-    if ext in {".txt", ".json", ".csv", ".srt", ".vtt", ".md"} or "text" in fmt or "json" in fmt:
-        return "text"
-    return "file"
-
-def download_comfy_output(comfy_address, item, prefix="studio_"):
-    ext = comfy_output_extension(item)
-    filename = f"{prefix}{uuid.uuid4().hex[:10]}{ext}"
-    local_path = output_path_for(filename, "output")
-    subfolder = urllib.parse.quote(str(item.get("subfolder") or ""))
-    file_type = urllib.parse.quote(str(item.get("type") or "output"))
-    comfy_url_path = f"/view?filename={urllib.parse.quote(str(item['filename']))}&subfolder={subfolder}&type={file_type}"
-    full_url = f"http://{comfy_address}{comfy_url_path}"
-    try:
-        with urllib.request.urlopen(full_url, timeout=COMFYUI_DOWNLOAD_TIMEOUT) as response, open(local_path, 'wb') as out_file:
-            shutil.copyfileobj(response, out_file)
-        return output_url_for(filename, "output")
-    except Exception as e:
-        print(f"下载 ComfyUI 输出失败: {e}")
-        if comfy_url_path.startswith("/view"):
-            return comfy_url_path.replace("/view", "/api/view", 1)
-        return full_url
-
-def save_comfy_text_output(value, prefix="studio_", name=""):
-    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, indent=2)
-    stem = sanitize_export_filename(name or "comfy_text.txt", "comfy_text.txt")
-    _, ext = os.path.splitext(stem)
-    if ext.lower() not in {".txt", ".json", ".csv", ".srt", ".vtt", ".md"}:
-        stem += ".txt"
-    filename = f"{prefix}{uuid.uuid4().hex[:10]}_{stem}"
-    path = output_path_for(filename, "output")
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(text)
-    return output_url_for(filename, "output")
-
-def comfy_text_values_from_output(node_output):
-    values = []
-    text_keys = ("text", "texts", "prompt", "prompts", "string", "strings", "caption", "captions")
-    for key in text_keys:
-        if key not in node_output:
-            continue
-        value = node_output.get(key)
-        items = value if isinstance(value, list) else [value]
-        for item in items:
-            if isinstance(item, dict):
-                text = item.get("text") or item.get("prompt") or item.get("caption") or item.get("value")
-                name = item.get("filename") or item.get("name") or f"{key}.txt"
-            else:
-                text = item
-                name = f"{key}.txt"
-            if text is None:
-                continue
-            text = str(text)
-            if text.strip():
-                values.append((text, name))
-    return values
-
-def collect_comfy_file_items(node_output):
-    items = []
-    for key, value in (node_output or {}).items():
-        if key in {"text", "texts", "prompt", "prompts", "string", "strings", "caption", "captions"}:
-            continue
-        candidates = value if isinstance(value, list) else [value]
-        for item in candidates:
-            if isinstance(item, dict) and item.get("filename"):
-                items.append((key, item))
-    return items
-
-# 纯预览/对比类节点：其输出只用于界面展示（PreviewImage、rgthree 的 Image Comparer 等），
-# 工作流里通常还有 SaveImage 产出真正结果，故有正式产出时应丢弃这些冗余预览/对比图。
-COMFY_PREVIEW_CLASS_HINTS = ("previewimage", "comparer", "imagecompare", "image compare")
-# show/utility 类调试文本节点：ShowText、各种 *Anything、CR Text、MathExpression、note 等，
-# 它们的 ui 文本基本是调试信息，不应混进最终结果。
-COMFY_DEBUG_TEXT_CLASS_HINTS = (
-    "showtext", "show text", "showanything", "show any", "preview any", "previewany",
-    "displaytext", "display text", "display any", "anything everywhere", "convertanything",
-    "easy show", "note", "mathexpression", "cr text", "text multiline", "string function",
-    "debug",
-)
-
-def comfy_class_is_preview(class_type):
-    ct = str(class_type or "").lower()
-    return bool(ct) and any(h in ct for h in COMFY_PREVIEW_CLASS_HINTS)
-
-def comfy_class_is_debug_text(class_type):
-    ct = str(class_type or "").lower()
-    return bool(ct) and any(h in ct for h in COMFY_DEBUG_TEXT_CLASS_HINTS)
-
 def save_to_history(record):
     with HISTORY_LOCK:
         history = []
@@ -2946,13 +2710,6 @@ def save_to_history(record):
         history.insert(0, record)
         with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
             json.dump(history[:5000], f, ensure_ascii=False, indent=4)
-
-def get_comfy_history(comfy_address, prompt_id):
-    try:
-        with urllib.request.urlopen(f"http://{comfy_address}/history/{prompt_id}") as response:
-            return json.loads(response.read())
-    except Exception as e:
-        return {}
 
 def safe_user_id(user_id, request: Request):
     candidate = (user_id or "").strip()
@@ -4824,7 +4581,7 @@ def fetch_remote_media_bytes(url: str, timeout: float = 30.0, max_bytes: int = 2
     parsed = urllib.parse.urlparse(text)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         return None
-    with requests.get(text, stream=True, timeout=timeout, headers={"User-Agent": "ComfyUI-API-Modelscope/1.0"}) as response:
+    with requests.get(text, stream=True, timeout=timeout, headers={"User-Agent": "Infinite-Canvas/1.0"}) as response:
         response.raise_for_status()
         content_type = response.headers.get("content-type") or "application/octet-stream"
         chunks = []
@@ -5676,11 +5433,14 @@ def save_prompt_libraries(data):
         json.dump(data, f, ensure_ascii=False, indent=2)
     return data
 
-def public_prompt_libraries(data=None):
+def public_prompt_libraries(data=None, style_query: str = ""):
     data = normalize_prompt_libraries(data or load_prompt_libraries())
+    libraries = data.get("libraries") or []
+    if not any(lib.get("id") == STYLE_PROMPT_LIBRARY_ID for lib in libraries):
+        libraries = [*libraries, style_prompt_library(style_query)]
     return {
-        "active_library_id": data.get("active_library_id") or (data.get("libraries") or [{}])[0].get("id") or "system",
-        "libraries": data.get("libraries") or [],
+        "active_library_id": data.get("active_library_id") or (libraries or [{}])[0].get("id") or "system",
+        "libraries": libraries,
         "updated_at": data.get("updated_at") or now_ms(),
     }
 
@@ -5742,6 +5502,43 @@ def content_type_for_path(path):
     if ext == ".png":
         return "image/png"
     return "application/octet-stream"
+
+def image_extension_from_content_type(content_type: str, fallback_url: str = "") -> str:
+    content = str(content_type or "").split(";", 1)[0].strip().lower()
+    by_type = {
+        "image/jpeg": ".jpg",
+        "image/jpg": ".jpg",
+        "image/png": ".png",
+        "image/webp": ".webp",
+        "image/gif": ".gif",
+    }
+    if content in by_type:
+        return by_type[content]
+    ext = os.path.splitext(urllib.parse.urlparse(str(fallback_url or "")).path)[1].lower()
+    return ext if ext in {".jpg", ".jpeg", ".png", ".webp", ".gif"} else ".jpg"
+
+def edit_reference_file_from_ref(ref: Dict[str, Any], temp_paths: List[str]) -> Optional[str]:
+    url = str((ref or {}).get("url") or "").strip()
+    path = output_file_from_url(url)
+    if path:
+        return path
+    if not url.startswith(("http://", "https://")):
+        return None
+    remote = fetch_remote_media_bytes(url, timeout=30.0, max_bytes=24 * 1024 * 1024)
+    if not remote:
+        return None
+    content, content_type = remote
+    if not str(content_type or "").lower().startswith("image/"):
+        return None
+    fd, temp_path = tempfile.mkstemp(
+        prefix="remote_ref_",
+        suffix=image_extension_from_content_type(content_type, url),
+        dir=OUTPUT_INPUT_DIR,
+    )
+    with os.fdopen(fd, "wb") as f:
+        f.write(content)
+    temp_paths.append(temp_path)
+    return temp_path
 
 def is_image_reference_value(value):
     if not isinstance(value, str) or not value:
@@ -7036,7 +6833,7 @@ async def save_remote_video_to_output(url, prefix="video_", category="output"):
     try:
         timeout = httpx.Timeout(connect=20.0, read=VIDEO_POLL_TIMEOUT, write=60.0, pool=20.0)
         headers = {
-            "User-Agent": "ComfyUI-API-Modelscope/1.0",
+            "User-Agent": "Infinite-Canvas/1.0",
             "Accept": "video/*,application/octet-stream,*/*;q=0.8",
         }
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers=headers) as client:
@@ -8616,11 +8413,12 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
             # GPT-Image-2 参考图不能走 /images/generations JSON，否则部分平台会忽略原图或报 Images API unsupported。
             files = []
             opened = []
+            temp_paths = []
             edit_failed_status = None
             edit_failed_text = ""
             try:
                 for ref in image_refs[:ONLINE_IMAGE_REFERENCE_MAX]:
-                    path = output_file_from_url(ref.get("url", ""))
+                    path = edit_reference_file_from_ref(ref, temp_paths)
                     if not path:
                         continue
                     fh = open(path, "rb")
@@ -8645,6 +8443,11 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
             finally:
                 for fh in opened:
                     fh.close()
+                for path in temp_paths:
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
             # 2) edits 失败 → 非 GPT-Image-2 可回退到 /images/generations + JSON image:[urls/base64]（grsai 风格）
             if response is None:
                 if is_gpt2:
@@ -8922,26 +8725,13 @@ async def index():
 
 @app.get("/api/view")
 def view_image(filename: str, type: str = "input", subfolder: str = ""):
-    # 先按原逻辑去各 ComfyUI 后端找
-    for addr in COMFYUI_INSTANCES:
-        try:
-            url = f"http://{addr}/view"
-            params = {"filename": filename, "type": type, "subfolder": subfolder}
-            r = requests.get(url, params=params, timeout=1)
-            if r.status_code == 200:
-                return Response(content=r.content, media_type=r.headers.get('Content-Type'))
-        except Exception:
-            continue
-    # 后端都拿不到时回退本地 assets/<input|output>/
-    # 适用场景：画布通过 /api/ai/upload 把参考图直接落到本地 assets/input/，
-    # 但 ComfyUI 的 input 可能因为重启/清理而丢失，导致 enhance/klein 等页面预览对比图 404
     if not subfolder and type in ("input", "output"):
         safe_name = os.path.basename(filename or "")
         if safe_name:
             local_path = output_path_for(safe_name, "input" if type == "input" else "output")
             if os.path.isfile(local_path):
                 return FileResponse(local_path, media_type=content_type_for_path(local_path))
-    raise HTTPException(status_code=404, detail="Image not found on any available backend")
+    raise HTTPException(status_code=404, detail="File not found")
 
 @app.get("/api/download-output")
 def download_output(request: Request, url: str, name: str = "", inline: bool = False):
@@ -8956,7 +8746,7 @@ def download_output(request: Request, url: str, name: str = "", inline: bool = F
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         raise HTTPException(status_code=400, detail="无效的下载地址")
     try:
-        upstream_headers = {"User-Agent": "ComfyUI-API-Modelscope/1.0"}
+        upstream_headers = {"User-Agent": "Infinite-Canvas/1.0"}
         range_header = request.headers.get("range")
         if range_header:
             upstream_headers["Range"] = range_header
@@ -8989,34 +8779,6 @@ def download_output(request: Request, url: str, name: str = "", inline: bool = F
             upstream.close()
 
     return StreamingResponse(stream_remote(), media_type=content_type, headers=headers, status_code=upstream.status_code)
-
-@app.post("/api/upload")
-async def upload_image(files: List[UploadFile] = File(...)):
-    uploaded_files = []
-    files_content = []
-    for file in files:
-        content = await file.read()
-        files_content.append((file, content))
-
-    for file, content in files_content:
-        success_count = 0
-        last_result = None
-        for addr in COMFYUI_INSTANCES:
-            try:
-                files_data = {'image': (file.filename, content, file.content_type)}
-                response = requests.post(f"http://{addr}/upload/image", files=files_data, timeout=5)
-                if response.status_code == 200:
-                    last_result = response.json()
-                    success_count += 1
-            except Exception as e:
-                print(f"Upload error for {addr}: {e}")
-
-        if success_count > 0 and last_result:
-            uploaded_files.append({"comfy_name": last_result.get("name", file.filename)})
-        else:
-            raise HTTPException(status_code=500, detail="Failed to upload to any backend")
-
-    return {"files": uploaded_files}
 
 @app.post("/api/ai/upload")
 async def upload_ai_reference(files: List[UploadFile] = File(...)):
@@ -9093,36 +8855,6 @@ async def upload_ai_base64(payload: Base64UploadRequest):
     with open(path, "wb") as f:
         f.write(content)
     return {"files": [{"url": output_url_for(filename, "input"), "name": payload.name or filename, "kind": kind}]}
-
-@app.post("/api/comfyui/upload-base64")
-async def upload_comfyui_base64(payload: Base64UploadRequest):
-    """base64 方式把图片传到 ComfyUI 各后端的 input 目录，返回 comfy 用文件名（供 UXP 做 ComfyUI 图生图）。"""
-    raw = (payload.data or "").strip()
-    ct = (payload.content_type or "").split(";", 1)[0].strip().lower()
-    if raw.startswith("data:"):
-        header, _, raw = raw.partition(",")
-        if not ct:
-            ct = header[5:].split(";", 1)[0].strip().lower()
-    try:
-        content = base64.b64decode(raw, validate=False)
-    except Exception:
-        raise HTTPException(status_code=400, detail="数据无法解码")
-    if not content:
-        raise HTTPException(status_code=400, detail="内容为空")
-    _, ext = _local_upload_kind_ext(payload.name or "", ct or "image/png")
-    filename = f"dx_{uuid.uuid4().hex[:12]}{ext or '.png'}"
-    comfy_name = None
-    for addr in COMFYUI_INSTANCES:
-        try:
-            resp = requests.post(f"http://{addr}/upload/image",
-                                 files={'image': (filename, content, ct or 'image/png')}, timeout=10)
-            if resp.status_code == 200:
-                comfy_name = resp.json().get("name", filename)
-        except Exception as exc:
-            print(f"ComfyUI base64 upload error for {addr}: {exc}")
-    if not comfy_name:
-        raise HTTPException(status_code=502, detail="上传到 ComfyUI 失败")
-    return {"name": comfy_name}
 
 def _local_upload_kind_ext(filename, content_type):
     image_exts = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
@@ -10217,7 +9949,6 @@ async def ai_config():
         "chat_models": CHAT_MODELS,
         "image_models": IMAGE_MODELS,
         "video_models": VIDEO_MODELS,
-        "comfy_instances": COMFYUI_INSTANCES,
         "api_providers": providers,
         "has_api_key": bool(AI_API_KEY),
         "ms_chat_models": MODELSCOPE_CHAT_MODELS,
@@ -11084,58 +10815,6 @@ async def get_canvas_image_task(task_id: str):
         task = dict(CANVAS_TASKS.get(task_id) or {})
     if not task:
         raise HTTPException(status_code=404, detail="画布任务不存在，可能服务已重启或任务已过期")
-    return task
-
-async def run_canvas_comfy_task(task_id: str, payload: GenerateRequest):
-    with CANVAS_TASK_LOCK:
-        if task_id in CANVAS_TASKS:
-            CANVAS_TASKS[task_id]["status"] = "running"
-            CANVAS_TASKS[task_id]["updated_at"] = time.time()
-    try:
-        result = await asyncio.to_thread(generate, payload)
-        if isinstance(result, dict) and result.get("error"):
-            raise RuntimeError(str(result.get("error") or "ComfyUI 生成失败"))
-        with CANVAS_TASK_LOCK:
-            CANVAS_TASKS[task_id].update({
-                "status": "succeeded",
-                "result": result,
-                "error": "",
-                "updated_at": time.time(),
-            })
-    except Exception as exc:
-        detail = getattr(exc, "detail", None) or str(exc)
-        status_code = getattr(exc, "status_code", 500)
-        with CANVAS_TASK_LOCK:
-            CANVAS_TASKS[task_id].update({
-                "status": "failed",
-                "error": str(detail),
-                "status_code": status_code,
-                "updated_at": time.time(),
-            })
-
-@app.post("/api/canvas-comfy-tasks")
-async def create_canvas_comfy_task(payload: GenerateRequest):
-    task_id = f"canvas_comfy_{uuid.uuid4().hex}"
-    with CANVAS_TASK_LOCK:
-        CANVAS_TASKS[task_id] = {
-            "id": task_id,
-            "type": "comfy",
-            "status": "queued",
-            "created_at": time.time(),
-            "updated_at": time.time(),
-            "result": None,
-            "error": "",
-            "workflow_json": payload.workflow_json,
-        }
-    asyncio.create_task(run_canvas_comfy_task(task_id, payload))
-    return {"task_id": task_id, "status": "queued"}
-
-@app.get("/api/canvas-comfy-tasks/{task_id}")
-async def get_canvas_comfy_task(task_id: str):
-    with CANVAS_TASK_LOCK:
-        task = dict(CANVAS_TASKS.get(task_id) or {})
-    if not task:
-        raise HTTPException(status_code=404, detail="ComfyUI 任务不存在，可能服务已重启或任务已过期")
     return task
 
 # --- 图像生成参数 schema（供客户端动态渲染参数表单，避免把参数写死在前端） ---
@@ -12334,6 +12013,641 @@ async def smart_canvas_prompt_templates():
         print(f"读取提示词模板失败: {e}")
         return {"templates": []}
 
+STYLE_LIBRARY_DIR = os.getenv(
+    "STYLE_LIBRARY_DIR",
+    os.path.join(os.path.expanduser("~"), ".codex", "skills", "gpt-image-2-style-library"),
+)
+STYLE_PROMPT_LIBRARY_ID = "gpt_image_2_style_library"
+STYLE_PROMPT_LIBRARY_DEFAULT_QUERY = "commercial product portrait editorial cinematic beauty poster design"
+STYLE_PROMPT_LIBRARY_CATEGORIES = [
+    {"id": "style", "name": "\u98ce\u683c"},
+    {"id": "scene", "name": "\u573a\u666f"},
+    {"id": "product", "name": "\u4ea7\u54c1"},
+    {"id": "portrait", "name": "\u4eba\u50cf"},
+    {"id": "commerce", "name": "\u5546\u4e1a"},
+]
+
+STYLE_MATCH_SYSTEM_PROMPT = """
+You are a visual style matching assistant for an infinite canvas prompt library.
+Analyze the reference image and translate it into a reusable image generation prompt.
+Return only compact JSON with these keys:
+{
+  "summary": "short Chinese summary",
+  "search_query": "concise English keywords for searching a style case library",
+  "reference_summary": {
+    "product_truth": "what product/subject facts must stay true",
+    "style_reference": "what visual style, mood and campaign type the image provides",
+    "key_constraints": ["non-copy and preservation constraints"]
+  },
+  "layout_lock_prompt": "English prompt fragment that strictly preserves the reference image composition skeleton, aspect ratio, camera angle, subject scale hierarchy, foreground/background relationship, object placement, pose/interaction geometry, negative space, and advertising layout",
+  "positive_prompt": "clean English generation prompt focused on composition, lighting, camera, palette, material and commercial finish",
+  "negative_prompt": "short avoid list",
+  "style_fingerprint": {
+    "subject": "",
+    "category": "",
+    "camera": {
+      "angle": "",
+      "lens_feel": "",
+      "framing": "",
+      "foreground_background_relation": ""
+    },
+    "composition": {
+      "hero_object": "",
+      "character_relation": "",
+      "interaction": "",
+      "negative_space": "",
+      "main_lines": ""
+    },
+    "palette": {
+      "primary": "",
+      "secondary": "",
+      "accent": ""
+    },
+    "lighting": {
+      "type": "",
+      "contrast": "",
+      "highlights": "",
+      "skin_treatment": ""
+    },
+    "material": {
+      "product_surface": "",
+      "texture_or_props": ""
+    },
+    "mood": "",
+    "finish": "",
+    "avoid": ""
+  },
+  "shared_style_anchor": {
+    "palette": "",
+    "lighting": "",
+    "material": "",
+    "product_truth": "",
+    "model_styling": "",
+    "commercial_finish": "",
+    "cleanliness_level": "",
+    "season_or_atmosphere": ""
+  },
+  "generation_guidance": "what downstream image generation should preserve and what it may vary",
+  "variant_plan": {
+    "strict_reference": "how to vary while preserving the skeleton",
+    "creative_variation": "how to vary when the user asks for different angles/styles"
+  },
+  "negative_constraints": ["do not copy brand text/logo/watermark", "avoid unrelated props or wrong product hierarchy"],
+  "tags": ["english", "style", "keywords"]
+}
+Do not copy logos, watermarks, brand text, signatures, or exact copyrighted artwork.
+Do not reduce the image to a generic scene caption. Identify the structural anchors that make the image recognizable.
+The layout_lock_prompt must be explicit enough for image-to-image generation and should preserve poster/layout geometry before changing details.
+Use the case library only as supplement. Strong reference image structure beats generic search matches.
+For multi-image series, keep shared_style_anchor stable and describe what may change in variant_plan.
+Keep search_query broad and semantic, 6 to 14 English words.
+""".strip()
+
+def style_library_search_script() -> str:
+    script = os.path.join(STYLE_LIBRARY_DIR, "scripts", "search_all.py")
+    if not os.path.isfile(script):
+        raise HTTPException(status_code=500, detail=f"未找到风格库检索脚本：{script}")
+    return script
+
+def expand_style_library_query(query: str) -> str:
+    text = str(query or "").strip()
+    if not text:
+        return ""
+    expansions = {
+        "\u7535\u5546": "ecommerce commercial product",
+        "\u4e3b\u56fe": "main image hero product",
+        "\u4ea7\u54c1": "product commercial still life",
+        "\u4eba\u50cf": "portrait editorial fashion",
+        "\u6d77\u62a5": "poster campaign key visual",
+        "\u7f8e\u5986": "beauty cosmetics skincare",
+        "\u62a4\u80a4": "skincare clean beauty",
+        "\u670d\u88c5": "fashion apparel editorial",
+        "\u98df\u54c1": "food commercial photography",
+        "\u5efa\u7b51": "architecture interior space",
+        "\u5ba4\u5185": "interior design room",
+        "\u7535\u5f71": "cinematic film lighting",
+        "\u5149\u5f71": "lighting shadow cinematic",
+        "\u63d2\u753b": "illustration graphic art",
+    }
+    extra = [value for key, value in expansions.items() if key in text]
+    return re.sub(r"\s+", " ", " ".join([text, *extra]).strip())[:800]
+
+def run_style_library_search(query: str, limit: int = 6, full_prompt: bool = False, language: str = "zh") -> List[Dict[str, Any]]:
+    clean_query = expand_style_library_query(query)
+    if not clean_query:
+        return []
+    limit = max(1, min(12, int(limit or 6)))
+    cmd = [
+        sys.executable,
+        style_library_search_script(),
+        clean_query,
+        "--limit",
+        str(limit),
+        "--json",
+    ]
+    if language:
+        cmd.extend(["--language", re.sub(r"[^A-Za-z_-]+", "", str(language))[:12] or "zh"])
+    if full_prompt:
+        cmd.append("--full-prompt")
+    env = os.environ.copy()
+    env.setdefault("PYTHONUTF8", "1")
+    env["PYTHONIOENCODING"] = "utf-8"
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=STYLE_LIBRARY_DIR,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+            env=env,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(status_code=504, detail="风格库检索超时，请换更短的关键词重试") from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"无法启动风格库检索：{exc}") from exc
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "风格库检索失败").strip()[:800]
+        raise HTTPException(status_code=500, detail=detail)
+    try:
+        data = json.loads(proc.stdout or "[]")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"风格库返回内容不是有效 JSON：{exc}") from exc
+    return data if isinstance(data, list) else []
+
+def style_case_template_category(case: Dict[str, Any]) -> str:
+    text = " ".join([
+        str(case.get("category") or ""),
+        " ".join(str(item) for item in (case.get("style_tags") or [])),
+        " ".join(str(item) for item in (case.get("scene_tags") or [])),
+        str(case.get("title") or ""),
+    ]).lower()
+    if any(token in text for token in ["product", "commerce", "ecommerce", "skincare", "beauty", "cosmetic"]):
+        return "product"
+    if any(token in text for token in ["portrait", "fashion", "character", "model"]):
+        return "portrait"
+    if any(token in text for token in ["poster", "campaign", "kv", "advertising", "commercial"]):
+        return "commerce"
+    if any(token in text for token in ["scene", "interior", "architecture", "landscape"]):
+        return "scene"
+    return "style"
+
+STYLE_TITLE_REPLACEMENTS = [
+    (r"\be[- ]?commerce main image\b", "\u7535\u5546\u4e3b\u56fe"),
+    (r"\bproduct tvc storyboard\b", "\u4ea7\u54c1\u5e7f\u544a\u5206\u955c"),
+    (r"\bad storyboard\b", "\u5e7f\u544a\u5206\u955c"),
+    (r"\b9[- ]?panel\b", "\u4e5d\u5bab\u683c"),
+    (r"\b9[- ]?cell\b", "\u4e5d\u5bab\u683c"),
+    (r"\bhero image\b", "\u4e3b\u89c6\u89c9\u56fe"),
+    (r"\bcinematic street photography portrait\b", "\u7535\u5f71\u611f\u8857\u5934\u6444\u5f71\u4eba\u50cf"),
+    (r"\bstreet photography\b", "\u8857\u5934\u6444\u5f71"),
+    (r"\bjapanese film aesthetic\b", "\u65e5\u7cfb\u7535\u5f71\u7f8e\u5b66"),
+    (r"\bidentity reference\b", "\u5f62\u8c61\u53c2\u8003"),
+    (r"\bfashion portrait\b", "\u65f6\u5c1a\u4eba\u50cf"),
+    (r"\bproduct marketing\b", "\u4ea7\u54c1\u8425\u9500"),
+    (r"\bluxury skincare\b", "\u5962\u534e\u62a4\u80a4"),
+    (r"\bbeverage commercial\b", "\u996e\u6599\u5546\u4e1a\u5e7f\u544a"),
+    (r"\bcommercial photography\b", "\u5546\u4e1a\u6444\u5f71"),
+    (r"\bsocial media post\b", "\u793e\u4ea4\u5a92\u4f53\u56fe"),
+    (r"\byoutube thumbnail\b", "YouTube \u5c01\u9762"),
+    (r"\bcinematic\b", "\u7535\u5f71\u611f"),
+    (r"\bstreet\b", "\u8857\u5934"),
+    (r"\bphotography\b", "\u6444\u5f71"),
+    (r"\bportrait\b", "\u4eba\u50cf"),
+    (r"\bposter\b", "\u6d77\u62a5"),
+    (r"\bproduct\b", "\u4ea7\u54c1"),
+    (r"\bcommercial\b", "\u5546\u4e1a\u5e7f\u544a"),
+    (r"\badvertising\b", "\u5e7f\u544a"),
+    (r"\bmarketing\b", "\u8425\u9500"),
+    (r"\bfashion\b", "\u65f6\u5c1a"),
+    (r"\beditorial\b", "\u6742\u5fd7\u611f"),
+    (r"\bphotorealistic\b", "\u5199\u5b9e"),
+    (r"\billustration\b", "\u63d2\u753b"),
+    (r"\banime\b", "\u52a8\u6f2b"),
+    (r"\bminimal\b", "\u6781\u7b80"),
+    (r"\bretro\b", "\u590d\u53e4"),
+    (r"\bskincare\b", "\u62a4\u80a4"),
+    (r"\bbeauty\b", "\u7f8e\u5986"),
+    (r"\bburger\b", "\u6c49\u5821"),
+    (r"\bfood\b", "\u98df\u54c1"),
+    (r"\bapp\b", "\u5e94\u7528"),
+    (r"\bad\b", "\u5e7f\u544a"),
+    (r"\bboard\b", "\u677f\u5f0f"),
+    (r"\breference\b", "\u53c2\u8003"),
+    (r"\baesthetic\b", "\u7f8e\u5b66"),
+]
+
+STYLE_TAG_ZH = {
+    "3d render": "3D\u6e32\u67d3",
+    "cinematic": "\u7535\u5f71\u611f",
+    "editorial": "\u6742\u5fd7\u611f",
+    "illustration": "\u63d2\u753b",
+    "photorealistic": "\u5199\u5b9e",
+    "minimal": "\u6781\u7b80",
+    "retro": "\u590d\u53e4",
+    "sci-fi": "\u79d1\u5e7b",
+    "studio": "\u68da\u62cd",
+    "commercial": "\u5546\u4e1a\u5e7f\u544a",
+    "lifestyle": "\u751f\u6d3b\u65b9\u5f0f",
+    "interface": "\u754c\u9762",
+    "map": "\u573a\u666f\u5730\u56fe",
+    "exploded view": "\u7206\u70b8\u5206\u89e3\u56fe",
+}
+
+STYLE_CATEGORY_ZH = {
+    "Products & Commerce": "\u4ea7\u54c1\u4e0e\u5546\u4e1a",
+    "Portraits": "\u4eba\u50cf",
+    "Photography & Portraits": "\u6444\u5f71\u4e0e\u4eba\u50cf",
+    "Posters & Typography": "\u6d77\u62a5\u4e0e\u5b57\u4f53\u6392\u7248",
+    "Illustration & Characters": "\u63d2\u753b\u4e0e\u89d2\u8272",
+}
+
+STYLE_CLEANUP_ZH = {
+    "licensed_name_or_brand": "\u907f\u514d\u4f7f\u7528\u672a\u6388\u6743\u54c1\u724c\u6216\u4eba\u540d",
+    "watermark_or_signature": "\u4e0d\u8981\u6c34\u5370\u3001\u7b7e\u540d",
+    "unsupported_quality_claim": "\u907f\u514d\u7a7a\u6cdb\u7684\u201c\u83b7\u5956\u7ea7/\u6700\u4f73\u8d28\u91cf\u201d\u7b49\u8bcd",
+}
+
+def has_readable_chinese(text: str) -> bool:
+    raw = str(text or "")
+    cjk_count = len(re.findall(r"[\u3400-\u9fff]", raw))
+    latin_words = len(re.findall(r"\b[A-Za-z]{3,}\b", raw))
+    return cjk_count >= 24 and cjk_count >= max(12, latin_words * 0.45)
+
+def localize_style_text(text: str) -> str:
+    value = str(text or "").strip()
+    if not value:
+        return ""
+    if re.search(r"[\u3400-\u9fff]", value):
+        return value
+    localized = value
+    for pattern, replacement in STYLE_TITLE_REPLACEMENTS:
+        localized = re.sub(pattern, replacement, localized, flags=re.I)
+    localized = re.sub(r"\b(?:and|or|with|for|plus|the|a|an|of|to|from|in|on)\b", " ", localized, flags=re.I)
+    localized = re.sub(r"\b[A-Za-z][A-Za-z0-9_-]*\b", " ", localized)
+    localized = re.sub(r"[-_/|]+", " ", localized)
+    localized = re.sub(r"\s+", " ", localized).strip(" -_:/|")
+    return localized or "\u98ce\u683c\u6848\u4f8b"
+
+def localize_style_tag(tag: str) -> str:
+    raw = str(tag or "").strip()
+    if not raw:
+        return ""
+    return STYLE_TAG_ZH.get(raw.lower(), localize_style_text(raw))
+
+def localize_style_category_name(category: str) -> str:
+    raw = str(category or "").strip()
+    if not raw:
+        return "\u98ce\u683c\u6848\u4f8b"
+    return STYLE_CATEGORY_ZH.get(raw, localize_style_text(raw))
+
+def style_case_to_chinese_prompt(case: Dict[str, Any], title: str, category: str, tags: List[str]) -> str:
+    haystack = " ".join([
+        str(case.get("title") or ""),
+        str(case.get("category") or ""),
+        " ".join(str(item) for item in (case.get("style_tags") or [])),
+        " ".join(str(item) for item in (case.get("scene_tags") or [])),
+        str(case.get("prompt") or "")[:1600],
+    ]).lower()
+    lines = [
+        f"\u751f\u6210\u4e00\u5f20\u300c{title}\u300d\u98ce\u683c\u7684\u56fe\u7247\u3002",
+        f"\u7c7b\u578b\uff1a{category}\u3002",
+    ]
+    if tags:
+        tag_text = " \u3001".join(tags[:10])
+        lines.append(f"\u98ce\u683c\u5173\u952e\u8bcd\uff1a{tag_text}\u3002")
+    details = []
+    if any(k in haystack for k in ["product", "ecommerce", "commerce", "commercial", "skincare", "cosmetic"]):
+        details.append("\u4ea7\u54c1\u8981\u4f5c\u4e3a\u89c6\u89c9\u4e2d\u5fc3\uff0c\u54c1\u724c\u611f\u6e05\u6670\uff0c\u9002\u5408\u7535\u5546\u4e3b\u56fe\u6216\u5546\u4e1a\u5e7f\u544a\u3002")
+    if any(k in haystack for k in ["portrait", "model", "face", "fashion"]):
+        details.append("\u7a81\u51fa\u4eba\u7269\u6c14\u8d28\u3001\u59ff\u6001\u548c\u670d\u9970\u5c42\u6b21\uff0c\u4eba\u50cf\u8868\u73b0\u8981\u81ea\u7136\u3001\u9ad8\u7ea7\u3002")
+    if any(k in haystack for k in ["poster", "typography", "headline", "layout", "kv"]):
+        details.append("\u7248\u5f0f\u8981\u6709\u660e\u786e\u4e3b\u6b21\uff0c\u7559\u51fa\u6587\u5b57\u4e0e\u4e3b\u89c6\u89c9\u7a7a\u95f4\uff0c\u6d77\u62a5\u611f\u5f3a\u3002")
+    if any(k in haystack for k in ["cinematic", "film", "low-key", "rim light"]):
+        details.append("\u4f7f\u7528\u7535\u5f71\u611f\u5149\u5f71\uff0c\u5bf9\u6bd4\u660e\u786e\uff0c\u6709\u8f6e\u5ed3\u5149\u548c\u6c1b\u56f4\u5c42\u6b21\u3002")
+    if any(k in haystack for k in ["street", "urban", "city"]):
+        details.append("\u573a\u666f\u53ef\u4ee5\u5e26\u6709\u8857\u5934\u3001\u57ce\u5e02\u6216\u751f\u6d3b\u5316\u80cc\u666f\uff0c\u4f46\u4e0d\u8981\u55a7\u5bbe\u593a\u4e3b\u3002")
+    if any(k in haystack for k in ["photorealistic", "realistic", "photo"]):
+        details.append("\u8d28\u611f\u4ee5\u7167\u7247\u7ea7\u5199\u5b9e\u4e3a\u4e3b\uff0c\u7ec6\u8282\u6e05\u6670\uff0c\u6750\u8d28\u548c\u53cd\u5149\u8981\u771f\u5b9e\u3002")
+    if any(k in haystack for k in ["illustration", "anime", "graphic"]):
+        details.append("\u53ef\u4ee5\u4f7f\u7528\u63d2\u753b\u6216\u52a8\u6f2b\u5316\u8868\u73b0\uff0c\u4f46\u8981\u4fdd\u6301\u5546\u4e1a\u6210\u7247\u7684\u5b8c\u6210\u5ea6\u3002")
+    if any(k in haystack for k in ["close-up", "macro"]):
+        details.append("\u6784\u56fe\u53ef\u4ee5\u504f\u8fd1\u666f\u6216\u7279\u5199\uff0c\u8ba9\u4e3b\u4f53\u66f4\u6709\u51b2\u51fb\u529b\u3002")
+    if any(k in haystack for k in ["low angle", "wide-angle", "wide angle"]):
+        details.append("\u53ef\u7528\u4f4e\u673a\u4f4d\u6216\u5e7f\u89d2\u900f\u89c6\u589e\u5f3a\u5f20\u529b\u3002")
+    lines.append("\u753b\u9762\u8981\u6c42\uff1a\n" + "\n".join(f"- {item}" for item in (details or ["\u4e3b\u4f53\u6e05\u6670\uff0c\u6784\u56fe\u5b8c\u6574\uff0c\u5149\u5f71\u7edf\u4e00\uff0c\u5546\u4e1a\u7ea7\u5b8c\u6210\u5ea6\u3002"])))
+    lines.append("\u907f\u514d\uff1a\u4e0d\u8981\u590d\u5236\u73b0\u6709\u54c1\u724c logo\u3001\u6c34\u5370\u3001\u7b7e\u540d\u6216\u65e0\u5173\u82f1\u6587\u4e71\u7801\u3002")
+    return "\n\n".join(lines)
+
+def style_case_to_prompt_template(case: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    prompt = str(case.get("prompt") or "").strip()
+    if not prompt:
+        return None
+    raw_id = str(case.get("case_id") or case.get("id") or uuid.uuid4().hex[:12])
+    item_id = re.sub(r"[^A-Za-z0-9_-]+", "_", raw_id)[:52] or uuid.uuid4().hex[:12]
+    title = localize_style_text(str(case.get("title") or raw_id).strip() or raw_id)
+    raw_tags = [
+        *[str(item) for item in (case.get("style_tags") or []) if item],
+        *[str(item) for item in (case.get("scene_tags") or []) if item],
+    ]
+    tags = [item for item in (localize_style_tag(tag) for tag in raw_tags) if item]
+    category_name = localize_style_category_name(str(case.get("category") or "").strip())
+    positive = prompt if has_readable_chinese(prompt) else style_case_to_chinese_prompt(case, title, category_name, tags)
+    scene_parts = [
+        category_name,
+        ", ".join(tags[:8]),
+        f"score {case.get('score')}" if case.get("score") is not None else "",
+    ]
+    source_zh = {
+        "curated": "\u5185\u7f6e\u7cbe\u9009",
+        "youmind_public": "YouMind \u516c\u5f00\u6848\u4f8b",
+        "supplemental": "\u8865\u5145\u6848\u4f8b",
+    }.get(str(case.get("source") or ""), str(case.get("source") or ""))
+    dataset_zh = {
+        "curated": "\u7cbe\u9009\u5e93",
+        "youmind_public": "YouMind \u516c\u5f00\u5e93",
+        "awesome_readme": "Awesome \u6848\u4f8b\u5e93",
+        "opennana": "OpenNana \u6848\u4f8b\u5e93",
+        "evolink_api_prompts": "EvoLink \u63d0\u793a\u8bcd\u5e93",
+        "evolink_web_gallery": "EvoLink \u753b\u5eca",
+    }.get(str(case.get("dataset") or ""), str(case.get("dataset") or ""))
+    params = {
+        "\u6848\u4f8b\u7f16\u53f7": raw_id,
+        "\u6765\u6e90": source_zh,
+        "\u6570\u636e\u96c6": dataset_zh,
+    }
+    param_labels = {
+        "preview_image": "\u9884\u89c8\u56fe",
+        "reference_image": "\u53c2\u8003\u56fe",
+        "gallery_url": "\u6848\u4f8b\u94fe\u63a5",
+        "source_url": "\u6765\u6e90\u94fe\u63a5",
+    }
+    for key, label in param_labels.items():
+        value = str(case.get(key) or "").strip()
+        if value:
+            params[label] = value
+    cleanup = [
+        STYLE_CLEANUP_ZH.get(str(item), str(item))
+        for item in (case.get("cleanup_flags") or [])
+        if item
+    ]
+    return {
+        "id": f"style_{item_id}",
+        "name": title[:80],
+        "category": style_case_template_category(case),
+        "scene": " | ".join(part for part in scene_parts if part)[:500],
+        "positive": positive,
+        "negative": ", ".join(cleanup),
+        "params": params,
+        "created_at": 0,
+        "updated_at": 0,
+    }
+
+def style_prompt_library(query: str = "", limit: int = 12) -> Dict[str, Any]:
+    clean_query = str(query or "").strip() or STYLE_PROMPT_LIBRARY_DEFAULT_QUERY
+    try:
+        cases = run_style_library_search(clean_query, limit, True)
+    except HTTPException:
+        if query:
+            raise
+        cases = []
+    items = []
+    for case in cases:
+        if isinstance(case, dict):
+            item = style_case_to_prompt_template(case)
+            if item:
+                items.append(item)
+    return {
+        "id": STYLE_PROMPT_LIBRARY_ID,
+        "name": "GPT-Image2 \u98ce\u683c\u5e93",
+        "type": "prompt",
+        "readonly": True,
+        "dynamic": True,
+        "source": STYLE_LIBRARY_DIR,
+        "categories": STYLE_PROMPT_LIBRARY_CATEGORIES,
+        "items": items,
+    }
+
+def parse_style_json(text: str) -> Dict[str, Any]:
+    raw = str(text or "").strip()
+    if not raw:
+        return {}
+    fence = re.search(r"```(?:json)?\s*(.*?)```", raw, re.S | re.I)
+    if fence:
+        raw = fence.group(1).strip()
+    if not raw.startswith("{"):
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start >= 0 and end > start:
+            raw = raw[start:end + 1]
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+def flatten_style_terms(value: Any, out: List[str]) -> None:
+    if value is None:
+        return
+    if isinstance(value, dict):
+        for item in value.values():
+            flatten_style_terms(item, out)
+        return
+    if isinstance(value, list):
+        for item in value:
+            flatten_style_terms(item, out)
+        return
+    text = re.sub(r"\s+", " ", str(value or "").strip())
+    if text and len(text) <= 90:
+        out.append(text)
+
+def style_search_query_from_analysis(analysis: Dict[str, Any]) -> str:
+    query = str(analysis.get("search_query") or analysis.get("query") or "").strip()
+    if query:
+        return re.sub(r"\s+", " ", query)[:800]
+    terms: List[str] = []
+    flatten_style_terms(analysis.get("tags"), terms)
+    flatten_style_terms(analysis.get("style_fingerprint"), terms)
+    flatten_style_terms(analysis.get("reference_summary"), terms)
+    flatten_style_terms(analysis.get("shared_style_anchor"), terms)
+    flatten_style_terms(analysis.get("summary"), terms)
+    joined = " ".join(dict.fromkeys(terms))
+    return re.sub(r"\s+", " ", joined).strip()[:800] or "commercial editorial product photography"
+
+def compact_style_value(value: Any, max_len: int = 900) -> str:
+    parts: List[str] = []
+
+    def walk(item: Any, prefix: str = "") -> None:
+        if item is None:
+            return
+        if isinstance(item, dict):
+            for key, sub in item.items():
+                label = f"{prefix}.{key}" if prefix else str(key)
+                walk(sub, label)
+            return
+        if isinstance(item, list):
+            for idx, sub in enumerate(item[:12]):
+                walk(sub, prefix)
+            return
+        text = re.sub(r"\s+", " ", str(item or "").strip())
+        if not text:
+            return
+        parts.append(f"{prefix}: {text}" if prefix else text)
+
+    walk(value)
+    compact = "; ".join(dict.fromkeys(parts))
+    return compact[:max_len].strip()
+
+def style_analysis_section(title: str, value: Any, max_len: int = 900) -> str:
+    text = compact_style_value(value, max_len=max_len)
+    return f"{title}:\n{text}" if text else ""
+
+def style_case_support_section(cases: List[Dict[str, Any]]) -> str:
+    usable = []
+    for case in (cases or [])[:3]:
+        title = str(case.get("title") or case.get("case_id") or "").strip()
+        category = str(case.get("category") or "").strip()
+        tags = ", ".join([str(item) for item in [*(case.get("style_tags") or []), *(case.get("scene_tags") or [])] if item][:8])
+        if title or category or tags:
+            usable.append(" / ".join(part for part in [title, category, tags] if part))
+    if not usable:
+        return ""
+    return (
+        "Case-library support (secondary only):\n"
+        + "\n".join(f"- {item}" for item in usable)
+        + "\nUse these case matches only to improve commercial finish, material rendering, skin/product retouching, and advertising polish. "
+          "Do not let case matches override the primary reference image's camera angle, composition skeleton, subject scale hierarchy, foreground product dominance, pose geometry, background, or color world."
+    )
+
+def style_reference_lock_prompt(analysis: Dict[str, Any]) -> str:
+    fp = analysis.get("style_fingerprint") if isinstance(analysis.get("style_fingerprint"), dict) else {}
+    anchors = []
+    for key in ("camera", "composition", "palette", "lighting", "material", "mood", "finish"):
+        value = compact_style_value(fp.get(key), max_len=240)
+        if value:
+            anchors.append(f"{key}: {value}")
+    anchor_text = "; ".join(anchors[:7])
+    base = (
+        "Use the attached reference image as a strict composition and style reference. "
+        "Preserve its aspect ratio, poster/campaign layout, camera angle, lens proximity, "
+        "subject scale hierarchy, foreground/background relationship, object placement, "
+        "pose and interaction geometry, negative-space distribution, lighting direction, "
+        "color palette, and commercial finish. Recreate the concept with clean new details; "
+        "do not copy logos, brand text, watermarks, signatures, or exact artwork."
+    )
+    return f"{base}\n\nReference anchors: {anchor_text}" if anchor_text else base
+
+def style_prompt_from_analysis(analysis: Dict[str, Any], cases: List[Dict[str, Any]]) -> str:
+    positive = str(analysis.get("positive_prompt") or analysis.get("prompt") or "").strip()
+    if not positive and cases:
+        positive = str(cases[0].get("prompt") or "").strip()
+    if not positive:
+        summary = str(analysis.get("summary") or "").strip()
+        positive = f"Create an image with a visual style matching the reference image: {summary}".strip()
+    lock_prompt = str(
+        analysis.get("layout_lock_prompt")
+        or analysis.get("composition_lock_prompt")
+        or analysis.get("reference_lock_prompt")
+        or ""
+    ).strip()
+    prompt_parts = [
+        "Reference priority: the attached user reference image is the primary reference. Any matched case-library image or case prompt is secondary and may only supplement finish, texture, lighting polish, and commercial advertising quality.",
+        style_reference_lock_prompt(analysis),
+    ]
+    if lock_prompt:
+        prompt_parts.append(f"Composition lock:\n{lock_prompt}")
+    structured_sections = [
+        style_analysis_section("Reference summary", analysis.get("reference_summary"), 700),
+        style_analysis_section("Shared style anchor", analysis.get("shared_style_anchor"), 900),
+        style_analysis_section("Generation guidance", analysis.get("generation_guidance"), 700),
+        style_analysis_section("Variant plan", analysis.get("variant_plan"), 800),
+        style_analysis_section("Negative constraints", analysis.get("negative_constraints"), 500),
+    ]
+    prompt_parts.extend(section for section in structured_sections if section)
+    case_section = style_case_support_section(cases)
+    if case_section:
+        prompt_parts.append(case_section)
+    prompt_parts.append(positive)
+    positive = "\n\n".join(part for part in prompt_parts if part)
+    negative = str(analysis.get("negative_prompt") or "").strip()
+    if negative and "negative prompt" not in positive.lower():
+        return f"{positive}\n\nNegative prompt:\n{negative}"
+    return positive
+
+async def analyze_image_for_style(payload: StyleLibraryMatchImageRequest) -> Tuple[Dict[str, Any], str]:
+    image_value = str(payload.image or "").strip()
+    if not image_value.startswith(("data:image/", "/output/", "/assets/", "http://", "https://")):
+        raise HTTPException(status_code=400, detail="只能分析画布图片、输出图片或 http(s) 图片链接")
+    if not is_image_reference_value(image_value):
+        raise HTTPException(status_code=400, detail="只能分析图片素材，请选择画布中的图片节点")
+    ref_url = media_reference_to_url(image_value, max_image_size=1024)
+    if not ref_url:
+        raise HTTPException(status_code=400, detail="图片无法转换为可分析的引用")
+
+    chat_base, chat_hdrs, model = resolve_chat_provider(payload.provider, payload.model, payload.ms_model)
+    provider_cfg = get_api_provider(payload.provider) if payload.provider not in ("modelscope",) else {}
+    is_apimart = is_apimart_provider(provider_cfg)
+    messages = [
+        {"role": "system", "content": STYLE_MATCH_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Analyze this image as a style reference and return the JSON schema exactly."},
+                {"type": "image_url", "image_url": {"url": ref_url}},
+            ],
+        },
+    ]
+    try:
+        async with httpx.AsyncClient(timeout=AI_REQUEST_TIMEOUT) as client:
+            body = {"model": model, "messages": messages}
+            if is_apimart:
+                body["stream"] = False
+            response = await client.post(f"{chat_base}/chat/completions", headers=chat_hdrs, json=body)
+            response.raise_for_status()
+            raw = response.json()
+    except httpx.HTTPStatusError as exc:
+        text = exc.response.text or ""
+        friendly = friendly_chat_error_detail(text, model, provider_cfg)
+        raise HTTPException(status_code=exc.response.status_code, detail=friendly or text[:800] or "上游视觉模型请求失败") from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"请求视觉模型失败：{exc}") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"解析视觉模型响应失败：{exc}") from exc
+
+    text = text_from_chat_response(raw).strip()
+    analysis = parse_style_json(text)
+    if not analysis:
+        analysis = {
+            "summary": text[:500],
+            "search_query": re.sub(r"[^A-Za-z0-9 ,._-]+", " ", text)[:240].strip(),
+            "positive_prompt": text,
+            "negative_prompt": "",
+            "style_fingerprint": {},
+            "tags": [],
+        }
+    return analysis, model
+
+@app.post("/api/style-library/search")
+async def style_library_search(payload: StyleLibrarySearchRequest):
+    cases = await asyncio.to_thread(run_style_library_search, payload.query, payload.limit, payload.full_prompt)
+    return {"query": payload.query, "cases": cases, "source": STYLE_LIBRARY_DIR}
+
+@app.post("/api/style-library/match-image")
+async def style_library_match_image(payload: StyleLibraryMatchImageRequest):
+    analysis, model = await analyze_image_for_style(payload)
+    query = style_search_query_from_analysis(analysis)
+    cases = await asyncio.to_thread(run_style_library_search, query, payload.limit, False)
+    prompt = style_prompt_from_analysis(analysis, cases)
+    return {
+        "prompt": prompt,
+        "analysis": analysis,
+        "query": query,
+        "cases": cases,
+        "model": model,
+        "source": STYLE_LIBRARY_DIR,
+    }
+
 @app.post("/api/canvas-assets/check")
 async def check_canvas_assets(payload: CanvasAssetCheckRequest):
     result = {}
@@ -12663,8 +12977,8 @@ async def get_asset_library():
     return {"library": load_asset_library()}
 
 @app.get("/api/prompt-libraries")
-async def get_prompt_libraries():
-    return {"library": public_prompt_libraries()}
+async def get_prompt_libraries(style_query: str = ""):
+    return {"library": public_prompt_libraries(style_query=style_query)}
 
 @app.post("/api/prompt-libraries")
 async def create_prompt_library(payload: PromptLibraryRequest):
@@ -14150,277 +14464,6 @@ async def ms_generate(req: MsGenerateRequest):
         print(f"MS generate error: {e}")
         raise HTTPException(status_code=400, detail=str(e))
 
-# --- 本地 ComfyUI 生图 ---
-
-@app.post("/api/generate")
-def generate(req: GenerateRequest):
-    global NEXT_TASK_ID
-    current_task = None
-    target_backend = None
-    with QUEUE_LOCK:
-        task_id = NEXT_TASK_ID
-        NEXT_TASK_ID += 1
-        current_task = {"task_id": task_id, "client_id": req.client_id}
-        QUEUE.append(current_task)
-
-    try:
-        required_images = collect_required_comfy_media(req.params)
-
-        target_backend = reserve_best_backend(required_images)
-
-        for image_name in required_images:
-            need_sync = False
-            try:
-                check_url = f"http://{target_backend}/view?filename={urllib.parse.quote(image_name)}&type=input"
-                resp = requests.get(check_url, stream=True, timeout=0.5)
-                resp.close()
-                if resp.status_code != 200:
-                    need_sync = True
-            except:
-                need_sync = True
-
-            if need_sync:
-                image_content = None
-                image_type = "image/png"
-                for addr in COMFYUI_INSTANCES:
-                    if addr == target_backend: continue
-                    try:
-                        src_url = f"http://{addr}/view?filename={urllib.parse.quote(image_name)}&type=input"
-                        r = requests.get(src_url, timeout=5)
-                        if r.status_code == 200:
-                            image_content = r.content
-                            image_type = r.headers.get("Content-Type", "image/png")
-                            break
-                    except: continue
-
-                if image_content:
-                    try:
-                        files = {'image': (image_name, image_content, image_type)}
-                        requests.post(f"http://{target_backend}/upload/image", files=files, timeout=10)
-                    except Exception as e:
-                        print(f"Sync upload failed: {e}")
-
-        workflow_path = os.path.join(WORKFLOW_DIR, req.workflow_json)
-        if not os.path.exists(workflow_path) and req.workflow_json == "Z-Image.json":
-            workflow_path = WORKFLOW_PATH
-        if not os.path.exists(workflow_path):
-            raise Exception(f"Workflow file not found: {req.workflow_json}")
-
-        with open(workflow_path, 'r', encoding='utf-8') as f:
-            workflow = json.load(f)
-
-        seed = random.randint(1, 4294967295)
-
-        if "23" in workflow and req.prompt:
-            workflow["23"]["inputs"]["text"] = req.prompt
-        if "144" in workflow:
-            workflow["144"]["inputs"]["width"] = req.width
-            workflow["144"]["inputs"]["height"] = req.height
-        if "22" in workflow:
-            workflow["22"]["inputs"]["seed"] = seed
-        if "158" in workflow:
-            workflow["158"]["inputs"]["noise_seed"] = seed
-        for node_id in ["146", "181"]:
-            if node_id in workflow and "inputs" in workflow[node_id] and "seed" in workflow[node_id]["inputs"]:
-                workflow[node_id]["inputs"]["seed"] = seed
-        if "184" in workflow and "inputs" in workflow["184"] and "seed" in workflow["184"]["inputs"]:
-            workflow["184"]["inputs"]["seed"] = seed
-        if "172" in workflow and "inputs" in workflow["172"] and "seed" in workflow["172"]["inputs"]:
-            workflow["172"]["inputs"]["seed"] = seed
-        if "14" in workflow and "inputs" in workflow["14"] and "seed" in workflow["14"]["inputs"]:
-            workflow["14"]["inputs"]["seed"] = seed
-
-        for node_id, node_inputs in req.params.items():
-            if node_id in workflow:
-                if "inputs" not in workflow[node_id]:
-                    workflow[node_id]["inputs"] = {}
-                for input_name, value in node_inputs.items():
-                    workflow[node_id]["inputs"][input_name] = value
-
-        p = {"prompt": workflow, "client_id": CLIENT_ID}
-        data = json.dumps(p).encode('utf-8')
-        try:
-            post_req = urllib.request.Request(f"http://{target_backend}/prompt", data=data)
-            prompt_id = json.loads(urllib.request.urlopen(post_req, timeout=10).read())['prompt_id']
-        except urllib.error.HTTPError as e:
-            error_body = e.read().decode('utf-8')
-            raise Exception(f"HTTP Error {e.code}: {error_body}")
-
-        history_data = None
-        for i in range(COMFYUI_HISTORY_TIMEOUT):
-            try:
-                res = get_comfy_history(target_backend, prompt_id)
-                if prompt_id in res:
-                    history_data = res[prompt_id]
-                    break
-            except Exception:
-                pass
-            time.sleep(1)
-
-        if not history_data:
-            raise Exception("ComfyUI 渲染超时")
-
-        local_images = []
-        local_videos = []
-        local_audios = []
-        local_texts = []
-        local_files = []
-        local_items = []
-        local_urls = []
-        current_timestamp = time.time()
-        if 'outputs' in history_data:
-            # 先把所有节点的输出收集为候选（带上 class_type），再决定下载哪些，
-            # 避免把冗余的预览/对比图、调试文本一起下载进结果（后端层过滤，历史记录也更干净）。
-            workflow_nodes = workflow if isinstance(workflow, dict) else {}
-            def _class_type_of(nid):
-                node_def = workflow_nodes.get(str(nid))
-                return str(node_def.get("class_type") or "") if isinstance(node_def, dict) else ""
-            file_candidates = []   # (node_id, class_type, output_key, item, kind)
-            text_candidates = []   # (node_id, class_type, text, name)
-            for node_id in history_data['outputs']:
-                node_output = history_data['outputs'][node_id]
-                class_type = _class_type_of(node_id)
-                for output_key, item in collect_comfy_file_items(node_output):
-                    file_candidates.append((node_id, class_type, output_key, item, comfy_output_kind(item)))
-                for text, name in comfy_text_values_from_output(node_output):
-                    text_candidates.append((node_id, class_type, text, name))
-
-            # 只要存在“非预览节点”产出的图片，就把 PreviewImage/对比节点的图片视为冗余丢弃；
-            # 若整个工作流只有预览图（没有 SaveImage 等），则保留预览图作为唯一结果，避免零输出。
-            has_primary_image = any(
-                kind == "image" and not comfy_class_is_preview(ct)
-                for (_nid, ct, _ok, _it, kind) in file_candidates
-            )
-            prefix = f"{req.type}_{int(current_timestamp)}_"
-            for node_id, class_type, output_key, item, kind in file_candidates:
-                if kind == "image" and has_primary_image and comfy_class_is_preview(class_type):
-                    continue  # 跳过冗余的预览/对比图
-                local_path = download_comfy_output(target_backend, item, prefix=prefix)
-                if kind == "image" and req.convert_to_jpg:
-                    local_path = convert_output_to_jpg(local_path)
-                name = os.path.basename(str(item.get("filename") or "")) or os.path.basename(str(local_path).split("?", 1)[0])
-                entry = {
-                    "url": local_path,
-                    "kind": kind,
-                    "name": name,
-                    "node_id": str(node_id),
-                    "output_key": str(output_key),
-                    "class_type": class_type,
-                }
-                if kind == "image":
-                    local_images.append(local_path)
-                elif kind == "video":
-                    local_videos.append(local_path)
-                elif kind == "audio":
-                    local_audios.append(local_path)
-                elif kind == "text":
-                    local_texts.append(local_path)
-                else:
-                    local_files.append(local_path)
-                local_items.append(entry)
-                local_urls.append(local_path)
-
-            # 默认抑制 show/utility 类节点的调试文本，避免 .txt 噪声混入结果。
-            for node_id, class_type, text, name in text_candidates:
-                if comfy_class_is_debug_text(class_type):
-                    continue
-                local_path = save_comfy_text_output(text, prefix=prefix, name=name)
-                entry = {
-                    "url": local_path,
-                    "kind": "text",
-                    "name": os.path.basename(str(local_path).split("?", 1)[0]),
-                    "node_id": str(node_id),
-                    "output_key": "text",
-                    "class_type": class_type,
-                }
-                local_texts.append(local_path)
-                local_items.append(entry)
-                local_urls.append(local_path)
-
-        result = {
-            "prompt": req.prompt if req.prompt else "Detail Enhance",
-            "images": local_images,
-            "videos": local_videos,
-            "audios": local_audios,
-            "texts": local_texts,
-            "files": local_files,
-            "items": local_items,
-            "outputs": local_urls,
-            "seed": seed,
-            "timestamp": current_timestamp,
-            "type": req.type,
-            "workflow_json": req.workflow_json,
-            "task_id": task_id,
-            "prompt_id": prompt_id,
-            "backend": target_backend,
-            "params": req.params
-        }
-        save_to_history(result)
-        if GLOBAL_LOOP:
-            asyncio.run_coroutine_threadsafe(manager.broadcast_new_image(result), GLOBAL_LOOP)
-        return result
-
-    except Exception as e:
-        return {"images": [], "error": str(e)}
-    finally:
-        if target_backend:
-            with LOAD_LOCK:
-                if BACKEND_LOCAL_LOAD.get(target_backend, 0) > 0:
-                    BACKEND_LOCAL_LOAD[target_backend] -= 1
-        if current_task:
-            with QUEUE_LOCK:
-                if current_task in QUEUE:
-                    QUEUE.remove(current_task)
-
-# --- ComfyUI 工作流管理 ---
-
-BUILTIN_WORKFLOWS = {"Z-Image.json", "Z-Image-Enhance.json", "2511.json", "klein-enhance.json", "Flux2-Klein.json", "upscale.json"}
-CUSTOM_WORKFLOW_FOLDER = "custom"
-LEGACY_CUSTOM_WORKFLOW_FOLDER = "自定义"
-WORKFLOW_NAME_RE = re.compile(rf"^(?:(?:{CUSTOM_WORKFLOW_FOLDER}|{LEGACY_CUSTOM_WORKFLOW_FOLDER})/)?[a-zA-Z0-9_一-龥\.\-]+\.json$")
-
-class WorkflowField(BaseModel):
-    id: str
-    node: str = ""
-    input: str = ""
-    name: str = ""
-    type: str = "text"
-    default: Any = None
-    min: Optional[float] = None
-    max: Optional[float] = None
-    step: Optional[float] = None
-    options: List[str] = []
-    random_enabled: bool = False
-
-class WorkflowConfig(BaseModel):
-    title: str = ""
-    fields: List[WorkflowField] = []
-    mini_cards: Dict[str, Any] = {}
-
-class WorkflowUploadRequest(BaseModel):
-    name: str
-    workflow: Dict[str, Any]
-
-class WorkflowRunRequest(BaseModel):
-    fields: Dict[str, Any] = {}
-    config: WorkflowConfig
-    client_id: str = ""
-
-def workflow_path_from_name(name: str) -> str:
-    if not WORKFLOW_NAME_RE.match(name):
-        raise HTTPException(status_code=400, detail="Invalid workflow name")
-    path = os.path.abspath(os.path.join(WORKFLOW_DIR, *name.split("/")))
-    workflow_root = os.path.abspath(WORKFLOW_DIR)
-    if os.path.commonpath([workflow_root, path]) != workflow_root:
-        raise HTTPException(status_code=400, detail="Invalid workflow name")
-    return path
-
-def workflow_config_path(name: str) -> str:
-    return workflow_path_from_name(name).replace(".json", ".config.json")
-
-def is_builtin_workflow(name: str) -> bool:
-    return "/" not in name and os.path.basename(name) in BUILTIN_WORKFLOWS
-
 def runninghub_workflow_store_path() -> str:
     return RUNNINGHUB_WORKFLOW_STORE_FILE
 
@@ -14783,189 +14826,6 @@ def runninghub_collect_workflow_fields(workflow_json):
                 "required": field_type == "IMAGE",
             })
     return fields
-
-class ComfyInstancesPayload(BaseModel):
-    instances: List[str] = []
-
-@app.get("/api/comfyui/instances")
-def get_comfyui_instances():
-    return {"instances": COMFYUI_INSTANCES}
-
-@app.put("/api/comfyui/instances")
-def save_comfyui_instances(payload: ComfyInstancesPayload):
-    # 宽容校验：去前后空白、去 http(s):// 前缀、去尾部斜杠；要求形如 host:port
-    cleaned = []
-    for item in payload.instances:
-        s = str(item or "").strip()
-        if not s:
-            continue
-        s = re.sub(r"^https?://", "", s)
-        s = s.rstrip("/")
-        if ":" not in s:
-            raise HTTPException(status_code=400, detail=f"地址缺少端口号：{item}（应为 host:port，例如 127.0.0.1:8188）")
-        host, _, port = s.rpartition(":")
-        if not host or not port.isdigit():
-            raise HTTPException(status_code=400, detail=f"地址不合法：{item}（应为 host:port，例如 127.0.0.1:8188）")
-        if s in cleaned:
-            continue
-        cleaned.append(s)
-    if not cleaned:
-        raise HTTPException(status_code=400, detail="至少保留一个 ComfyUI 后端地址")
-    # 写入 env 文件
-    try:
-        update_env_values({"COMFYUI_INSTANCES": ",".join(cleaned)})
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"写入 env 失败：{e}")
-    # 更新进程中的全局变量
-    global COMFYUI_INSTANCES, COMFYUI_ADDRESS, BACKEND_LOCAL_LOAD
-    COMFYUI_INSTANCES = cleaned
-    COMFYUI_ADDRESS = cleaned[0]
-    new_load = {addr: 0 for addr in cleaned}
-    for addr, n in (BACKEND_LOCAL_LOAD or {}).items():
-        if addr in new_load:
-            new_load[addr] = n
-    BACKEND_LOCAL_LOAD = new_load
-    return {"instances": COMFYUI_INSTANCES}
-
-@app.get("/api/workflows")
-def list_workflows():
-    if not os.path.isdir(WORKFLOW_DIR):
-        return {"workflows": []}
-    items = []
-    for root, dirs, files in os.walk(WORKFLOW_DIR):
-        if os.path.abspath(root) == os.path.abspath(WORKFLOW_DIR):
-            dirs[:] = [d for d in dirs if d in {CUSTOM_WORKFLOW_FOLDER, LEGACY_CUSTOM_WORKFLOW_FOLDER}]
-        for fn in sorted(files):
-            if not fn.endswith(".json") or fn.endswith(".config.json"):
-                continue
-            rel = os.path.relpath(os.path.join(root, fn), WORKFLOW_DIR).replace("\\", "/")
-            if is_builtin_workflow(rel):
-                continue
-            cfg = {}
-            cfg_path = workflow_config_path(rel)
-            if os.path.exists(cfg_path):
-                try:
-                    with open(cfg_path, "r", encoding="utf-8") as f:
-                        cfg = json.load(f) or {}
-                except Exception:
-                    cfg = {}
-            items.append({
-                "name": rel,
-                "title": cfg.get("title") or fn.replace(".json", ""),
-                "builtin": False,
-                "field_count": len(cfg.get("fields") or []),
-            })
-    items.sort(key=lambda item: (0 if item["name"].startswith(f"{CUSTOM_WORKFLOW_FOLDER}/") else 1, item["title"]))
-    return {"workflows": items}
-
-@app.get("/api/workflows/{name:path}")
-def get_workflow(name: str):
-    if not WORKFLOW_NAME_RE.match(name):
-        raise HTTPException(status_code=400, detail="Invalid workflow name")
-    workflow_path = workflow_path_from_name(name)
-    if not os.path.exists(workflow_path):
-        raise HTTPException(status_code=404, detail="Workflow not found")
-    with open(workflow_path, "r", encoding="utf-8") as f:
-        workflow = json.load(f)
-    cfg = {"title": name.replace(".json", ""), "fields": []}
-    cfg_path = workflow_config_path(name)
-    if os.path.exists(cfg_path):
-        try:
-            with open(cfg_path, "r", encoding="utf-8") as f:
-                cfg = json.load(f) or cfg
-        except Exception:
-            pass
-    return {"name": name, "workflow": workflow, "config": cfg, "builtin": is_builtin_workflow(name)}
-
-@app.post("/api/workflows")
-def upload_workflow(payload: WorkflowUploadRequest):
-    name = os.path.basename(payload.name.strip())
-    if not name.endswith(".json"):
-        name = name + ".json"
-    if not WORKFLOW_NAME_RE.match(name):
-        raise HTTPException(status_code=400, detail="工作流名称不合法，请使用中文/英文/数字/_-.")
-    if not isinstance(payload.workflow, dict) or not payload.workflow:
-        raise HTTPException(status_code=400, detail="工作流 JSON 为空")
-    # 简单校验：是 API 格式（节点 id 为 key，含 class_type）
-    sample = next(iter(payload.workflow.values()), None)
-    if not isinstance(sample, dict) or "class_type" not in sample:
-        raise HTTPException(status_code=400, detail="不是有效的 ComfyUI API 工作流 JSON（需包含 class_type）")
-    custom_dir = os.path.join(WORKFLOW_DIR, CUSTOM_WORKFLOW_FOLDER)
-    os.makedirs(custom_dir, exist_ok=True)
-    stored_name = f"{CUSTOM_WORKFLOW_FOLDER}/{name}"
-    path = workflow_path_from_name(stored_name)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(payload.workflow, f, ensure_ascii=False, indent=2)
-    return {"name": stored_name}
-
-@app.put("/api/workflows/{name:path}/config")
-def save_workflow_config(name: str, payload: WorkflowConfig):
-    if not WORKFLOW_NAME_RE.match(name):
-        raise HTTPException(status_code=400, detail="Invalid workflow name")
-    workflow_path = workflow_path_from_name(name)
-    if not os.path.exists(workflow_path):
-        raise HTTPException(status_code=404, detail="Workflow not found")
-    cfg_path = workflow_config_path(name)
-    with open(cfg_path, "w", encoding="utf-8") as f:
-        json.dump(payload.dict(), f, ensure_ascii=False, indent=2)
-    return {"config": payload.dict()}
-
-@app.delete("/api/workflows/{name:path}")
-def delete_workflow(name: str):
-    if not WORKFLOW_NAME_RE.match(name):
-        raise HTTPException(status_code=400, detail="Invalid workflow name")
-    if is_builtin_workflow(name):
-        raise HTTPException(status_code=400, detail="内置工作流不可删除")
-    workflow_path = workflow_path_from_name(name)
-    cfg_path = workflow_config_path(name)
-    if not os.path.exists(workflow_path):
-        raise HTTPException(status_code=404, detail="Workflow not found")
-    os.remove(workflow_path)
-    if os.path.exists(cfg_path):
-        os.remove(cfg_path)
-    return {"ok": True}
-
-@app.post("/api/workflows/{name:path}/run")
-def run_workflow(name: str, payload: WorkflowRunRequest):
-    if not WORKFLOW_NAME_RE.match(name):
-        raise HTTPException(status_code=400, detail="Invalid workflow name")
-    if not os.path.exists(workflow_path_from_name(name)):
-        raise HTTPException(status_code=404, detail="Workflow not found")
-    # 根据 config 的字段把值映射成 params 节点覆盖
-    params: Dict[str, Dict[str, Any]] = {}
-    for field in payload.config.fields:
-        if not field.node or not field.input:
-            continue
-        if field.id in payload.fields:
-            value = payload.fields[field.id]
-            # 类型转换
-            if field.type in ("number", "slider"):
-                try:
-                    value = float(value) if (field.step and field.step < 1) else int(float(value))
-                except Exception:
-                    pass
-            elif field.type == "boolean":
-                value = bool(value)
-            elif field.type == "dropdown":
-                # 下拉值如果看起来是数字（如 "1024" / "2048" / "0.8"），自动转成 int/float
-                if isinstance(value, str):
-                    s = value.strip()
-                    try:
-                        if s and ('.' in s or 'e' in s.lower()):
-                            value = float(s)
-                        elif s and (s.lstrip('-').isdigit()):
-                            value = int(s)
-                    except (ValueError, TypeError):
-                        pass
-            params.setdefault(field.node, {})[field.input] = value
-    req = GenerateRequest(
-        prompt="",
-        workflow_json=name,
-        params=params,
-        type="workflow-test",
-        client_id=payload.client_id or str(uuid.uuid4()),
-    )
-    return generate(req)
 
 if __name__ == "__main__":
     import uvicorn

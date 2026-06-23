@@ -4,7 +4,7 @@
   "items": [
     {
       "type": "improve",
-      "text": "修复智能画布分组缩略图bug"
+      "text": "修复智能画布bug和循环节点bug"
     }
   ]
 }

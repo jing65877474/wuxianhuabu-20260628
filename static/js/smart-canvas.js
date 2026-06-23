@@ -77,6 +77,7 @@ let dragState = null;
 let loopInsertPreview = null;
 let selectionState = null;
 let isRKeyDown = false;
+let isSpaceKeyDown = false;
 let selectionJustFinished = false;
 let resizeState = null;
 let llmInstructionResizeState = null;
@@ -92,8 +93,6 @@ let didPan = false;
 let portDragState = null;
 let saveTimer = null;
 let apiProviders = [];
-let comfyWorkflows = [];
-let comfyInstanceCount = 1;
 let assetLibrary = {categories:[]};
 let assetLibraryOpen = false;
 let assetTab = 'image';
@@ -116,6 +115,9 @@ let promptPresets = [];
 let builtinPromptTemplates = [];
 let promptLibraries = [];
 let activePromptLibraryId = 'system';
+const STYLE_PROMPT_LIBRARY_ID = 'gpt_image_2_style_library';
+let promptStyleSearchTimer = null;
+let promptStyleSearchToken = 0;
 let promptTemplateGroups = [];
 let promptTemplateOverrides = {hiddenBuiltinIds:[], editedBuiltins:{}};
 let promptTemplateCategory = 'all';
@@ -126,6 +128,7 @@ let promptPresetDeleteArmed = false;
 let createMenuPoint = {x:0, y:0};
 let createMenuGroupId = '';
 let nodeClipboard = null;
+let imageClipboard = null;
 let imageClickTimer = null;
 let suppressImageClickUntil = 0;
 let lastMouseWorld = null;
@@ -145,6 +148,8 @@ let transientSmartCloudLinks = [];
 let runBtnCooldownToken = 0;
 let smartRunStateToken = 0;
 const activeSmartTaskPolls = new Map();
+const cancelledSmartTaskIds = new Set();
+const deletedSmartNodeTombstones = new Map();
 const smartNodeRunTokens = new Map();
 let smartRhRandomValues = {};
 let lastImagePasteAt = 0;
@@ -541,6 +546,9 @@ function canvasForStorage(){
     clean.settings = settingsForStorage(canvasDefaultSmartSettings || initialSmartSettings);
     // 日志预览的临时节点（编辑器打开期间临时塞进 nodes）绝不能被持久化，否则刷新后会留下幽灵节点。
     if(Array.isArray(clean.nodes)) clean.nodes = clean.nodes.filter(node => node.id !== SMART_LOG_PREVIEW_NODE_ID);
+    const filtered = filterTransientUploadPlaceholders(clean.nodes || [], clean.connections || []);
+    clean.nodes = filtered.nodes;
+    clean.connections = filtered.connections;
     (clean.nodes || []).forEach(node => {
         if(Array.isArray(node.images)) node.images = node.images.map(mediaItemForStorage);
         if(node.runSettings) node.runSettings = settingsForStorage(node.runSettings);
@@ -748,11 +756,13 @@ const RECENT_SMART_SETTINGS_KEY = 'smart_canvas_recent_run_settings_v1';
 const initialSmartSettings = cloneSmartSettings(settings);
 let canvasDefaultSmartSettings = cloneSmartSettings(settings);
 let recentSmartSettingsByMode = {};
+function normalizeSmartEngine(value){
+    return ['api','volcengine','modelscope','runninghub'].includes(value) ? value : 'api';
+}
 function smartSettingsModeKey(source=settings){
-    const engine = ['api','volcengine','modelscope','comfy','runninghub'].includes(source?.engine) ? source.engine : 'api';
+    const engine = normalizeSmartEngine(source?.engine);
     if(engine === 'api') return `api:${source?.apiKind === 'video' ? 'video' : 'image'}`;
     if(engine === 'volcengine') return `volcengine:${source?.apiKind === 'video' ? 'video' : 'image'}`;
-    if(engine === 'comfy') return `comfy:${['text','enhance','edit','custom'].includes(source?.comfyMode) ? source.comfyMode : 'text'}`;
     if(engine === 'runninghub') return 'runninghub';
     return 'modelscope';
 }
@@ -789,7 +799,7 @@ function rememberRecentSmartSettings(source=settings, node=null){
     saveRecentSmartSettings();
 }
 function applyRecentSmartSettingsForCurrentMode(){
-    const requestedEngine = ['api','volcengine','modelscope','comfy','runninghub'].includes(settings.engine) ? settings.engine : 'api';
+    const requestedEngine = normalizeSmartEngine(settings.engine);
     const requestedApiKind = settings.apiKind === 'video' ? 'video' : 'image';
     const key = smartSettingsModeKey(settings);
     const saved = recentSmartSettingsForMode(key);
@@ -896,7 +906,7 @@ function exceedsFourKStandard(width, height){
 function withOutpaintDisplaySettings(node, baseSettings){
     const size = validOutpaintSize(node);
     if(!size) return baseSettings;
-    const engine = ['api','volcengine','modelscope','comfy','runninghub'].includes(baseSettings?.engine) ? baseSettings.engine : 'api';
+    const engine = normalizeSmartEngine(baseSettings?.engine);
     const next = {
         ...baseSettings,
         resolution:'custom',
@@ -913,10 +923,6 @@ function withOutpaintDisplaySettings(node, baseSettings){
         next.msCustomWidth = size.width;
         next.msCustomHeight = size.height;
         next.msCustomSize = `${size.width}x${size.height}`;
-    }
-    if(engine === 'comfy'){
-        next.width = size.width;
-        next.height = size.height;
     }
     return next;
 }
@@ -1059,6 +1065,20 @@ function isNodeSelected(id){
 function selectedNodeIds(){
     return selectedIds.length ? selectedIds.slice() : (selectedId ? [selectedId] : []);
 }
+function expandedDragNodeIds(ids){
+    const out = [];
+    const seen = new Set();
+    (ids || []).forEach(id => {
+        const node = nodes.find(n => n.id === id);
+        if(!node) return;
+        [id, ...(isSmartGroupNode(node) ? smartGroupMembers(node).map(member => member.id) : [])].forEach(nextId => {
+            if(!nextId || seen.has(nextId)) return;
+            seen.add(nextId);
+            out.push(nextId);
+        });
+    });
+    return out;
+}
 function isEditableTarget(target){
     const el = target || document.activeElement;
     return !!el?.closest?.('input, textarea, select, option, [contenteditable="true"], .prompt-node-control, .prompt-input');
@@ -1120,6 +1140,12 @@ function smartGroupMembers(node){
         seen.add(member.id);
         return true;
     });
+}
+function smartGroupCompactMembers(node){
+    return smartGroupMembers(node).filter(member => member?.type === 'smart-prompt' || member?.type === 'smart-loop');
+}
+function isSmartGroupCompactMember(node){
+    return Boolean(node && (node.type === 'smart-prompt' || node.type === 'smart-loop') && smartGroupContainingNode(node.id));
 }
 // 分组当前缩放比例（1=原始）。分组就像“画布中的画布”：缩放分组时组内所有成员（含提示词）整体等比缩放+
 // 重排。缩放过程用每次手势开始时的快照实时计算（见 resize 处理），不存持久基准，避免移动成员后再缩放位置回退。
@@ -1235,6 +1261,8 @@ function smartGroupImageRefs(group){
 function smartGroupThumbLayout(node){
     const refs = smartGroupImageRefs(node).filter(ref => ref.item?.url);
     if(!refs.length) return null;
+    const compactMembers = smartGroupCompactMembers(node);
+    const count = refs.length + compactMembers.length;
     const items = refs.map(ref => ref.item);
     const explicitW = Number(node?.w);
     const explicitH = Number(node?.h);
@@ -1243,10 +1271,11 @@ function smartGroupThumbLayout(node){
     const scale = mediaNodeDefaultScale({type:'smart-image', images:items, scale:node?.scale});
     const summarySpace = 28;
     const outerPad = 32;
-    if(refs.length === 1){
+    if(count === 1){
         if(hasExplicit){
             return {
                 refs,
+                compactMembers,
                 cols:1,
                 rows:1,
                 visibleRows:1,
@@ -1261,6 +1290,7 @@ function smartGroupThumbLayout(node){
         const single = singleImageLayout(refs[0].item, {}, scale);
         return {
             refs,
+            compactMembers,
             ...single,
             width:Math.max(SMART_GROUP_MIN_WIDTH, Math.round(single.width + outerPad)),
             height:Math.max(SMART_GROUP_MIN_HEIGHT, Math.round(single.height + outerPad + summarySpace)),
@@ -1269,19 +1299,21 @@ function smartGroupThumbLayout(node){
         };
     }
     const gap = 8;
+    const maxVisibleRows = compactMembers.length ? count : SMART_GROUP_MAX_VISIBLE_ROWS;
     if(hasExplicit){
-        const fitted = groupImageGridLayout(refs.length, Math.max(72, explicitW - outerPad), Math.max(56, explicitH - outerPad - summarySpace), 100000, 0, gap, SMART_GROUP_MAX_VISIBLE_ROWS);
-        return {...fitted, refs, width:Math.round(explicitW), height:Math.round(explicitH)};
+        const fitted = groupImageGridLayout(count, Math.max(72, explicitW - outerPad), Math.max(56, explicitH - outerPad - summarySpace), 100000, 0, gap, maxVisibleRows);
+        return {...fitted, refs, compactMembers, width:Math.round(explicitW), height:Math.round(explicitH)};
     }
     const thumb = Math.round(MEDIA_GROUP_THUMB_BASE * scale);
     const cell = thumb + gap;
-    const cols = Math.min(4, Math.max(2, Math.ceil(Math.sqrt(refs.length))));
-    const rows = Math.ceil(refs.length / cols);
-    const visibleRows = Math.min(SMART_GROUP_MAX_VISIBLE_ROWS, rows);
+    const cols = Math.min(4, Math.max(2, Math.ceil(Math.sqrt(count))));
+    const rows = Math.ceil(count / cols);
+    const visibleRows = Math.min(maxVisibleRows, rows);
     const gridW = cols * thumb + (cols - 1) * gap;
     const gridH = visibleRows * cell - gap;
     return {
         refs,
+        compactMembers,
         cols,
         rows,
         visibleRows,
@@ -1297,8 +1329,42 @@ const SMART_GROUP_ARRANGE_HEADER = 44;
 // 每个成员在所属单元格内居中；最后把分组框尺寸收敛到正好包住所有成员。
 function arrangeSmartGroupMembers(group, options={}){
     if(!isSmartGroupNode(group)) return false;
-    // 图片已收进卡片内的缩略图网格，本身就是整齐自适应的，无需重排（“整理”对图片分组即重新渲染）。
-    if((group.images || []).some(img => img?.url)) return true;
+    const hasThumbImages = smartGroupImageRefs(group).some(ref => ref.item?.url);
+    if(hasThumbImages){
+        const compactMembers = smartGroupCompactMembers(group);
+        if(!options.skipUndo) pushUndo();
+        const layout = smartGroupThumbLayout(group);
+        if(!layout) return true;
+        const refs = layout.refs || [];
+        const thumb = Math.max(28, Math.round(Number(layout.thumb) || 96));
+        const gap = 8;
+        const cols = Math.max(1, Number(layout.cols) || 1);
+        const gridW = cols * thumb + Math.max(0, cols - 1) * gap;
+        const contentW = Math.max(0, Math.round(Number(layout.width) || SMART_GROUP_DEFAULT_WIDTH) - 32);
+        const originX = (Number(group.x) || 0) + 16 + Math.max(0, Math.round((contentW - gridW) / 2));
+        const originY = (Number(group.y) || 0) + 16 + 28;
+        group.w = Math.max(SMART_GROUP_MIN_WIDTH, Math.round(Number(layout.width) || SMART_GROUP_DEFAULT_WIDTH));
+        group.h = Math.max(SMART_GROUP_MIN_HEIGHT, Math.round(Number(layout.height) || SMART_GROUP_DEFAULT_HEIGHT));
+        const ordered = compactMembers.slice().sort((a, b) => {
+            const ra = nodeRect(a), rb = nodeRect(b);
+            const dy = (Number(ra.y) || 0) - (Number(rb.y) || 0);
+            if(Math.abs(dy) > 24) return dy;
+            return (Number(ra.x) || 0) - (Number(rb.x) || 0);
+        });
+        ordered.forEach((member, memberIndex) => {
+            const index = refs.length + memberIndex;
+            const col = index % cols;
+            const row = Math.floor(index / cols);
+            member.x = Math.round(originX + col * (thumb + gap));
+            member.y = Math.round(originY + row * (thumb + gap));
+            member.w = thumb;
+            member.h = thumb;
+            member.scale = 1;
+        });
+        if(group._memberZoom !== undefined) group._memberZoom = 1;
+        if(options.syncDom) syncSmartGroupMemberElements(group);
+        return true;
+    }
     const members = smartGroupMembers(group);
     if(!members.length) return false;
     if(!options.skipUndo) pushUndo();
@@ -1480,14 +1546,258 @@ function promptNodeSeparator(node){
     const raw = String(node?.promptSeparator ?? ';');
     return raw === '' ? ';' : raw;
 }
+function promptNodeReferenceWeight(node){
+    const raw = Number(node?.styleMatch?.referenceWeight ?? node?.referenceWeight ?? 85);
+    if(!Number.isFinite(raw)) return 85;
+    return Math.max(0, Math.min(100, Math.round(raw)));
+}
+const PROMPT_CAMERA_FOCAL_MIN = 14;
+const PROMPT_CAMERA_FOCAL_MAX = 135;
+const PROMPT_CAMERA_DEFAULT_FOCAL = 50;
+const PROMPT_CAMERA_SENSOR_WIDTH_MM = 36;
+const PROMPT_CAMERA_PANEL_EXTRA_H = 202;
+const PROMPT_CAMERA_AZIMUTH_OPTIONS = [
+    {value:'front', label:'正面', prompt:'front view, camera facing the subject straight on'},
+    {value:'front-left', label:'左前 3/4', prompt:'three-quarter front view from camera left, visible depth and side plane'},
+    {value:'left', label:'左侧面', prompt:'left profile side view, camera perpendicular to the subject'},
+    {value:'back-left', label:'左后 3/4', prompt:'three-quarter rear view from camera left, showing the back plane with some side depth'},
+    {value:'back', label:'背面', prompt:'rear view, camera behind the subject'},
+    {value:'back-right', label:'右后 3/4', prompt:'three-quarter rear view from camera right, showing the back plane with some side depth'},
+    {value:'right', label:'右侧面', prompt:'right profile side view, camera perpendicular to the subject'},
+    {value:'front-right', label:'右前 3/4', prompt:'three-quarter front view from camera right, visible depth and side plane'}
+];
+const PROMPT_CAMERA_ELEVATION_OPTIONS = [
+    {value:'eye', label:'平视', prompt:'eye-level camera height with neutral vertical perspective'},
+    {value:'slight-low', label:'微低角度', prompt:'slightly low camera angle, subtly looking up without distortion'},
+    {value:'low', label:'低角度', prompt:'low-angle shot, camera below the subject looking upward'},
+    {value:'slight-high', label:'微俯视', prompt:'slightly high camera angle, gently looking down'},
+    {value:'high', label:'高角度', prompt:'high-angle shot, camera above the subject looking down'},
+    {value:'top-down', label:'俯拍', prompt:'top-down overhead view with a clear plan-view composition'}
+];
+const PROMPT_CAMERA_AZIMUTH_GEOMETRY = {
+    front:{x:0, y:1},
+    'front-left':{x:-0.72, y:0.72},
+    left:{x:-1, y:0},
+    'back-left':{x:-0.72, y:-0.72},
+    back:{x:0, y:-1},
+    'back-right':{x:0.72, y:-0.72},
+    right:{x:1, y:0},
+    'front-right':{x:0.72, y:0.72}
+};
+const PROMPT_CAMERA_ELEVATION_GEOMETRY = {
+    'top-down':{y:-1},
+    high:{y:-0.72},
+    'slight-high':{y:-0.36},
+    eye:{y:0},
+    'slight-low':{y:0.38},
+    low:{y:0.78}
+};
+function promptCameraOptionByValue(options, value, fallbackIndex=0){
+    return options.find(item => item.value === value) || options[fallbackIndex] || options[0];
+}
+function promptCameraClampUnit(value){
+    const n = Number(value);
+    if(!Number.isFinite(n)) return 0;
+    return Math.max(-1, Math.min(1, n));
+}
+function promptCameraAzimuthGeometry(value){
+    return PROMPT_CAMERA_AZIMUTH_GEOMETRY[value] || PROMPT_CAMERA_AZIMUTH_GEOMETRY.front;
+}
+function promptCameraElevationGeometry(value){
+    return PROMPT_CAMERA_ELEVATION_GEOMETRY[value] || PROMPT_CAMERA_ELEVATION_GEOMETRY.eye;
+}
+function promptCameraNearestAzimuth(x, y){
+    const px = promptCameraClampUnit(x);
+    const py = promptCameraClampUnit(y);
+    let best = PROMPT_CAMERA_AZIMUTH_OPTIONS[0];
+    let bestDist = Infinity;
+    PROMPT_CAMERA_AZIMUTH_OPTIONS.forEach(option => {
+        const p = promptCameraAzimuthGeometry(option.value);
+        const dist = Math.hypot(px - p.x, py - p.y);
+        if(dist < bestDist){
+            bestDist = dist;
+            best = option;
+        }
+    });
+    return best;
+}
+function promptCameraNearestElevation(y){
+    const py = promptCameraClampUnit(y);
+    let best = PROMPT_CAMERA_ELEVATION_OPTIONS[0];
+    let bestDist = Infinity;
+    PROMPT_CAMERA_ELEVATION_OPTIONS.forEach(option => {
+        const p = promptCameraElevationGeometry(option.value);
+        const dist = Math.abs(py - p.y);
+        if(dist < bestDist){
+            bestDist = dist;
+            best = option;
+        }
+    });
+    return best;
+}
+function promptNodeCameraEnabled(node){
+    return node?.cameraEnabled === true;
+}
+function promptNodeCameraFocalLength(node){
+    const raw = Number(node?.cameraFocalLength ?? PROMPT_CAMERA_DEFAULT_FOCAL);
+    if(!Number.isFinite(raw)) return PROMPT_CAMERA_DEFAULT_FOCAL;
+    return Math.max(PROMPT_CAMERA_FOCAL_MIN, Math.min(PROMPT_CAMERA_FOCAL_MAX, Math.round(raw)));
+}
+function promptNodeCameraAzimuth(node){
+    return promptCameraOptionByValue(PROMPT_CAMERA_AZIMUTH_OPTIONS, node?.cameraAzimuth || 'front');
+}
+function promptNodeCameraElevation(node){
+    return promptCameraOptionByValue(PROMPT_CAMERA_ELEVATION_OPTIONS, node?.cameraElevation || 'eye');
+}
+function promptNodeCameraFov(focalLength){
+    return Math.round((2 * Math.atan(PROMPT_CAMERA_SENSOR_WIDTH_MM / (2 * focalLength)) * 180 / Math.PI) * 10) / 10;
+}
+function promptNodeCameraLensInfo(focalLength){
+    const fov = promptNodeCameraFov(focalLength);
+    if(focalLength <= 18) return {label:'超广角', en:'ultra-wide-angle', fov, note:'空间更开阔，近大远小更明显', prompt:'expanded wide perspective, strong foreground/background separation, visible environment, dynamic near-to-far depth'};
+    if(focalLength <= 28) return {label:'广角', en:'wide-angle', fov, note:'环境感更强，适合大场景和近景产品', prompt:'wide-angle perspective with clear environmental context, mild perspective expansion, energetic spatial depth'};
+    if(focalLength <= 40) return {label:'人文广角', en:'moderate wide-angle', fov, note:'自然带环境，画面不容易挤', prompt:'natural documentary wide perspective, balanced subject and environment, realistic spatial depth'};
+    if(focalLength <= 60) return {label:'标准镜头', en:'standard', fov, note:'接近人眼，透视最自然', prompt:'natural standard-lens perspective, realistic proportions, minimal perspective distortion'};
+    if(focalLength <= 95) return {label:'短长焦', en:'short telephoto', fov, note:'主体更突出，背景轻微压缩', prompt:'short-telephoto perspective, mild background compression, flattering subject proportions, clean separation'};
+    return {label:'长焦', en:'telephoto', fov, note:'压缩空间，主体更强势', prompt:'telephoto perspective, compressed background layers, strong subject isolation, reduced wide-angle distortion'};
+}
+function promptNodeCameraLensEvidence(focalLength){
+    if(focalLength <= 18) return 'ultra-wide lens evidence: nearby hands, drink, fruit, tabletop, or foreground props become visibly larger than background elements; edges stretch slightly; deep environment is visible; do not render a flat portrait crop';
+    if(focalLength <= 28) return 'wide-angle lens evidence: clear near-to-far scale difference, energetic depth, visible environment around the subject, foreground elements read closer to the viewer';
+    if(focalLength <= 40) return 'moderate-wide lens evidence: natural environmental portrait framing, readable subject plus surrounding scene, mild depth cues without flattening';
+    if(focalLength <= 60) return 'standard-lens evidence: natural proportions, minimal distortion, believable eye-distance framing';
+    if(focalLength <= 95) return 'short-telephoto lens evidence: flattering compressed depth, cleaner background separation, less foreground exaggeration';
+    return 'telephoto lens evidence: compressed background layers, isolated subject, narrow field of view, no wide-angle near-far exaggeration';
+}
+function promptNodeCameraAzimuthEvidence(value){
+    const map = {
+        front:'front evidence: both sides of the face/product are balanced and symmetrical, camera axis points straight toward the subject',
+        'front-left':'front-left three-quarter evidence: the subject/product right side recedes away from camera, the left-facing plane is more visible, depth is clear',
+        left:'left profile evidence: side silhouette dominates, front plane is mostly hidden, camera is perpendicular to the subject',
+        'back-left':'back-left three-quarter evidence: back plane is visible with a left-side edge, face/front label is mostly turned away unless the pose naturally twists',
+        back:'back evidence: camera is behind the subject/product, back plane dominates, front-facing details are not the main view',
+        'back-right':'back-right three-quarter evidence: back plane is visible with a right-side edge, face/front label is mostly turned away unless the pose naturally twists',
+        right:'right profile evidence: side silhouette dominates, front plane is mostly hidden, camera is perpendicular to the subject',
+        'front-right':'front-right three-quarter evidence: the subject/product left side recedes away from camera, the right-facing plane is more visible, depth is clear'
+    };
+    return map[value] || map.front;
+}
+function promptNodeCameraElevationEvidence(value){
+    const map = {
+        eye:'eye-level evidence: horizon and face/product center sit near camera height, no looking up or down distortion',
+        'slight-low':'slightly-low evidence: camera is just below face/product center, subtle upward view, chin/table underside only lightly visible',
+        low:'low-angle evidence: camera is below the subject/product looking upward, underside planes and vertical convergence are visible, foreground objects feel closer and more dominant',
+        'slight-high':'slightly-high evidence: camera is slightly above the subject/product, top surfaces become visible, gaze and table plane angle downward gently',
+        high:'high-angle evidence: camera is above the subject/product looking down, head/top surfaces/table plane are clearly visible, background floor/table geometry opens up',
+        'top-down':'top-down evidence: overhead plan-view composition, top surfaces dominate, vertical faces compress, camera is clearly above the scene instead of eye-level'
+    };
+    return map[value] || map.eye;
+}
+function promptNodeCameraViewInstruction(azimuth, elevation){
+    if(elevation.value === 'top-down'){
+        return `View angle: overhead top-down view with a ${azimuth.label} rotational bias; keep the camera clearly above the scene and use the horizontal direction only as a rotation/orientation cue.`;
+    }
+    if(elevation.value === 'high' || elevation.value === 'slight-high'){
+        return `View angle: ${elevation.prompt}; combine it with ${azimuth.prompt} so the shot reads as a high-view recomposition, not an eye-level copy.`;
+    }
+    if(elevation.value === 'low' || elevation.value === 'slight-low'){
+        return `View angle: ${elevation.prompt}; combine it with ${azimuth.prompt} so the shot reads as an upward-looking recomposition, not an eye-level copy.`;
+    }
+    return `View angle: ${azimuth.prompt}; ${elevation.prompt}.`;
+}
+function promptNodeCameraEvidenceList(node, lens, azimuth, elevation){
+    const focal = promptNodeCameraFocalLength(node);
+    return [
+        promptNodeCameraLensEvidence(focal),
+        promptNodeCameraAzimuthEvidence(azimuth.value),
+        promptNodeCameraElevationEvidence(elevation.value),
+        'composition evidence: rebuild foreground, midground, background, crop, subject scale, and negative space around this camera choice',
+        'avoid evidence failures: not the same reference viewpoint, not a normal straight-on eye-level portrait, not the same crop, not the same pose/layout skeleton when those conflict with camera control'
+    ].join('; ');
+}
+function promptNodeCameraSummary(node){
+    const focal = promptNodeCameraFocalLength(node);
+    const lens = promptNodeCameraLensInfo(focal);
+    return `${focal}mm · ${lens.label} · ${promptNodeCameraAzimuth(node).label} · ${promptNodeCameraElevation(node).label}`;
+}
+function promptNodeCameraPrompt(node){
+    if(!promptNodeCameraEnabled(node)) return '';
+    const focal = promptNodeCameraFocalLength(node);
+    const lens = promptNodeCameraLensInfo(focal);
+    const azimuth = promptNodeCameraAzimuth(node);
+    const elevation = promptNodeCameraElevation(node);
+    const evidence = promptNodeCameraEvidenceList(node, lens, azimuth, elevation);
+    const posterCopyRole = node?.posterCopyEnabled
+        ? ' If Poster copy is enabled, readable poster text in the primary reference image is locked copy: reproduce the same wording, language, capitalization, line breaks, and approximate graphic role when compatible with the new camera.'
+        : ' If Poster copy is disabled, do not copy or invent readable poster text from the reference.';
+    return [
+        `HIGHEST PRIORITY CAMERA OVERRIDE: obey this camera instruction for lens, focal length, viewpoint, perspective, crop, foreground/midground/background, object placement, subject scale, and pose geometry. This overrides any reference-image camera angle, crop, composition lock, subject scale hierarchy, foreground/background relationship, pose geometry, or layout instruction. Use the reference image only for identity, product truth, materials, palette, lighting mood, commercial finish, and exact readable poster copy when Poster copy is enabled.${posterCopyRole}`,
+        'Reference role assignment: reference image = identity/product/style/material/lighting/exact-readable-copy only; camera control = composition, crop, lens, viewpoint, subject scale, and spatial layout.',
+        `Use a ${focal}mm ${lens.en} lens on a full-frame camera, about ${lens.fov} degree horizontal field of view: ${lens.prompt}.`,
+        promptNodeCameraViewInstruction(azimuth, elevation),
+        `Mandatory visual evidence: ${evidence}.`,
+        'Render a visibly changed camera position with real optical perspective, parallax, subject scale, and framing. If the reference image was eye-level or straight-on, deliberately depart from it when the camera control asks for low, high, top-down, side, or wide-angle. Do not place focal-length labels, camera UI, or technical text inside the image.'
+    ].join(' ');
+}
+function promptNodeCameraExtraHeight(node){
+    return promptNodeCameraEnabled(node) ? PROMPT_CAMERA_PANEL_EXTRA_H : 0;
+}
+function ensurePromptNodeCameraDefaults(node){
+    if(!node) return;
+    node.cameraFocalLength = promptNodeCameraFocalLength(node);
+    node.cameraAzimuth = promptNodeCameraAzimuth(node).value;
+    node.cameraElevation = promptNodeCameraElevation(node).value;
+}
+function promptNodeReferenceWeightPrompt(node){
+    if(!node?.styleMatch) return '';
+    const weight = promptNodeReferenceWeight(node);
+    const posterCopyRule = node?.posterCopyEnabled
+        ? ' Poster copy is active: copy readable poster text from the primary attached reference image exactly where possible, preserving wording, language, capitalization, line breaks, and graphic hierarchy. Do not invent random slogans, fake labels, pseudo text, or translated replacements. If a reference text area is unreadable, keep it as a clean graphic area or simple non-readable mark instead of hallucinating words.'
+        : ' Poster copy is disabled: do not copy reference text and do not invent any visible headline, slogan, label, logo text, watermark, price tag, UI text, or pseudo typography.';
+    const cameraRule = promptNodeCameraEnabled(node)
+        ? ' Camera control is active: do NOT preserve the original reference camera angle, crop, lens feel, subject scale hierarchy, pose geometry, object placement, or poster layout when they conflict. Preserve only compatible identity, product truth, materials, color mood, lighting intent, exact readable poster copy when enabled, and commercial finish.'
+        : '';
+    const caseRule = 'If a case-library reference is attached, treat it as secondary only: use it for advertising finish, material polish, skin/product retouching, and texture quality; do not copy its background, pose, product type, label, or layout, and do not let it override the primary reference.';
+    if(promptNodeCameraEnabled(node)){
+        return `Original reference weight: ${weight}/100, but Camera control is active. Use the attached original image as an identity/product/material/style/copy reference only. Do not copy or preserve its camera angle, crop, lens proximity, composition skeleton, subject scale hierarchy, pose geometry, foreground/background relationship, object placement, negative-space distribution, reflection layout, or poster geometry. Recompose the image around the explicit Camera control while keeping product identity, model identity, palette, lighting quality, exact readable poster copy when enabled, and commercial polish. ${posterCopyRule} ${cameraRule} ${caseRule}`;
+    }
+    if(weight >= 85){
+        return `Original reference weight: ${weight}/100. Strongly prioritize the attached original image. Preserve the same camera angle, crop, subject scale hierarchy, pose geometry, foreground/background relationship, object placement, negative space, lighting direction, palette, exact readable poster copy when enabled, and commercial finish unless explicit Camera control says otherwise. If the original image has a foreground hero product, keep that product large, close to the lens, and visually dominant unless Camera control changes the framing; do not shrink it into a small prop. Only refine details. ${posterCopyRule}${cameraRule} ${caseRule}`;
+    }
+    if(weight >= 60){
+        return `Original reference weight: ${weight}/100. Use the attached original image as the main reference. Keep the product, palette, lighting, composition family, product-to-subject scale relationship, subject relationship, and exact readable poster copy when enabled close, while allowing moderate pose and detail variation. ${posterCopyRule}${cameraRule} ${caseRule}`;
+    }
+    if(weight >= 35){
+        return `Original reference weight: ${weight}/100. Use the attached original image as a loose style and product reference. Keep product identity, palette, exact readable poster copy when enabled, and advertising polish, but allow new framing, pose, crop, and camera angle. ${posterCopyRule}`;
+    }
+    return `Original reference weight: ${weight}/100. Use the attached original image only as light inspiration for product identity and color mood. Override earlier strict composition lock if present; allow a substantially different camera angle, pose, composition, and scene treatment. ${posterCopyRule}`;
+}
+function promptNodePosterCopyPrompt(node){
+    if(!node || node.type !== 'smart-prompt') return '';
+    if(node.posterCopyEnabled){
+        return 'Poster copy enabled: copy readable poster text from the primary attached reference image exactly where possible. Preserve the same wording, language, capitalization, spelling, line breaks, and approximate text hierarchy such as headline, subtitle, badge text, or small label copy. Do not invent random slogans, pseudo words, fake brand names, translated replacements, UI text, watermarks, or unrelated typography. If the reference text is unreadable, leave that area clean or use non-readable decorative marks instead of generating new words.';
+    }
+    return 'Poster copy disabled: do not generate visible text, headline, slogan, labels, logo text, watermark, price tag, UI text, or any readable typography in the image. Keep the visual clean and text-free unless the user explicitly typed exact text in the prompt.';
+}
 function promptNodePromptItems(node){
     const text = String(node?.text || '').trim();
     if(!text) return [];
-    if(node?.promptSplitEnabled !== true) return [text];
+    const withPromptControls = items => {
+        const weightPrompt = promptNodeReferenceWeightPrompt(node);
+        const posterCopyPrompt = promptNodePosterCopyPrompt(node);
+        const cameraPrompt = promptNodeCameraPrompt(node);
+        if(cameraPrompt){
+            const trailingControls = [weightPrompt, posterCopyPrompt].filter(Boolean).join('\n');
+            return items.map(item => smartRelaxPromptForCameraControl(`${cameraPrompt}\n\n${item}\n\n${trailingControls}`));
+        }
+        const controls = [weightPrompt, posterCopyPrompt].filter(Boolean).join('\n');
+        return controls ? items.map(item => `${item}\n\n${controls}`) : items;
+    };
+    if(node?.promptSplitEnabled !== true) return withPromptControls([text]);
     const sep = promptNodeSeparator(node);
-    if(!sep) return [text];
+    if(!sep) return withPromptControls([text]);
     const items = text.split(sep).map(item => item.trim()).filter(Boolean);
-    return items.length > 1 ? items : [text];
+    return withPromptControls(items.length > 1 ? items : [text]);
 }
 function promptNodeSplitExtraHeight(node){
     if(node?.promptSplitEnabled !== true) return 0;
@@ -1508,7 +1818,7 @@ function syncPromptNodeHeightForSplit(node, prevExtra=0){
     node.w = Math.max(Number(node.w) || 0, 316);
 }
 function promptNodeMinHeight(node){
-    return node?.llmEnabled ? promptNodeExpandedHeight(node) : 240 + promptNodeSplitExtraHeight(node);
+    return node?.llmEnabled ? promptNodeExpandedHeight(node) : 240 + promptNodeSplitExtraHeight(node) + promptNodeCameraExtraHeight(node);
 }
 function promptTextItemsForNode(node, ctx=smartLoopContext){
     if(!node) return [];
@@ -1533,20 +1843,43 @@ function promptNodeUpstreamPromptText(node, ctx=smartLoopContext){
 }
 function promptNodeLLMInputText(node, ctx=smartLoopContext){
     const upstream = promptNodeUpstreamPromptText(node, ctx).trim();
-    const instruction = String(node?.llmInstruction || '').trim() || promptNodePromptItems(node).join('\n\n').trim();
-    return [upstream, instruction].filter(Boolean).join('\n\n');
+    const currentPrompt = promptNodePromptItems(node).join('\n\n').trim();
+    const instruction = String(node?.llmInstruction || '').trim();
+    if(instruction && currentPrompt){
+        return [
+            'Existing prompt context. Do not discard, overwrite, or repeat it:',
+            currentPrompt,
+            upstream ? `\nUpstream prompt context:\n${upstream}` : '',
+            '\nUser modification request. Return only the additional or corrected instruction that should be appended to the existing prompt:',
+            instruction
+        ].filter(Boolean).join('\n');
+    }
+    return [upstream, instruction || currentPrompt].filter(Boolean).join('\n\n');
+}
+function appendLLMOutputToPromptText(originalText, llmText){
+    const original = String(originalText || '').trim();
+    const addition = String(llmText || '').trim();
+    if(!addition) return original;
+    if(!original) return addition;
+    if(original.includes(addition)) return original;
+    const cleaned = addition.replace(original, '').trim() || addition;
+    if(!cleaned || original.includes(cleaned)) return original;
+    return `${original}\n\nLLM additional guidance:\n${cleaned}`;
 }
 function promptNodeExpandedHeight(node){
     // 指令文本框（发送给 LLM 的内容）可拖动加高，超出默认高度的部分要叠加进节点高度。
     const extra = Math.max(0, promptLlmInstructionHeight(node) - PROMPT_LLM_INSTRUCTION_DEFAULT_H);
     const upstreamExtra = node?.llmEnabled && promptNodeUpstreamPromptItems(node).length ? 74 : 0;
-    return (node?.llmSystemEnabled ? 420 : 360) + smartNodeInputThumbsHeight(promptNodeInputImages(node)) + extra + upstreamExtra + promptNodeSplitExtraHeight(node);
+    return (node?.llmSystemEnabled ? 420 : 360) + smartNodeInputThumbsHeight(promptNodeInputImages(node)) + extra + upstreamExtra + promptNodeSplitExtraHeight(node) + promptNodeCameraExtraHeight(node);
 }
 function promptNodeLayoutSize(node){
     const oldCollapsedH = 230;
     const oldExpandedH = node?.llmSystemEnabled ? 400 : 340;
     const explicitW = Number(node?.w);
     const explicitH = Number(node?.h);
+    if(isSmartGroupCompactMember(node) && Number.isFinite(explicitW) && explicitW > 24 && Number.isFinite(explicitH) && explicitH > 24){
+        return {width:Math.round(explicitW), height:Math.round(explicitH)};
+    }
     const width = !Number.isFinite(explicitW) || explicitW === 360 ? 316 : explicitW;
     const fallbackH = promptNodeMinHeight(node);
     const legacyExpandedH = node?.llmSystemEnabled ? 344 : 292;
@@ -1592,7 +1925,14 @@ function imageLayout(images, scale=1, node=null){
         return {cols:1, rows:1, ...smartGroupLayoutSize(node), thumb:96, single:true};
     }
     if(node?.type === 'smart-prompt') return {cols:1, rows:1, ...promptNodeLayoutSize(node), thumb:96, single:true};
-    if(node?.type === 'smart-loop') return {cols:1, rows:1, width:Math.round(Number(node.w) || smartLoopWidth(node)), height:Math.round(Math.max(Number(node.h) || 0, smartLoopHeight(node))), thumb:96, single:true};
+    if(node?.type === 'smart-loop'){
+        const explicitW = Number(node.w);
+        const explicitH = Number(node.h);
+        if(isSmartGroupCompactMember(node) && Number.isFinite(explicitW) && explicitW > 24 && Number.isFinite(explicitH) && explicitH > 24){
+            return {cols:1, rows:1, width:Math.round(explicitW), height:Math.round(explicitH), thumb:96, single:true};
+        }
+        return {cols:1, rows:1, width:Math.round(Number(node.w) || smartLoopWidth(node)), height:Math.round(Math.max(Number(node.h) || 0, smartLoopHeight(node))), thumb:96, single:true};
+    }
     const count = (images || []).length;
     const s = node?.type === 'smart-image' || !node?.type ? mediaNodeDefaultScale(node) : (Number.isFinite(scale) && scale > 0 ? scale : 1);
     if(count === 0){
@@ -1904,7 +2244,6 @@ function runningHubRunNeedsPrompt(sourceSettings=settings){
 function smartRunNeedsPrompt(sourceSettings=settings){
     sourceSettings = sourceSettings || settings;
     if(sourceSettings.engine === 'runninghub') return runningHubRunNeedsPrompt(sourceSettings);
-    if(sourceSettings.engine === 'comfy' && sourceSettings.comfyMode === 'enhance') return false;
     return true;
 }
 function sortRunningHubFields(fields){
@@ -2220,11 +2559,7 @@ function normalizeApiSizeSettings(prefix=''){
     if(settings[resKey] === 'auto' && !settings[ratioKey]) settings[ratioKey] = 'square';
 }
 async function ensureComfyWorkflow(name){
-    if(!name) return null;
-    if(comfyWorkflowCache[name]) return comfyWorkflowCache[name];
-    const data = await fetch(`/api/workflows/${encodeURIComponent(name)}`).then(r => r.ok ? r.json() : null).catch(() => null);
-    if(data) comfyWorkflowCache[name] = data;
-    return data;
+    return null;
 }
 function currentComfyFields(){
     return comfyWorkflowCache[settings.comfyWorkflow]?.config?.fields || [];
@@ -2256,7 +2591,7 @@ function restoreOpenControl(state){
 function renderDynamicParams(){
     if(!dynamicParams) return;
     const keepOpen = openControlState();
-    settings.engine = ['api','volcengine','modelscope','comfy','runninghub'].includes(settings.engine) ? settings.engine : 'api';
+    settings.engine = normalizeSmartEngine(settings.engine);
     settings.apiKind = settings.apiKind === 'video' ? 'video' : 'image';
     clearVolcengineSelectionOutsideVolcengine(settings);
     engineSelect.value = settings.engine;
@@ -2271,7 +2606,7 @@ function renderDynamicParams(){
     }
     else if(settings.engine === 'modelscope') renderMsParams();
     else if(settings.engine === 'runninghub') renderRunningHubParams();
-    else renderComfyParams();
+    else renderApiParams();
     bindDynamicParams();
     restoreOpenControl(keepOpen);
     updatePromptPlaceholder();
@@ -2463,7 +2798,7 @@ function renderComfyParams(){
     }
     dynamicParams.innerHTML = `
         <div class="smart-control comfy-mode-control">
-            <button class="smart-pill" type="button"><i data-lucide="workflow"></i><span>${escapeHtml(modeOptions.find(([v]) => v === settings.comfyMode)?.[1] || 'ComfyUI')}</span></button>
+            <button class="smart-pill" type="button"><i data-lucide="workflow"></i><span>${escapeHtml(modeOptions.find(([v]) => v === settings.comfyMode)?.[1] || tr('smart.engineComfy'))}</span></button>
             <div class="smart-popover compact-popover">
                 <div class="smart-popover-title">${escapeHtml(tr('smart.comfyMode'))}</div>
                 <div class="model-list">
@@ -3638,12 +3973,9 @@ async function loadConfig(){
     try {
         const cfg = await fetch('/api/config').then(r => r.json());
         apiProviders = Array.isArray(cfg.api_providers) ? cfg.api_providers : [];
-        comfyInstanceCount = Math.max(1, (Array.isArray(cfg.comfy_instances) ? cfg.comfy_instances : []).filter(Boolean).length || 1);
         // 提供商配置已就绪即先渲染参数面板，避免等工作流/RunningHub 预取完成后参数才「突然刷新出来」。
         sanitizeSmartApiSelection(settings);
         updateProviderModels();
-        const wf = await fetch('/api/workflows').then(r => r.json()).catch(() => ({workflows:[]}));
-        comfyWorkflows = Array.isArray(wf.workflows) ? wf.workflows : [];
         runningHubWorkflowCache = {};
         const rhProvider = apiProviders.find(p => p.id === 'runninghub');
         const rhWorkflowIds = (rhProvider?.rh_workflows || []).map(item => String(item.workflowId || item.id || '').trim()).filter(Boolean);
@@ -3717,7 +4049,9 @@ function savePromptTemplateOverrides(){
 }
 async function loadPromptTemplates(){
     try {
-        const data = await fetch('/api/prompt-libraries').then(r => r.ok ? r.json() : {library:{libraries:[]}});
+        const styleQuery = activePromptLibraryId === STYLE_PROMPT_LIBRARY_ID ? String(promptTemplateSearch?.value || '').trim() : '';
+        const url = styleQuery ? `/api/prompt-libraries?style_query=${encodeURIComponent(styleQuery)}` : '/api/prompt-libraries';
+        const data = await fetch(url).then(r => r.ok ? r.json() : {library:{libraries:[]}});
         promptLibraries = Array.isArray(data.library?.libraries) ? data.library.libraries : [];
         if(!promptLibraries.length) {
             const fallback = await fetch('/api/smart-canvas/prompt-templates').then(r => r.ok ? r.json() : {templates:[]});
@@ -3747,7 +4081,7 @@ function promptTemplateItems(){
         return (activeLibrary.items || []).filter(t => t?.id && t?.positive).map(t => ({
             ...t,
             sourceId:t.id,
-            builtin:false,
+            builtin:Boolean(activeLibrary.readonly),
             remote:true,
             libraryId:activeLibrary.id
         }));
@@ -3947,6 +4281,8 @@ function renderPromptTemplatePanel(options={}){
     renderPromptLibrarySelect();
     const scrollSnapshot = options.preserveScroll === false ? null : promptTemplateScrollSnapshot();
     const query = String(promptTemplateSearch?.value || '').trim().toLowerCase();
+    const activeLibrary = activePromptLibrary();
+    const dynamicSearchLibrary = Boolean(activeLibrary?.dynamic);
     const allTemplates = promptTemplateItems();
     const activeGroups = activePromptTemplateGroups();
     // 防御：若当前分类筛选不属于当前词库（例如刚切换词库或分类已被删除），回到“全部”，避免列表被过滤为空。
@@ -3996,7 +4332,7 @@ function renderPromptTemplatePanel(options={}){
     `;
     const items = allTemplates.filter(item => {
         if(promptTemplateCategory !== 'all' && item.category !== promptTemplateCategory) return false;
-        if(!query) return true;
+        if(!query || dynamicSearchLibrary) return true;
         return promptTemplateSearchText(item).includes(query);
     });
     if(items.length && !items.some(item => item.id === promptTemplateSelectedId)) promptTemplateSelectedId = items[0].id;
@@ -4006,7 +4342,6 @@ function renderPromptTemplatePanel(options={}){
         : (selected ? currentPromptPreset(selected.sourceId) : null);
     const target = promptTemplatePanel.dataset.target || 'node';
     const node = nodes.find(n => n.id === promptTemplatePanel.dataset.nodeId);
-    const activeLibrary = activePromptLibrary();
     // 系统库 readonly=false，其条目也可编辑/删除（经后端持久化），因此只看 readonly。
     const canEditCurrentLibrary = !activeLibrary.readonly;
     const editMode = Boolean(promptTemplateEditing && selectedPreset);
@@ -4118,6 +4453,21 @@ function closePromptTemplatePanel(){
     promptTemplatePanel?.classList.remove('open');
     syncComposerTemplateButton();
     render();
+}
+function handlePromptTemplateSearchInput(){
+    if(!activePromptLibrary()?.dynamic){
+        renderPromptTemplatePanel({preserveScroll:false});
+        return;
+    }
+    window.clearTimeout(promptStyleSearchTimer);
+    const token = ++promptStyleSearchToken;
+    promptStyleSearchTimer = window.setTimeout(async () => {
+        try { await loadPromptTemplates(); } catch(e) {}
+        if(token !== promptStyleSearchToken) return;
+        promptTemplateSelectedId = '';
+        renderPromptTemplatePanel({preserveScroll:false});
+    }, 260);
+    renderPromptTemplatePanel({preserveScroll:false});
 }
 function applyPromptTemplateToNode(mode='positive'){
     const template = promptTemplateItems().find(item => item.id === promptTemplateSelectedId);
@@ -4484,6 +4834,7 @@ const smartClientId = `canvas_smart_${Math.random().toString(36).slice(2, 10)}${
 let canvasSyncInFlight = false;
 let canvasSyncTimer = null;
 let canvasMetaPollTimer = null;
+let connectionLayerRaf = 0;
 function mergeSmartImageLists(localImgs, remoteImgs){
     const out = [];
     const seen = new Set();
@@ -4502,7 +4853,160 @@ function mergeSmartImageLists(localImgs, remoteImgs){
     return out;
 }
 function smartNodeInFlight(node){
+    if(smartNodeHasCompletedResult(node)) return false;
     return Boolean(node && (node.running || node.pending || node.queued || node.jimengPending || smartPendingTasks(node).length));
+}
+function smartNodeHasDisplayResult(node){
+    return Boolean((node?.images || []).some(img => img?.url && !img.loopInputPreview));
+}
+function smartNodeHasCompletedResult(node){
+    if(!smartNodeHasDisplayResult(node)) return false;
+    if(node?.runFinishedAt) return true;
+    return !node?.jimengPending && !smartPendingTasks(node).length && !Number(node?.pending || 0) && !node?.queued;
+}
+function isTransientUploadPlaceholderNode(node){
+    if(!isSmartImageNode(node) || isHistoryGroupNode(node)) return false;
+    if(smartNodeHasDisplayResult(node) || smartNodeInFlight(node)) return false;
+    if(node?.runAt || node?.runModelPrompt || node?.sourceNodeId || node?.autoBranchOutputSourceId) return false;
+    if(node?.loopRootId || node?.loopSourceId || Number.isFinite(Number(node?.loopSlotIndex)) || Number.isFinite(Number(node?.loopRoundIndex))) return false;
+    if(Array.isArray(node?.manualInputRefs) && node.manualInputRefs.some(ref => ref?.url)) return false;
+    return true;
+}
+function filterTransientUploadPlaceholders(sourceNodes=[], sourceConnections=[]){
+    const removed = new Set((sourceNodes || []).filter(isTransientUploadPlaceholderNode).map(node => node.id));
+    if(!removed.size) return {
+        nodes:sourceNodes || [],
+        connections:sourceConnections || [],
+        removed
+    };
+    return {
+        nodes:(sourceNodes || []).filter(node => !removed.has(node.id)),
+        connections:(sourceConnections || []).filter(conn => !removed.has(conn?.from) && !removed.has(conn?.to)),
+        removed
+    };
+}
+function liveSmartNode(node){
+    if(!node?.id) return node;
+    return nodes.find(n => n.id === node.id) || node;
+}
+function clearSmartNodeBusyState(node){
+    if(!node) return node;
+    smartNodeRunTokens.delete(node.id);
+    node.running = false;
+    node.pending = 0;
+    node.queued = false;
+    delete node.jimengPending;
+    delete node.pendingTasks;
+    return node;
+}
+function markSmartNodeComplete(node, meta=null){
+    if(!node) return node;
+    const keepHidden = node.runTimerHidden === true;
+    clearSmartNodeBusyState(node);
+    node.runFinishedAt = Number(node.runFinishedAt || 0) || nowMs();
+    if(!node.runStartedAt) node.runStartedAt = meta?.createdAt || node.runFinishedAt;
+    node.runElapsedMs = Math.max(0, Number(node.runFinishedAt || nowMs()) - Number(node.runStartedAt || node.runFinishedAt || nowMs()));
+    node.runTimerHidden = meta?.hideTimer === true || keepHidden;
+    return node;
+}
+function completedDownstreamOutputForNode(sourceNode){
+    if(!sourceNode?.id) return null;
+    const startedAt = Number(sourceNode.runStartedAt || 0);
+    return downstreamImageTargetsFor(sourceNode).find(target => {
+        if(!smartNodeHasCompletedResult(target)) return false;
+        if(target.sourceNodeId && target.sourceNodeId !== sourceNode.id) return false;
+        const finishedAt = Number(target.runFinishedAt || 0);
+        return !startedAt || !finishedAt || finishedAt >= startedAt;
+    }) || null;
+}
+function clearSourceBusyStateIfDownstreamDone(sourceNode, options={}){
+    if(!sourceNode || !smartNodeInFlight(sourceNode)) return false;
+    if(sourceNode.jimengPending || smartPendingTasks(sourceNode).length) return false;
+    if(!completedDownstreamOutputForNode(sourceNode)) return false;
+    clearSmartNodeBusyState(sourceNode);
+    if(!sourceNode.runFinishedAt){
+        sourceNode.runFinishedAt = nowMs();
+        if(!sourceNode.runStartedAt) sourceNode.runStartedAt = sourceNode.runFinishedAt;
+        sourceNode.runElapsedMs = Math.max(0, sourceNode.runFinishedAt - Number(sourceNode.runStartedAt || sourceNode.runFinishedAt));
+        sourceNode.runTimerHidden = options.hideTimer === true || sourceNode.runTimerHidden === true;
+    }
+    return true;
+}
+function clearCompletedSourceBusyStates(){
+    let changed = false;
+    (nodes || []).forEach(node => {
+        if(clearSourceBusyStateIfDownstreamDone(node)) changed = true;
+    });
+    return changed;
+}
+function hideCompletedRunTimers(){
+    let changed = false;
+    (nodes || []).forEach(node => {
+        if(!node || node.type === 'smart-prompt') return;
+        if(node.pending || node.running || node.jimengPending || !node.runFinishedAt || node.runTimerHidden) return;
+        node.runTimerHidden = true;
+        changed = true;
+    });
+    return changed;
+}
+function clearCompletedNodeBusyStates(){
+    let changed = false;
+    (nodes || []).forEach(node => {
+        if(!node || !smartNodeHasCompletedResult(node) || !smartNodeInFlight(node)) return;
+        markSmartNodeComplete(node);
+        changed = true;
+    });
+    if(clearCompletedSourceBusyStates()) changed = true;
+    return changed;
+}
+function usedCanvasOutputUrls(){
+    const used = new Set();
+    (nodes || []).forEach(node => (node.images || []).forEach(img => {
+        if(img?.url && !img.loopInputPreview) used.add(img.url);
+    }));
+    return used;
+}
+function successfulRecentComfyLogOutputs(sourceNodeId='', withinMs=30 * 60 * 1000){
+    const cutoff = Date.now() - withinMs;
+    const logs = (canvas?.logs || [])
+        .filter(log => log && log.status === 'success' && Number(log.createdAt || 0) >= cutoff)
+        .filter(log => log.request?.workflow_json || String(log.platform || '').toLowerCase().includes('comfy'))
+        .sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0));
+    const scoped = sourceNodeId ? logs.filter(log => log.nodeId === sourceNodeId) : logs;
+    const usable = scoped.length ? scoped : logs.filter(log => !log.nodeId);
+    return usable.flatMap(log => (log.outputs || []).map(url => ({url, createdAt:log.createdAt, nodeId:log.nodeId}))).filter(item => item.url);
+}
+function recoverStuckLoopOutputsFromLogs(){
+    const used = usedCanvasOutputUrls();
+    let changed = false;
+    const slots = (nodes || [])
+        .filter(node => node && isSmartImageNode(node) && !isHistoryGroupNode(node))
+        .filter(node => (node.loopSourceId || node.loopRootId || Number.isFinite(Number(node.loopSlotIndex))) && !smartNodeHasDisplayResult(node))
+        .filter(node => (node.pending || node.running || node.queued) && !smartPendingTasks(node).length)
+        .sort((a, b) => (Number(a.loopSlotIndex || 0) - Number(b.loopSlotIndex || 0)) || (Number(a.y || 0) - Number(b.y || 0)));
+    slots.forEach(slot => {
+        const sourceId = slot.loopRootId || slot.sourceNodeId || '';
+        const output = successfulRecentComfyLogOutputs(sourceId).find(item => !used.has(item.url));
+        if(!output) return;
+        const kind = mediaKindForUrls([output.url], 'image');
+        const ext = kind === 'video' ? 'mp4' : kind === 'audio' ? 'mp3' : kind === 'text' ? 'txt' : 'png';
+        slot.images = [stripImageGenerationMeta({url:output.url, name:`comfy-recovered-${Number(slot.loopSlotIndex || 0) + 1}.${ext}`, kind, generatedResult:true})];
+        markSmartNodeComplete(slot);
+        if(kind) slot.outputKind = kind;
+        slot.title = slot.title || 'Image';
+        slot.scale = mediaNodeDefaultScale(slot);
+        delete slot.w;
+        delete slot.h;
+        used.add(output.url);
+        changed = true;
+        clearSourceBusyStateIfDownstreamDone(nodes.find(n => n.id === sourceId));
+    });
+    return changed;
+}
+function completeSmartNodeWithImages(node, images){
+    const copy = {...node, images};
+    if(smartNodeHasDisplayResult(copy)) markSmartNodeComplete(copy);
+    return copy;
 }
 function syncRunButtonState(node=selectedNode()){
     if(!runBtn) return;
@@ -4511,14 +5015,37 @@ function syncRunButtonState(node=selectedNode()){
     runBtn.disabled = !isSmartRunnableNode(node) || smartNodeInFlight(node) || smartCascadeIsLoopRunning(node?.id);
 }
 function mergeSmartNode(local, remote){
+    if(local?.clearedAt && Number(local.clearedAt || 0) >= Number(remote?.runFinishedAt || remote?.runAt || remote?.created_at || 0)){
+        return {...local, pending:0, running:false, pendingTasks:[]};
+    }
+    const images = mergeSmartImageLists(local.images, remote.images);
+    const localDone = smartNodeHasCompletedResult(local);
+    const remoteDone = smartNodeHasCompletedResult(remote);
+    const localBusy = smartNodeInFlight(local);
+    const remoteBusy = smartNodeInFlight(remote);
+    if(localDone && remoteBusy && !remoteDone) return completeSmartNodeWithImages(local, images);
+    if(remoteDone && localBusy && !localDone) return completeSmartNodeWithImages(remote, images);
+    if(localDone && remoteDone){
+        const localFinished = Number(local.runFinishedAt || 0);
+        const remoteFinished = Number(remote.runFinishedAt || 0);
+        return completeSmartNodeWithImages(remoteFinished >= localFinished ? remote : local, images);
+    }
     // 本地正在生成/排队的节点完全以本地为准，只把对方可能多出来的图并进来，绝不被对方旧状态冲掉
     if(smartNodeInFlight(local)){
-        return {...local, images:mergeSmartImageLists(local.images, remote.images)};
+        return {...local, images};
     }
     // 否则以对方（最新保存方）的布局/标题/设置为基底，但图片取并集——双方生成结果都不丢
-    return {...remote, images:mergeSmartImageLists(local.images, remote.images)};
+    const merged = {...remote, images};
+    return smartNodeHasDisplayResult(merged) && (merged.pending || merged.queued || smartPendingTasks(merged).length)
+        ? completeSmartNodeWithImages(merged, images)
+        : merged;
 }
 function mergeSmartNodeLists(localNodes, remoteNodes){
+    const tombstoneCutoff = Date.now() - 30 * 60 * 1000;
+    for(const [id, time] of deletedSmartNodeTombstones.entries()){
+        if(Number(time || 0) < tombstoneCutoff) deletedSmartNodeTombstones.delete(id);
+    }
+    remoteNodes = (remoteNodes || []).filter(n => !deletedSmartNodeTombstones.has(n.id));
     const localById = new Map((localNodes || []).map(n => [n.id, n]));
     const remoteById = new Map((remoteNodes || []).map(n => [n.id, n]));
     const order = [];
@@ -4547,11 +5074,16 @@ function mergeSmartConnections(localConns, remoteConns, nodeIds){
 }
 function applyMergedServerCanvas(serverCanvas){
     if(!serverCanvas || !canvas) return false;
-    const remoteNodes = (Array.isArray(serverCanvas.nodes) ? serverCanvas.nodes : []).map(normalizeLegacySmartNode).filter(Boolean);
+    const remoteRawNodes = (Array.isArray(serverCanvas.nodes) ? serverCanvas.nodes : []).map(normalizeLegacySmartNode).filter(Boolean);
+    const remoteFiltered = filterTransientUploadPlaceholders(remoteRawNodes, serverCanvas.connections || []);
+    const remoteNodes = remoteFiltered.nodes;
     const mergedNodes = mergeSmartNodeLists(nodes, remoteNodes);
-    const nodeIds = new Set(mergedNodes.map(n => n.id));
-    nodes = mergedNodes;
-    canvas.connections = mergeSmartConnections(canvas.connections, serverCanvas.connections, nodeIds);
+    const localFiltered = filterTransientUploadPlaceholders(mergedNodes, canvas.connections || []);
+    nodes = localFiltered.nodes;
+    const filteredNodeIds = new Set(nodes.map(n => n.id));
+    canvas.connections = mergeSmartConnections(canvas.connections, remoteFiltered.connections, filteredNodeIds);
+    const cleanedState = clearCompletedNodeBusyStates();
+    const recoveredLoopOutputs = recoverStuckLoopOutputsFromLogs();
     canvas.updated_at = Number(serverCanvas.updated_at || canvas.updated_at || 0);
     if(canvas.title !== serverCanvas.title && serverCanvas.title){
         canvas.title = serverCanvas.title;
@@ -4559,7 +5091,8 @@ function applyMergedServerCanvas(serverCanvas){
         if(titleEl) titleEl.textContent = canvas.title;
     }
     render();
-    if(typeof refreshConnectionLayer === 'function') refreshConnectionLayer();
+    if(typeof scheduleConnectionLayerRefresh === 'function') scheduleConnectionLayerRefresh();
+    if(remoteFiltered.removed.size || localFiltered.removed.size || cleanedState || recoveredLoopOutputs) scheduleSave();
     resumeSmartPendingTasks();
     resumeJimengPendingNodes();
     return true;
@@ -5130,17 +5663,25 @@ async function loadCanvas(){
         document.title = canvas.title || tr('canvas.smartCanvas');
         document.getElementById('smartTitle').textContent = canvas.title || tr('canvas.smartCanvas');
         nodes = (Array.isArray(canvas.nodes) ? canvas.nodes : []).map(normalizeLegacySmartNode).filter(Boolean);
+        canvas.connections = Array.isArray(canvas.connections) ? canvas.connections : [];
+        const placeholderFiltered = filterTransientUploadPlaceholders(nodes, canvas.connections);
+        nodes = placeholderFiltered.nodes;
+        canvas.connections = placeholderFiltered.connections;
         migrateSmartGroupImageMembers();
         nodes.forEach(n => {
             const pendingTasks = smartPendingTasks(n);
             if(pendingTasks.length){
                 n.pending = Math.max(pendingTasks.length, Number(n.pending || 0) || pendingTasks.length);
                 n.running = false;
-            } else if(n.pending){
-                n.pending = 0;
+            } else if(smartNodeHasDisplayResult(n)){
+                markSmartNodeComplete(n, {hideTimer:true});
+            } else if(n.pending || n.queued){
+                clearSmartNodeBusyState(n);
             }
         });
-        canvas.connections = Array.isArray(canvas.connections) ? canvas.connections : [];
+        const cleanedCompletedState = clearCompletedNodeBusyStates();
+        const recoveredLoopOutputs = recoverStuckLoopOutputsFromLogs();
+        const hiddenCompletedTimers = hideCompletedRunTimers();
         const cleanedDetachedInputs = cleanupDetachedRunInputRefs();
         viewport = {...viewport, ...(canvas.viewport || {})};
         viewport.scale = safeScale(viewport.scale);
@@ -5156,7 +5697,7 @@ async function loadCanvas(){
         updateProviderModels();
         applyViewport();
         render();
-        if(cleanedDetachedInputs) scheduleSave();
+        if(placeholderFiltered.removed.size || cleanedDetachedInputs || cleanedCompletedState || recoveredLoopOutputs || hiddenCompletedTimers) scheduleSave();
         resumeSmartPendingTasks();
         resumeJimengPendingNodes();
         startCanvasMetaPoll();
@@ -5261,6 +5802,11 @@ function createPromptNode(x, y, options={}){
         llmSystemEnabled:false,
         llmSystemPrompt:'You are a helpful prompt assistant.',
         llmInstruction:'',
+        cameraEnabled:false,
+        cameraFocalLength:PROMPT_CAMERA_DEFAULT_FOCAL,
+        cameraAzimuth:'front',
+        cameraElevation:'eye',
+        posterCopyEnabled:false,
         created_at:Date.now()
     };
     nodes.push(node);
@@ -5320,6 +5866,7 @@ function copySelectedNodes(){
         nodes:JSON.parse(JSON.stringify(copiedNodes)),
         connections:JSON.parse(JSON.stringify(copiedConnections))
     };
+    imageClipboard = null;
     toast(`已复制 ${copiedNodes.length} 个节点`);
 }
 function pasteNodes(){
@@ -5358,6 +5905,57 @@ function pasteNodes(){
     selectedImage = {nodeId:'', index:-1};
     render();
     scheduleSave();
+}
+function cloneClipboardMediaItem(item){
+    try {
+        return JSON.parse(JSON.stringify(item || {}));
+    } catch(e) {
+        return {...(item || {})};
+    }
+}
+function selectedImageClipboardItem(){
+    const nodeId = selectedImage.nodeId || '';
+    const index = Number(selectedImage.index);
+    if(!nodeId || !Number.isFinite(index) || index < 0) return null;
+    const node = nodes.find(n => n.id === nodeId);
+    if(!node) return null;
+    const direct = imageForDisplay(node.images?.[index]);
+    let item = direct?.url ? direct : null;
+    if(!item && isSmartGroupNode(node)){
+        const refs = smartGroupImageRefs(node);
+        const ref = refs.find(r => r.nodeId === node.id && Number(r.index) === index) || refs[index];
+        item = ref?.item?.url ? ref.item : null;
+    }
+    if(!item?.url) return null;
+    const copy = cloneClipboardMediaItem(item);
+    copy.kind = copy.kind || mediaKindForItem(copy);
+    return {item:copy, sourceNodeId:node.id, sourceImageIndex:index};
+}
+function copySelectedImage(){
+    if(!canvas || isEditableTarget(document.activeElement)) return false;
+    const payload = selectedImageClipboardItem();
+    if(!payload) return false;
+    imageClipboard = {...payload, copiedAt:Date.now()};
+    nodeClipboard = null;
+    toast('已复制图片');
+    return true;
+}
+function pasteImageClipboard(){
+    if(!canvas || isEditableTarget(document.activeElement) || !imageClipboard?.item?.url) return false;
+    lastNodePasteAt = Date.now();
+    pushUndo();
+    const center = lastMouseWorld || viewportCenter();
+    const item = cloneClipboardMediaItem(imageClipboard.item);
+    item.kind = item.kind || mediaKindForItem(item);
+    const node = createImageNodeAt({x:center.x + 28, y:center.y + 28}, [item], {select:true, skipUndo:true});
+    if(!node) return false;
+    selectedIds = [];
+    selectedId = node.id;
+    selectedImage = {nodeId:node.id, index:0};
+    render();
+    scheduleSave();
+    toast('已粘贴图片');
+    return true;
 }
 // 跨页"素材库 → 画布"剪贴板：素材库管理页把所选素材写进这个 localStorage key，
 // 画布里按 Ctrl+V 读取并批量生成图片节点（网格平铺），用完即清空（一次性）。
@@ -5433,6 +6031,8 @@ function shellPoint(event){
 function renderConnections(){
     const conns = (canvas?.connections || []).map((conn, index) => ({...conn, index})).filter(c => nodes.some(n => n.id === c.from) && nodes.some(n => n.id === c.to));
     const cascadeKeys = cascadeConnectionKeys();
+    const activeCascadeCount = (smartCascadeRunPath?.states && Object.values(smartCascadeRunPath.states).filter(state => state && state !== 'done').length) || 0;
+    const reduceMotion = activeCascadeCount > 24;
     // 合并连线：同一来源连到同一分组的多个成员，合成一条到分组的连线（A→A1/A2/A3 显示为 A→分组），
     // 减少“每张图都拖一条线”的杂乱。history 连线不合并。
     const buckets = new Map();
@@ -5495,9 +6095,10 @@ function renderConnections(){
         const width = kind === 'input' ? '1.9' : '1.6';
         return `<path class="${cls}" d="${curve}" stroke="${color}" stroke-width="${width}" fill="none" opacity="${opacity}"></path><path class="conn-hit" data-conn-index="${dataIndex}" d="${curve}" stroke="transparent" stroke-width="14" fill="none"></path><circle cx="${tx}" cy="${ty}" r="3.5" fill="${color}" opacity=".66"></circle><g class="conn-cut" data-conn-index="${dataIndex}" transform="translate(${mx} ${my})"><circle r="8" fill="var(--card)" stroke="${color}" stroke-width="1.4"></circle><path d="M-3 -3 L3 3 M3 -3 L-3 3" stroke="${color}" stroke-width="1.5" stroke-linecap="round"></path></g>`;
     }).join('');
-    return `<svg class="connection-layer" width="6000" height="4000" viewBox="0 0 6000 4000" xmlns="http://www.w3.org/2000/svg">${paths}</svg>`;
+    return `<svg class="connection-layer ${reduceMotion ? 'conn-reduce-motion' : ''}" width="6000" height="4000" viewBox="0 0 6000 4000" xmlns="http://www.w3.org/2000/svg">${paths}</svg>`;
 }
 function refreshConnectionLayer(){
+    connectionLayerRaf = 0;
     const oldSvg = world.querySelector('svg.connection-layer');
     if(!oldSvg) return;
     const tpl = document.createElement('template');
@@ -5505,6 +6106,10 @@ function refreshConnectionLayer(){
     const nextSvg = tpl.content.firstElementChild;
     if(nextSvg) oldSvg.replaceWith(nextSvg);
     bindConnectionEvents();
+}
+function scheduleConnectionLayerRefresh(){
+    if(connectionLayerRaf) return;
+    connectionLayerRaf = requestAnimationFrame(refreshConnectionLayer);
 }
 let interactionLayerRaf = 0;
 // 拖动/缩放节点时，每个 mousemove 都全量重建连线 SVG + 小地图会掉帧；
@@ -5562,7 +6167,9 @@ function updateNodeElementDuringResize(node){
             loadingGrid.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
             loadingGrid.style.gridTemplateRows = `repeat(${rows}, 1fr)`;
         }
-        const maxVisibleRows = isSmartGroupNode(node) ? SMART_GROUP_MAX_VISIBLE_ROWS : MEDIA_GROUP_MAX_VISIBLE_ROWS;
+        const maxVisibleRows = isSmartGroupNode(node)
+            ? (smartGroupCompactMembers(node).length ? Number(layout.rows || 1) : SMART_GROUP_MAX_VISIBLE_ROWS)
+            : MEDIA_GROUP_MAX_VISIBLE_ROWS;
         const grid = body.querySelector('.thumb-grid');
         if(grid){
             grid.style.setProperty('--thumb-cols', layout.cols);
@@ -5593,6 +6200,17 @@ function updateNodeElementDuringResize(node){
     const active = selectedNode();
     if(active?.id === node.id) positionComposerForNode(active);
     scheduleInteractionLayerRefresh();
+}
+function syncSmartGroupMemberElements(group){
+    if(!isSmartGroupNode(group)) return;
+    smartGroupCompactMembers(group).forEach(member => {
+        const el = world.querySelector(`.image-node[data-id="${CSS.escape(member.id)}"]`);
+        if(el){
+            el.style.left = `${member.x || 0}px`;
+            el.style.top = `${member.y || 0}px`;
+        }
+        updateNodeElementDuringResize(member);
+    });
 }
 function isVideoMediaItem(img){
     if(!img) return false;
@@ -5888,9 +6506,9 @@ function smartRunTaskLabel(run){
     const s = run?.settings || {};
     if(run?.kind === 'video') return s.videoModel || 'Video';
     if(s.engine === 'comfy'){
-        if(s.comfyMode === 'custom') return s.comfyWorkflow || 'ComfyUI';
+        if(s.comfyMode === 'custom') return s.comfyWorkflow || tr('smart.engineComfy');
         const labels = {text:tr('canvas.comfyModeText') || '文生图', enhance:tr('canvas.comfyModeEnhance') || '图片增强', edit:tr('canvas.comfyModeEdit') || '图片编辑'};
-        return labels[s.comfyMode || 'text'] || 'ComfyUI';
+        return labels[s.comfyMode || 'text'] || tr('smart.engineComfy');
     }
     if(s.engine === 'modelscope'){
         return s.msgenModel === 'custom' ? (s.msCustomModel || 'Modelscope') : (MS_GEN_MODELS[s.msgenModel]?.label || s.msgenModel || 'Modelscope');
@@ -6033,7 +6651,7 @@ function downloadSmartGroupImages(group){
 }
 function smartRunPlatformLabel(run){
     const s = run?.settings || {};
-    if(s.engine === 'comfy') return 'ComfyUI';
+    if(s.engine === 'comfy') return tr('smart.engineComfy');
     if(s.engine === 'modelscope') return 'Modelscope';
     if(run?.kind === 'video') return videoProviderById(s.videoProvider || '')?.name || s.videoProvider || 'Video';
     return apiProviderById(s.provider_id || '')?.name || s.provider_id || 'API';
@@ -6066,6 +6684,7 @@ function addSmartGenerationLog({run, outputs=[], runMs=0, error=''}) {
         createdAt:Date.now(),
         status:error ? 'failed' : 'success',
         platform:smartRunPlatformLabel(run),
+        nodeId:run?.nodeId || '',
         nodeType:run?.nodeType || 'smart-image',
         model:smartRunTaskLabel(run),
         request:smartRunRequestMeta(run),
@@ -6076,6 +6695,7 @@ function addSmartGenerationLog({run, outputs=[], runMs=0, error=''}) {
         error:error ? String(error) : ''
     };
     canvas.logs = [entry, ...canvas.logs].slice(0, 500);
+    if(!error && recoverStuckLoopOutputsFromLogs()) render();
     scheduleSave();
 }
 const SMART_LOG_PREVIEW_NODE_ID = '__smart_log_preview__';
@@ -6202,16 +6822,182 @@ function openSmartCanvasShortcuts(){
 function closeSmartCanvasShortcuts(){
     smartShortcutModal?.classList.remove('open');
 }
+function promptNodeReferenceWeightHtml(node){
+    if(!node?.styleMatch) return '';
+    const weight = promptNodeReferenceWeight(node);
+    return `<label class="prompt-style-weight prompt-node-control">
+        <span><i data-lucide="sliders-horizontal"></i>原图参考权重</span>
+        <input class="prompt-style-weight-range" type="range" min="0" max="100" step="5" value="${weight}">
+        <strong class="prompt-style-weight-value">${weight}%</strong>
+    </label>`;
+}
+function promptCameraRigStyle(node){
+    const azimuthPoint = promptCameraAzimuthGeometry(promptNodeCameraAzimuth(node).value);
+    const elevationPoint = promptCameraElevationGeometry(promptNodeCameraElevation(node).value);
+    return `--yaw-x:${azimuthPoint.x};--yaw-y:${azimuthPoint.y};--pitch-y:${elevationPoint.y};`;
+}
+function promptNodeCameraRigHtml(node){
+    const azimuth = promptNodeCameraAzimuth(node);
+    const elevation = promptNodeCameraElevation(node);
+    return `<div class="prompt-camera-rig" style="${promptCameraRigStyle(node)}">
+        <div class="prompt-camera-yaw-pad" data-camera-yaw title="Drag the handle to rotate horizontal camera view">
+            <span class="prompt-camera-orbit"></span>
+            <span class="prompt-camera-axis prompt-camera-axis-x"></span>
+            <span class="prompt-camera-axis prompt-camera-axis-y"></span>
+            <span class="prompt-camera-depth-arc"></span>
+            <span class="prompt-camera-center-dot"></span>
+            <span class="prompt-camera-axis-label yaw-front">&#27491;</span>
+            <span class="prompt-camera-axis-label yaw-back">&#32972;</span>
+            <span class="prompt-camera-axis-label yaw-left">&#24038;</span>
+            <span class="prompt-camera-axis-label yaw-right">&#21491;</span>
+            <button class="prompt-camera-yaw-handle" type="button" data-camera-yaw-handle aria-label="Horizontal camera angle" title="${escapeAttr(azimuth.label)}"><span></span></button>
+        </div>
+        <div class="prompt-camera-pitch-rail" data-camera-pitch title="Drag the handle to set camera height">
+            <span class="prompt-camera-pitch-line"></span>
+            <span class="prompt-camera-pitch-tick top"></span>
+            <span class="prompt-camera-pitch-tick middle"></span>
+            <span class="prompt-camera-pitch-tick bottom"></span>
+            <span class="prompt-camera-pitch-label top">&#39640;</span>
+            <span class="prompt-camera-pitch-label middle">&#24179;</span>
+            <span class="prompt-camera-pitch-label bottom">&#20302;</span>
+            <button class="prompt-camera-pitch-handle" type="button" data-camera-pitch-handle aria-label="Camera height angle" title="${escapeAttr(elevation.label)}"><span></span></button>
+        </div>
+        <div class="prompt-camera-readout">
+            <span><small>&#26041;&#21521;</small><strong class="prompt-camera-azimuth-label">${escapeHtml(azimuth.label)}</strong></span>
+            <span><small>&#39640;&#24230;</small><strong class="prompt-camera-elevation-label">${escapeHtml(elevation.label)}</strong></span>
+        </div>
+    </div>`;
+}
+function promptNodeCameraControlHtml(node){
+    if(!promptNodeCameraEnabled(node)) return '';
+    const focal = promptNodeCameraFocalLength(node);
+    const lens = promptNodeCameraLensInfo(focal);
+    return `<div class="prompt-camera-panel prompt-node-control">
+        <div class="prompt-camera-head">
+            <span><i data-lucide="camera"></i>相机控制</span>
+            <strong class="prompt-camera-digest">${escapeHtml(promptNodeCameraSummary(node))}</strong>
+        </div>
+        <label class="prompt-camera-range">
+            <span>焦段</span>
+            <input class="prompt-camera-focal" type="range" min="${PROMPT_CAMERA_FOCAL_MIN}" max="${PROMPT_CAMERA_FOCAL_MAX}" step="1" value="${focal}">
+            <strong class="prompt-camera-focal-value">${focal}mm</strong>
+        </label>
+        ${promptNodeCameraRigHtml(node)}
+        <div class="prompt-camera-note">${escapeHtml(`${lens.label} · 约 ${lens.fov}° FOV · ${lens.note}`)}</div>
+    </div>`;
+}
+function refreshPromptCameraControlUi(el, node){
+    const focal = promptNodeCameraFocalLength(node);
+    const lens = promptNodeCameraLensInfo(focal);
+    const digestEl = el.querySelector('.prompt-camera-digest');
+    const focalValueEl = el.querySelector('.prompt-camera-focal-value');
+    const noteEl = el.querySelector('.prompt-camera-note');
+    const rigEl = el.querySelector('.prompt-camera-rig');
+    const azimuthLabelEl = el.querySelector('.prompt-camera-azimuth-label');
+    const elevationLabelEl = el.querySelector('.prompt-camera-elevation-label');
+    const yawHandleEl = el.querySelector('.prompt-camera-yaw-handle');
+    const pitchHandleEl = el.querySelector('.prompt-camera-pitch-handle');
+    const azimuth = promptNodeCameraAzimuth(node);
+    const elevation = promptNodeCameraElevation(node);
+    if(digestEl) digestEl.textContent = promptNodeCameraSummary(node);
+    if(focalValueEl) focalValueEl.textContent = `${focal}mm`;
+    if(noteEl) noteEl.textContent = `${lens.label} · 约 ${lens.fov}° FOV · ${lens.note}`;
+    if(rigEl) rigEl.setAttribute('style', promptCameraRigStyle(node));
+    if(azimuthLabelEl) azimuthLabelEl.textContent = azimuth.label;
+    if(elevationLabelEl) elevationLabelEl.textContent = elevation.label;
+    if(yawHandleEl) yawHandleEl.title = azimuth.label;
+    if(pitchHandleEl) pitchHandleEl.title = elevation.label;
+    refreshPromptNodeSegmentsUi(el, node);
+}
+function syncPromptNodeHeightForCamera(node, prevExtra=0){
+    if(!node) return;
+    const nextExtra = promptNodeCameraExtraHeight(node);
+    const explicitH = Number(node.h);
+    const currentH = Number.isFinite(explicitH) ? explicitH : 0;
+    const fallbackH = promptNodeMinHeight(node);
+    node.h = Math.max(fallbackH, currentH ? currentH - Math.max(0, prevExtra) + nextExtra : fallbackH);
+    node.w = Math.max(Number(node.w) || 0, 316);
+}
+function promptCameraYawPointFromEvent(target, event){
+    const rect = target.getBoundingClientRect();
+    const radius = Math.max(1, Math.min(rect.width, rect.height) * 0.36);
+    return {
+        x:promptCameraClampUnit((event.clientX - (rect.left + rect.width / 2)) / radius),
+        y:promptCameraClampUnit((event.clientY - (rect.top + rect.height / 2)) / radius)
+    };
+}
+function promptCameraPitchYFromEvent(target, event){
+    const rect = target.getBoundingClientRect();
+    const radius = Math.max(1, rect.height * 0.38);
+    return promptCameraClampUnit((event.clientY - (rect.top + rect.height / 2)) / radius);
+}
+function bindPromptCameraDragControl(target, applyValue){
+    if(!target) return;
+    let dragging = false;
+    ['mousedown', 'click', 'dblclick'].forEach(type => {
+        target.addEventListener(type, event => {
+            event.stopPropagation();
+        }, true);
+    });
+    target.addEventListener('pointerdown', event => {
+        if(event.button !== undefined && event.button !== 0) return;
+        event.preventDefault();
+        event.stopPropagation();
+        dragging = true;
+        target.classList.add('dragging');
+        target.setPointerCapture?.(event.pointerId);
+        applyValue(event);
+    });
+    target.addEventListener('pointermove', event => {
+        if(!dragging) return;
+        event.preventDefault();
+        event.stopPropagation();
+        applyValue(event);
+    });
+    const endDrag = event => {
+        if(!dragging) return;
+        event.preventDefault?.();
+        event.stopPropagation?.();
+        dragging = false;
+        target.classList.remove('dragging');
+        target.releasePointerCapture?.(event.pointerId);
+        scheduleSave();
+    };
+    target.addEventListener('pointerup', endDrag);
+    target.addEventListener('pointercancel', endDrag);
+}
+function bindPromptCameraRig(el, node){
+    const yawEl = el.querySelector('[data-camera-yaw]');
+    const pitchEl = el.querySelector('[data-camera-pitch]');
+    bindPromptCameraDragControl(yawEl, event => {
+        const point = promptCameraYawPointFromEvent(yawEl, event);
+        const next = promptCameraNearestAzimuth(point.x, point.y);
+        if(node.cameraAzimuth !== next.value){
+            node.cameraAzimuth = next.value;
+            refreshPromptCameraControlUi(el, node);
+        }
+    });
+    bindPromptCameraDragControl(pitchEl, event => {
+        const next = promptCameraNearestElevation(promptCameraPitchYFromEvent(pitchEl, event));
+        if(node.cameraElevation !== next.value){
+            node.cameraElevation = next.value;
+            refreshPromptCameraControlUi(el, node);
+        }
+    });
+}
 function promptNodeBodyHtml(node){
     node.llmProvider = resolveChatProviderId(node.llmProvider || '');
     node.llmModel = resolveChatModel(node.llmModel || '', node.llmProvider);
     node.llmSystemEnabled = node.llmSystemEnabled === true;
     node.promptSplitEnabled = node.promptSplitEnabled === true;
+    node.cameraEnabled = node.cameraEnabled === true;
     node.promptSeparator = promptNodeSeparator(node);
     const readonly = node.llmEnabled ? 'readonly' : '';
     const systemPrompt = (node.llmSystemPrompt || '').trim();
     const inputThumbs = smartNodeInputThumbsHtml(promptNodeInputImages(node));
     const templateActive = activePromptTemplateNodeId() === node.id;
+    const referenceWeightHtml = promptNodeReferenceWeightHtml(node);
+    const cameraControlHtml = promptNodeCameraControlHtml(node);
     const promptItems = promptNodePromptItems(node);
     const promptSplitPreviewH = promptNodeSplitPreviewHeight(node);
     const upstreamPromptItems = promptNodeUpstreamPromptItems(node);
@@ -6239,8 +7025,12 @@ function promptNodeBodyHtml(node){
         <div class="prompt-node-tools">
             <button class="prompt-node-pill prompt-node-control prompt-preset-edit ${templateActive ? 'active' : ''}" type="button"><i data-lucide="library"></i><span>模板库</span></button>
             <button class="prompt-node-pill prompt-node-control prompt-split-toggle ${node.promptSplitEnabled ? 'active' : ''}" type="button"><i data-lucide="split"></i><span>分隔符</span></button>
+            <button class="prompt-node-pill prompt-node-control prompt-poster-copy-toggle ${node.posterCopyEnabled ? 'active' : ''}" type="button" title="${node.posterCopyEnabled ? '复刻主参考图可读海报文案，避免随机文字' : '禁止输出可读海报文案'}"><i data-lucide="type"></i><span>海报文案</span></button>
+            <button class="prompt-node-pill prompt-camera-toggle ${node.cameraEnabled ? 'active' : ''}" type="button"><i data-lucide="camera"></i><span>相机</span></button>
             <button class="prompt-node-pill prompt-llm-toggle ${node.llmEnabled ? 'active' : ''}" type="button"><i data-lucide="sparkles"></i><span>LLM</span></button>
         </div>
+        ${referenceWeightHtml}
+        ${cameraControlHtml}
         ${node.promptSplitEnabled ? `<div class="prompt-node-split-row">
             <label class="prompt-node-split-control prompt-node-control"><span>分隔符</span><input class="prompt-node-separator" type="text" value="${escapeHtml(node.promptSeparator)}" maxlength="8" placeholder=";"></label>
             <span class="prompt-node-split-count">${promptItems.length || 0} 段</span>
@@ -6400,7 +7190,8 @@ function smartGroupBodyHtml(node){
         counts.loop ? `${counts.loop} 循环` : ''
     ].filter(Boolean).join(' · ') || '双击或拖入图片';
     if(refThumbs.length){
-        if(refThumbs.length === 1){
+        const totalThumbs = Math.max(1, Number(groupThumbLayout?.rows || 1) * Number(groupThumbLayout?.cols || 1));
+        if(totalThumbs === 1 && refThumbs.length === 1){
             const ref = refThumbs[0];
             const innerW = Math.max(24, Number(groupThumbLayout.innerW || groupThumbLayout.width || SMART_GROUP_DEFAULT_WIDTH));
             const innerH = Math.max(24, Number(groupThumbLayout.innerH || groupThumbLayout.height || SMART_GROUP_DEFAULT_HEIGHT));
@@ -6410,7 +7201,8 @@ function smartGroupBodyHtml(node){
                 <div class="image-wrap smart-group-single-thumb ${selectedImage.nodeId === ref.nodeId && Number(selectedImage.index) === Number(ref.index) ? 'image-selected' : ''}" data-ref-node-id="${escapeAttr(ref.nodeId)}" data-ref-image-index="${ref.index}" data-image-index="${ref.index}" data-media-signature="${escapeAttr(`${mediaKindForItem(ref.item)}:${ref.item?.url || ''}`)}" style="--node-img-w:${innerW}px;--node-img-h:${innerH}px">${singleMediaHtml(ref.item, innerW, innerH)}${imageResolutionBadgeHtml(ref.item)}${canDelete ? `<button class="mini-x image-delete" type="button" data-image-index="${ref.index}" title="${escapeHtml(tr('smart.deleteImage'))}"><i data-lucide="trash-2"></i></button>` : ''}</div>
             </div>`;
         }
-        const visibleRows = Math.max(1, Math.min(SMART_GROUP_MAX_VISIBLE_ROWS, Number(groupThumbLayout.visibleRows || groupThumbLayout.rows || 1)));
+        const groupMaxVisibleRows = (groupThumbLayout.compactMembers || []).length ? Number(groupThumbLayout.rows || 1) : SMART_GROUP_MAX_VISIBLE_ROWS;
+        const visibleRows = Math.max(1, Math.min(groupMaxVisibleRows, Number(groupThumbLayout.visibleRows || groupThumbLayout.rows || 1)));
         const maxHeight = Math.max(44, visibleRows * Number(groupThumbLayout.thumb || 96) + Math.max(0, visibleRows - 1) * 8);
         return `<div class="smart-group-card has-thumbs">
             <div class="smart-group-summary"><i data-lucide="group"></i><span>${escapeHtml(summary)}</span></div>
@@ -6505,10 +7297,12 @@ function smartNodeToolbarHtml(node){
     if(!item?.url) return '';
     const kind = mediaKindForItem(item);
     const canEditImage = kind === 'image';
+    const styleMatching = Boolean(node.styleMatching);
     const imageCount = images.filter(img => mediaKindForItem(imageForDisplay(img)) === 'image' && imageForDisplay(img)?.url).length;
     const gridLabel = imageCount > 1 ? '宫格拼接' : '宫格切分';
     const actions = [
         {key:'preview', icon:'eye', label:'预览', enabled:kind === 'image' || kind === 'video'},
+        {key:'style-match', icon:styleMatching ? 'loader-2' : 'sparkles', label:styleMatching ? '匹配中' : '匹配提示词', enabled:canEditImage && !styleMatching},
         {key:'crop', icon:'crop', label:'裁剪', enabled:canEditImage},
         {key:'outpaint', icon:'expand', label:'扩图', enabled:canEditImage},
         {key:'mask', icon:'brush', label:'遮罩', enabled:canEditImage},
@@ -6536,6 +7330,93 @@ function duplicateSmartNodeMediaToCanvas(node, imageIndex){
     scheduleSave();
     toast('已添加到画布');
 }
+function styleCasePreviewReference(cases){
+    const hit = (Array.isArray(cases) ? cases : []).find(item => item?.preview_image || item?.reference_image);
+    const url = hit?.preview_image || hit?.reference_image || '';
+    if(!url) return null;
+    const title = hit.title || hit.case_id || 'Style case';
+    return {
+        url,
+        kind:'image',
+        name:`Case style supplement: ${title}`,
+        role:'case_style_reference',
+        caseId:hit.case_id || hit.id || '',
+        styleCaseWeak:true,
+        styleLock:false,
+        referenceLock:false
+    };
+}
+async function matchStylePromptForNode(nodeId, imageIndex=0){
+    const node = nodes.find(n => n.id === nodeId);
+    const source = node?.images?.[imageIndex];
+    const item = imageForDisplay(source);
+    if(!node || !item?.url){ toast('没有可匹配的图片'); return; }
+    if(mediaKindForItem(item) !== 'image'){ toast('只能用图片匹配提示词'); return; }
+    if(node.styleMatching) return;
+    const provider = resolveChatProviderId(settings.provider_id || '');
+    const model = resolveChatModel('', provider);
+    node.styleMatching = true;
+    render();
+    toast('正在匹配提示词...');
+    try {
+        const response = await fetch('/api/style-library/match-image', {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({
+                image:smartOriginalMediaUrl(item),
+                provider,
+                model,
+                limit:4
+            })
+        });
+        const data = await response.json().catch(() => ({}));
+        if(!response.ok) throw new Error(data.detail || '匹配提示词失败');
+        const prompt = String(data.prompt || data.analysis?.positive_prompt || '').trim();
+        if(!prompt) throw new Error('没有生成可用提示词');
+        pushUndo();
+        const rect = nodeRect(node);
+        const promptNode = createPromptNode(rect.x + rect.width + 88, rect.y, {skipUndo:true, select:true});
+        promptNode.text = prompt;
+        promptNode.h = Math.max(240, Math.min(420, 180 + Math.ceil(prompt.length / 5)));
+        const caseReference = styleCasePreviewReference(data.cases);
+        promptNode.manualInputRefs = [{
+            ...item,
+            url:smartOriginalMediaUrl(item),
+            kind:mediaKindForItem(item) || 'image',
+            name:item.name || 'Strict composition reference',
+            role:'composition_reference',
+            sourceNodeId:node.id,
+            sourceImageIndex:imageIndex,
+            styleLock:true
+        }, caseReference].filter(Boolean);
+        promptNode.referenceLock = true;
+        promptNode.referenceWeight = 85;
+        promptNode.styleMatch = {
+            image:smartOriginalMediaUrl(item),
+            query:data.query || '',
+            cases:Array.isArray(data.cases) ? data.cases : [],
+            analysis:data.analysis || {},
+            model:data.model || model,
+            source:data.source || '',
+            reference_lock:true,
+            referenceWeight:85,
+            created_at:Date.now()
+        };
+        connectInputNode(node.id, promptNode.id);
+        selectedId = promptNode.id;
+        selectedIds = [];
+        selectedImage = {nodeId:'', index:-1};
+        render();
+        scheduleSave();
+        toast(`已匹配 ${promptNode.styleMatch.cases.length || 0} 个风格案例`);
+    } catch(err) {
+        toast((err.message || '匹配提示词失败').slice(0, 180));
+    } finally {
+        const latest = nodes.find(n => n.id === nodeId);
+        if(latest) delete latest.styleMatching;
+        render();
+    }
+}
 function runSmartNodeToolbarAction(nodeId, action){
     const node = nodes.find(n => n.id === nodeId);
     if(!node) return;
@@ -6552,6 +7433,10 @@ function runSmartNodeToolbarAction(nodeId, action){
     }
     if(action === 'canvas'){
         duplicateSmartNodeMediaToCanvas(node, index);
+        return;
+    }
+    if(action === 'style-match'){
+        matchStylePromptForNode(nodeId, index);
         return;
     }
     if(kind !== 'image' && action !== 'preview'){
@@ -6694,6 +7579,7 @@ function render(){
         const isPrompt = node.type === 'smart-prompt';
         const isLoop = node.type === 'smart-loop';
         const isSmartGroup = node.type === 'smart-group';
+        const isCompactMember = isSmartGroupCompactMember(node);
         const isImageNode = node.type === 'smart-image' || !node.type;
         const isJimengPending = Boolean(node.jimengPending && node.jimengPending.submitId && imgs.length === 0);
         const isQueued = Boolean(node.queued && imgs.length === 0 && !node.pending && !isJimengPending);
@@ -6704,7 +7590,7 @@ function render(){
         const body = nodeBodyHtml(node, layout);
         const deleteBtn = isGroup ? '' : `<button class="mini-x node-delete" type="button" title="${escapeHtml(tr('smart.deleteNode'))}"><i data-lucide="trash-2"></i></button>`;
         const hint = isSmartGroup ? '双击添加 · 拖入归组 · 选中后生成' : isPending ? escapeHtml(tr('smart.hintPending')) : (imgs.length > 1 ? escapeHtml(tr('smart.hintMulti')) : imgs.length ? escapeHtml(tr('smart.hintSingle')) : escapeHtml(tr('smart.hintEmpty')));
-        const html = `<div class="image-node ${isEmpty ? 'empty-node' : ''} ${isGroup ? 'group-node' : ''} ${isHistory ? 'history-group-node' : ''} ${isPrompt ? 'prompt-smart-node' : ''} ${isLoop ? 'loop-smart-node' : ''} ${isSmartGroup ? 'smart-group-node' : ''} ${isNodeSelected(node.id) ? 'selected' : ''} ${(dragState?.groupIds?.includes(node.id) || dragState?.id === node.id) ? 'dragging' : ''} ${node.running ? 'node-running' : ''} ${isPending ? 'node-pending' : ''}" data-id="${escapeHtml(node.id)}" style="left:${node.x || 0}px;top:${node.y || 0}px;width:${layout.width}px;height:${layout.height}px">
+        const html = `<div class="image-node ${isEmpty ? 'empty-node' : ''} ${isGroup ? 'group-node' : ''} ${isHistory ? 'history-group-node' : ''} ${isPrompt ? 'prompt-smart-node' : ''} ${isLoop ? 'loop-smart-node' : ''} ${isSmartGroup ? 'smart-group-node' : ''} ${isCompactMember ? 'smart-group-member-node' : ''} ${isNodeSelected(node.id) ? 'selected' : ''} ${(dragState?.groupIds?.includes(node.id) || dragState?.id === node.id) ? 'dragging' : ''} ${node.running ? 'node-running' : ''} ${isPending ? 'node-pending' : ''}" data-id="${escapeHtml(node.id)}" style="left:${node.x || 0}px;top:${node.y || 0}px;width:${layout.width}px;height:${layout.height}px">
             <div class="node-head"><div class="node-title">${title}</div><div class="node-actions">${deleteBtn}</div></div>
             ${!isEmpty && !isGroup ? `<div class="floating-node-actions"><button class="mini-x node-delete" type="button" title="${escapeHtml(tr('smart.deleteNode'))}"><i data-lucide="trash-2"></i></button></div>` : ''}
             ${smartNodeToolbarHtml(node)}${smartGroupToolbarHtml(node)}
@@ -6926,6 +7812,39 @@ function bindPromptNodeControls(el, node){
             scheduleSave();
         };
     }
+    const referenceWeightEl = el.querySelector('.prompt-style-weight-range');
+    if(referenceWeightEl) {
+        referenceWeightEl.oninput = e => {
+            e.stopPropagation();
+            const value = Math.max(0, Math.min(100, Math.round(Number(e.target.value) || 0)));
+            node.styleMatch = node.styleMatch || {};
+            node.styleMatch.referenceWeight = value;
+            node.referenceWeight = value;
+            const valueEl = el.querySelector('.prompt-style-weight-value');
+            if(valueEl) valueEl.textContent = `${value}%`;
+            refreshPromptNodeSegmentsUi(el, node);
+            scheduleSave();
+        };
+    }
+    const cameraToggle = el.querySelector('.prompt-camera-toggle');
+    if(cameraToggle) cameraToggle.onclick = e => {
+        e.preventDefault();
+        e.stopPropagation();
+        const prevExtra = promptNodeCameraExtraHeight(node);
+        node.cameraEnabled = node.cameraEnabled !== true;
+        if(node.cameraEnabled) ensurePromptNodeCameraDefaults(node);
+        syncPromptNodeHeightForCamera(node, prevExtra);
+        render();
+        scheduleSave();
+    };
+    const cameraFocalEl = el.querySelector('.prompt-camera-focal');
+    if(cameraFocalEl) cameraFocalEl.oninput = e => {
+        e.stopPropagation();
+        node.cameraFocalLength = promptNodeCameraFocalLength({cameraFocalLength:e.target.value});
+        refreshPromptCameraControlUi(el, node);
+        scheduleSave();
+    };
+    bindPromptCameraRig(el, node);
     const splitToggle = el.querySelector('.prompt-split-toggle');
     if(splitToggle) splitToggle.onclick = e => {
         e.preventDefault();
@@ -6944,6 +7863,14 @@ function bindPromptNodeControls(el, node){
         e.preventDefault();
         e.stopPropagation();
         editPromptPresetForNode(node);
+    };
+    const posterCopyToggle = el.querySelector('.prompt-poster-copy-toggle');
+    if(posterCopyToggle) posterCopyToggle.onclick = e => {
+        e.preventDefault();
+        e.stopPropagation();
+        node.posterCopyEnabled = !node.posterCopyEnabled;
+        render();
+        scheduleSave();
     };
     const toggle = el.querySelector('.prompt-llm-toggle');
     if(toggle) toggle.onclick = e => {
@@ -7516,16 +8443,21 @@ function bindNodeEvents(){
             openImagePreviewSmart(target.targetNodeId, target.imageIndex);
         }, true);
         });
-        el.querySelectorAll('.thumb-item').forEach(item => {
+        el.querySelectorAll('.thumb-item,.smart-group-single-thumb').forEach(item => {
             item.addEventListener('mousedown', e => {
                 if(e.target.closest('video,audio')) return;
                 if(e.button !== 0 || e.target.closest('.mini-x')) return;
                 if(e.detail >= 2) return;
-                if(item.dataset.refNodeId) return;
                 const node = nodes.find(n => n.id === id);
-                if(!node || (node.images || []).length <= 1) return;
+                const refNodeId = item.dataset.refNodeId || '';
+                if(refNodeId && refNodeId !== id) return;
+                if(!node) return;
+                const imgIndex = Number(item.dataset.imageIndex || 0);
+                if(isSmartGroupNode(node)){
+                    if(!node.images?.[imgIndex]) return;
+                } else if((node.images || []).length <= 1) return;
                 e.preventDefault(); e.stopPropagation();
-                thumbDragState = {nodeId:id, imgIndex:Number(item.dataset.imageIndex || 0), startX:e.clientX, startY:e.clientY, detached:false};
+                thumbDragState = {nodeId:id, imgIndex, startX:e.clientX, startY:e.clientY, detached:false};
                 capturePendingUndo();
             });
         });
@@ -7565,11 +8497,8 @@ function bindNodeEvents(){
             let node = nodes.find(n => n.id === id);
             if(!node) return;
             if(e.altKey) node = duplicateForAltDrag(node);
-            let dragIds = selectedIds.includes(node.id) ? selectedIds.slice() : [node.id];
-            if(isSmartGroupNode(node)){
-                const memberIds = smartGroupMembers(node).map(member => member.id);
-                dragIds = Array.from(new Set([...dragIds, ...memberIds]));
-            }
+            const selectedForDrag = isNodeSelected(node.id) ? selectedNodeIds() : [node.id];
+            let dragIds = expandedDragNodeIds(selectedForDrag);
             const group = dragIds.map(dragId => {
                 const n = nodes.find(x => x.id === dragId);
                 return n ? {id:n.id, ox:Number(n.x) || 0, oy:Number(n.y) || 0} : null;
@@ -7676,6 +8605,9 @@ function deleteNode(id){
     nodes.forEach(node => {
         if(isHistoryGroupNode(node) && node.historyFor === id) deleteIds.add(node.id);
     });
+    const deletedAt = Date.now();
+    deleteIds.forEach(nodeId => deletedSmartNodeTombstones.set(nodeId, deletedAt));
+    nodes.filter(node => deleteIds.has(node.id)).forEach(cancelSmartNodeTasks);
     nodes = nodes.filter(node => !deleteIds.has(node.id));
     if(canvas) canvas.connections = (canvas.connections || []).filter(c => !deleteIds.has(c.from) && !deleteIds.has(c.to));
     nodes.forEach(node => {
@@ -7694,14 +8626,19 @@ function clearNodeMediaBeforeDelete(id){
     const hadMedia = Boolean((node.images || []).length || node.pending);
     if(!hadMedia) return false;
     pushUndo();
+    cancelSmartNodeTasks(node);
     node.images = [];
+    node.clearedAt = Date.now();
     node.pending = 0;
     node.running = false;
+    delete node.pendingTasks;
+    delete node.jimengPending;
     node.title = tr('smart.createImportNode');
     delete node.w;
     delete node.h;
     const history = historyGroupForNode(node);
     if(history){
+        deletedSmartNodeTombstones.set(history.id, Date.now());
         nodes = nodes.filter(n => n.id !== history.id);
         if(canvas) canvas.connections = (canvas.connections || []).filter(c => c.from !== history.id && c.to !== history.id);
     }
@@ -7713,6 +8650,11 @@ function clearNodeMediaBeforeDelete(id){
     return true;
 }
 function deleteNodeFromButton(id){
+    const node = nodes.find(n => n.id === id);
+    if(node && isGeneratedSmartOutputNode(node)) {
+        deleteNode(id);
+        return;
+    }
     if(clearNodeMediaBeforeDelete(id)) return;
     deleteNode(id);
 }
@@ -7796,7 +8738,7 @@ function updateLoopInsertPreview(){
     const nextPreview = next ? {index:next.index} : null;
     const changed = (loopInsertPreview?.index ?? -1) !== (nextPreview?.index ?? -1);
     loopInsertPreview = nextPreview;
-    if(changed) refreshConnectionLayer();
+    if(changed) scheduleConnectionLayerRefresh();
     return next;
 }
 function deleteImage(id, imageIndex){
@@ -11851,6 +12793,15 @@ function originalPromptTextFromParts(parts){
     });
     return text.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
 }
+function highestPriorityUserInstruction(text){
+    const value = String(text || '').trim();
+    if(!value) return '';
+    return [
+        'Highest priority user modification request:',
+        value,
+        'Apply this latest user request with highest priority. If it conflicts with earlier upstream prompt, strict composition lock, or reference-weight instructions, obey this latest modification while preserving only the non-conflicting reference style/product details.'
+    ].join('\n');
+}
 function buildPromptRequest(node, overrideDefaultImages=null, consumeDefault=false, ctx=smartLoopContext){
     const parts = collectPromptParts();
     const originalPrompt = originalPromptTextFromParts(parts);
@@ -11882,14 +12833,17 @@ function buildPromptRequest(node, overrideDefaultImages=null, consumeDefault=fal
                 return;
             }
             refMap.set(part.url, refs.length + 1);
-            refs.push({url:part.url, name:part.name || `图${refs.length + 1}`, nodeId:part.nodeId, imageIndex:part.imageIndex, kind:part.kind || 'image', asset_uris:part.asset_uris || {}, role:`image_${refs.length + 1}`});
+            refs.push({url:part.url, name:part.name || `图${refs.length + 1}`, nodeId:part.nodeId, imageIndex:part.imageIndex, kind:part.kind || 'image', asset_uris:part.asset_uris || {}, styleLock:Boolean(part.styleLock), referenceLock:Boolean(part.referenceLock), role:`image_${refs.length + 1}`});
         }
         body += `图${refMap.get(part.url)}`;
     });
     body = body.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
     const groupPrompt = isSmartGroupNode(node) ? textForNode(node, ctx).trim() : '';
     const inputPrompt = inputPromptTextFor(node, ctx).trim();
-    if(groupPrompt || inputPrompt) body = [groupPrompt, inputPrompt, body].filter(Boolean).join('\n\n');
+    if(groupPrompt || inputPrompt) {
+        const manualOverride = highestPriorityUserInstruction(body);
+        body = [groupPrompt, inputPrompt, manualOverride].filter(Boolean).join('\n\n');
+    }
     if(!body && settings.engine === 'runninghub'){
         body = rhDefaultPromptSuggestion();
     }
@@ -11899,14 +12853,14 @@ function buildPromptRequest(node, overrideDefaultImages=null, consumeDefault=fal
         return {
             prompt:`${tr('smart.refMapHeader')}\n${mapText}\n\n${tr('smart.refUserNeed')}\n${body}`,
             displayPrompt,
-            refs:refs.map((img, index) => ({url:img.url, name:img.name || `图${index + 1}`, kind:img.kind || mediaKindForItem(img), asset_uris:img.asset_uris || {}, role:`image_${index + 1}`})),
+            refs:refs.map((img, index) => ({url:img.url, name:img.name || `图${index + 1}`, kind:img.kind || mediaKindForItem(img), asset_uris:img.asset_uris || {}, styleLock:Boolean(img.styleLock), referenceLock:Boolean(img.referenceLock), sourceNodeId:img.sourceNodeId || img.nodeId || '', sourceImageIndex:Number.isFinite(Number(img.sourceImageIndex)) ? Number(img.sourceImageIndex) : img.imageIndex, role:`image_${index + 1}`})),
             mentioned:true
         };
     }
     return {
         prompt:body,
         displayPrompt,
-        refs:refs.map((img, index) => ({url:img.url, name:img.name || `图${index + 1}`, kind:img.kind || mediaKindForItem(img), asset_uris:img.asset_uris || {}, role:`image_${index + 1}`})),
+        refs:refs.map((img, index) => ({url:img.url, name:img.name || `图${index + 1}`, kind:img.kind || mediaKindForItem(img), asset_uris:img.asset_uris || {}, styleLock:Boolean(img.styleLock), referenceLock:Boolean(img.referenceLock), sourceNodeId:img.sourceNodeId || img.nodeId || '', sourceImageIndex:Number.isFinite(Number(img.sourceImageIndex)) ? Number(img.sourceImageIndex) : img.imageIndex, role:`image_${index + 1}`})),
         mentioned:false
     };
 }
@@ -11936,8 +12890,40 @@ function nextOutputPositionForSource(sourceNode, pendingBox, options={}){
     }
     return {x, y};
 }
+function reusableAutoOutputForSource(sourceNode){
+    if(!sourceNode?.id) return null;
+    const connected = outgoingConnectionsFor(sourceNode, ['input','flow'])
+        .map(conn => nodes.find(n => n.id === conn.to))
+        .filter(n => isSmartImageNode(n) && !isHistoryGroupNode(n))
+        .filter(n => !n.jimengPending && !smartPendingTasks(n).length && !Number(n.pending || 0));
+    const marked = connected.filter(n => n.autoBranchOutputSourceId === sourceNode.id);
+    const legacyGenerated = connected.filter(n => !n.autoBranchOutputSourceId && (n.runAt || n.runModelPrompt || (n.images || []).some(img => img?.generatedResult)));
+    return [...marked, ...legacyGenerated].sort((a, b) => Number(b.runAt || b.created_at || 0) - Number(a.runAt || a.created_at || 0))[0] || null;
+}
+function resetAutoOutputForRun(output, sourceNode, expectedCount, pendingBox, meta, options={}){
+    output.images = [];
+    output.pending = Math.max(1, Number(expectedCount) || 1);
+    output.running = false;
+    output.runStartedAt = nowMs();
+    delete output.runFinishedAt;
+    delete output.runElapsedMs;
+    output.runTimerHidden = false;
+    output.w = pendingBox.w;
+    output.h = pendingBox.h;
+    output.scale = MEDIA_NODE_DEFAULT_SCALE;
+    output.title = 'Image';
+    output.outputKind = 'image';
+    output.autoBranchOutputSourceId = sourceNode.id;
+    output._selectAfterRunId = options.selectOutput ? output.id : sourceNode.id;
+    attachRunMeta(output, options.stripInputMeta ? stripRunInputMeta(meta) : meta);
+    selectedId = sourceNode.id;
+    selectedImage = {nodeId:'', index:-1};
+    return output;
+}
 function createPendingOutputFromSource(sourceNode, expectedCount, meta, options={}){
     const pendingBox = pendingBoxSize(expectedCount, {sourceNode, refs:options.refs || meta?.promptRefs || []});
+    const reusable = options.reuse === false ? null : reusableAutoOutputForSource(sourceNode);
+    if(reusable) return resetAutoOutputForRun(reusable, sourceNode, expectedCount, pendingBox, meta, options);
     const pos = nextOutputPositionForSource(sourceNode, pendingBox);
     const output = {
         id:uid('smart'),
@@ -11954,6 +12940,7 @@ function createPendingOutputFromSource(sourceNode, expectedCount, meta, options=
         scale:MEDIA_NODE_DEFAULT_SCALE,
         created_at:Date.now()
     };
+    output.autoBranchOutputSourceId = sourceNode.id;
     output._selectAfterRunId = options.selectOutput ? output.id : sourceNode.id;
     nodes.push(output);
     if(options.connectSource === false) addConnection(sourceNode.id, output.id, 'flow');
@@ -12101,6 +13088,7 @@ function extractCurrentImagesToSource(node, meta=null){
 }
 function finalizePendingNode(pendingNode, urls, meta, kind='image'){
     if(!pendingNode) return;
+    pendingNode = liveSmartNode(pendingNode);
     const ext = kind === 'video' ? 'mp4' : kind === 'audio' ? 'mp3' : kind === 'text' ? 'txt' : 'png';
     const imgs = urls.map((item, i) => {
         const url = typeof item === 'string' ? item : item?.url || '';
@@ -12108,11 +13096,7 @@ function finalizePendingNode(pendingNode, urls, meta, kind='image'){
         return copyMediaSizeFields(item, {url, name:(typeof item === 'object' && item.name) || `output-${i + 1}.${ext}`, kind:itemKind, generatedResult:true});
     }).filter(img => img.url);
     pendingNode.images = imgs;
-    pendingNode.pending = 0;
-    pendingNode.runFinishedAt = nowMs();
-    if(!pendingNode.runStartedAt) pendingNode.runStartedAt = meta?.createdAt || pendingNode.runFinishedAt;
-    pendingNode.runElapsedMs = Math.max(0, pendingNode.runFinishedAt - Number(pendingNode.runStartedAt || pendingNode.runFinishedAt));
-    pendingNode.runTimerHidden = false;
+    markSmartNodeComplete(pendingNode, meta);
     pendingNode.outputKind = kind;
     if(imgs.length > 1) pendingNode.title = kind === 'video' ? 'Videos' : kind === 'audio' ? 'Audios' : kind === 'text' ? 'Texts' : 'Group';
     else pendingNode.title = kind === 'video' ? 'Video' : kind === 'audio' ? 'Audio' : kind === 'text' ? 'Text' : kind === 'file' ? 'File' : 'Image';
@@ -12122,6 +13106,7 @@ function finalizePendingNode(pendingNode, urls, meta, kind='image'){
     const metaTarget = pendingNode._runMetaTargetId ? nodes.find(n => n.id === pendingNode._runMetaTargetId) : pendingNode;
     if(metaTarget) attachRunMeta(metaTarget, meta);
     pendingNode.images = (pendingNode.images || []).map(img => stripImageGenerationMeta(img));
+    clearSourceBusyStateIfDownstreamDone(nodes.find(n => n.id === meta?.sourceNodeId));
     selectedId = pendingNode._selectAfterRunId || pendingNode.id;
     delete pendingNode._runMetaTargetId;
     delete pendingNode._selectAfterRunId;
@@ -12150,14 +13135,8 @@ function restoreSourceVisualState(node, state){
 }
 function finishLoopTargetPreviewState(node){
     if(!node) return;
-    node.pending = 0;
-    node.running = false;
-    node.queued = false;
-    delete node.pendingTasks;
-    node.runFinishedAt = nowMs();
-    if(!node.runStartedAt) node.runStartedAt = node.runFinishedAt;
-    node.runElapsedMs = Math.max(0, node.runFinishedAt - Number(node.runStartedAt || node.runFinishedAt));
-    node.runTimerHidden = false;
+    node = liveSmartNode(node);
+    markSmartNodeComplete(node);
     if((node.images || []).some(img => img?.url)){
         node.title = node.images.length > 1 ? 'Group' : 'Image';
         node.scale = node.images.length > 1 ? MEDIA_GROUP_DEFAULT_SCALE : MEDIA_NODE_DEFAULT_SCALE;
@@ -12483,10 +13462,12 @@ function cascadeOutputTitle(kind='image', count=1){
     if(Number(count) > 1) return kind === 'video' ? 'Videos' : kind === 'audio' ? 'Audios' : kind === 'text' ? 'Texts' : 'Group';
     return kind === 'video' ? 'Video' : kind === 'audio' ? 'Audio' : kind === 'text' ? 'Text' : kind === 'file' ? 'File' : 'Image';
 }
+function nonPreviewOutputImages(images=[]){
+    return (images || []).filter(img => img?.url && !img.loopInputPreview);
+}
 function cleanHistoryImages(images=[]){
     const seen = new Set();
-    return (images || [])
-        .filter(img => img?.url)
+    return nonPreviewOutputImages(images)
         .map(img => stripImageGenerationMeta({...img}))
         .filter(img => {
             const key = `${img.kind || ''}|${img.url || ''}`;
@@ -12557,6 +13538,7 @@ function ensureHistoryGroupForNode(node){
 }
 function replaceOutputsToNodeWithHistory(node, additions, kind='image', meta=null, options={}){
     if(!node || !additions?.length) return [];
+    node = liveSmartNode(node);
     const beforeRight = (Number(node.x) || 0) + nodeRect(node).width;
     const existing = cleanHistoryImages(node.images || []);
     const next = cleanHistoryImages(additions);
@@ -12572,13 +13554,7 @@ function replaceOutputsToNodeWithHistory(node, additions, kind='image', meta=nul
         delete history.h;
     }
     node.images = next;
-    node.pending = 0;
-    node.running = false;
-    delete node.pendingTasks;
-    node.runFinishedAt = nowMs();
-    if(!node.runStartedAt) node.runStartedAt = meta?.createdAt || node.runFinishedAt;
-    node.runElapsedMs = Math.max(0, node.runFinishedAt - Number(node.runStartedAt || node.runFinishedAt));
-    node.runTimerHidden = false;
+    markSmartNodeComplete(node, meta);
     node.outputKind = kind;
     node.title = cascadeOutputTitle(kind, node.images.length);
     node.scale = node.images.length > 1 ? MEDIA_GROUP_DEFAULT_SCALE : MEDIA_NODE_DEFAULT_SCALE;
@@ -12593,16 +13569,12 @@ function replaceOutputsToNodeWithHistory(node, additions, kind='image', meta=nul
 }
 function appendOutputsToNode(node, additions, kind='image', options={}){
     if(!node || !additions?.length) return [];
+    node = liveSmartNode(node);
     const beforeRight = (Number(node.x) || 0) + nodeRect(node).width;
-    const existing = (node.images || []).filter(img => img?.url).map(img => stripImageGenerationMeta(img));
+    const existing = nonPreviewOutputImages(node.images).map(img => stripImageGenerationMeta({...img}));
     const next = additions.map(img => stripImageGenerationMeta({...img}));
     node.images = [...existing, ...next];
-    node.pending = 0;
-    node.running = false;
-    node.runFinishedAt = nowMs();
-    if(!node.runStartedAt) node.runStartedAt = node.runFinishedAt;
-    node.runElapsedMs = Math.max(0, node.runFinishedAt - Number(node.runStartedAt || node.runFinishedAt));
-    node.runTimerHidden = false;
+    markSmartNodeComplete(node);
     node.outputKind = kind;
     node.title = node.images.length > 1 ? (kind === 'video' ? 'Videos' : kind === 'audio' ? 'Audios' : kind === 'text' ? 'Texts' : 'Group') : (kind === 'video' ? 'Video' : kind === 'audio' ? 'Audio' : kind === 'text' ? 'Text' : kind === 'file' ? 'File' : 'Image');
     delete node.w;
@@ -12660,24 +13632,10 @@ function loadNodePromptDraftToInput(node){
     }
 }
 async function createSmartComfyTask(payload){
-    const res = await fetch('/api/canvas-comfy-tasks', {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body:JSON.stringify(payload)
-    });
-    if(!res.ok) throw new Error(await smartResponseErrorMessage(res, tr('smart.errRunFailed')));
-    return res.json();
+    throw new Error(tr('smart.errNeedWorkflow'));
 }
 async function waitSmartComfyTaskResult(taskId){
-    if(!taskId) throw new Error(tr('smart.errRunFailed'));
-    while(true){
-        const res = await fetch(`/api/canvas-comfy-tasks/${encodeURIComponent(taskId)}`);
-        if(!res.ok) throw new Error(await smartResponseErrorMessage(res, tr('smart.errRunFailed')));
-        const data = await res.json();
-        if(data.status === 'succeeded') return data.result || {};
-        if(data.status === 'failed') throw new Error(data.error || tr('smart.errRunFailed'));
-        await sleep(1600);
-    }
+    throw new Error(tr('smart.errNeedWorkflow'));
 }
 async function runQueuedSmartComfyGenerate(payload){
     const task = await createSmartComfyTask(payload);
@@ -12714,7 +13672,6 @@ function buildPromptRequestForNode(node, defaultImages, ctx=smartLoopContext){
 }
 async function generateUrlsForCurrentSettings(node, prompt, refs, runSettings=settings){
     const activeSettings = runSettings || settings;
-    if(activeSettings.engine === 'comfy') return generateComfyUrlsWithSettings(activeSettings, prompt, refs);
     if(isApiLikeEngine(activeSettings.engine) && activeSettings.apiKind === 'video'){
         return {urls:await runApiVideoGeneration(prompt, refs, activeSettings), kind:'video'};
     }
@@ -12762,10 +13719,8 @@ async function generateComfyUrlsWithSettings(runSettings, prompt, refs){
     }
     const workflowName = runSettings.comfyWorkflow || comfyWorkflows[0]?.name || '';
     if(!workflowName) throw new Error(tr('smart.errNeedWorkflow'));
-    const wf = await fetch(`/api/workflows/${encodeURIComponent(workflowName)}`).then(async r => {
-        if(!r.ok) throw new Error(await r.text());
-        return r.json();
-    });
+    throw new Error(tr('smart.errNeedWorkflow'));
+    const wf = null;
     const fields = wf.config?.fields || [];
     const values = {};
     fields.filter(f => comfyFieldKind(f) === 'prompt').forEach((field, index) => {
@@ -12896,6 +13851,7 @@ async function runCascadeStepIntoNode(sourceNode, targetNode, inputRefs, ctx=sma
 }
 async function runLoopRoundIntoSlot(loopNode, rootNode, outputSlot, loopIndex, ctx){
     if(!loopNode || !rootNode || !outputSlot) return [];
+    outputSlot = liveSmartNode(outputSlot);
     const previousSettings = cloneSmartSettings(settings);
     const edgeKey = `${rootNode.id}->${outputSlot.id}`;
     const runSettings = {...cloneSmartSettings(settings), ...cloneSmartSettings(smartSettingsForNode(rootNode) || {})};
@@ -12931,7 +13887,7 @@ async function runLoopRoundIntoSlot(loopNode, rootNode, outputSlot, loopIndex, c
         const runPath = smartCascadePathForCtx(ctx);
         if(runPath?.states) {
             runPath.states[edgeKey] = 'active';
-            refreshConnectionLayer();
+            scheduleConnectionLayerRefresh();
         }
         render();
         settings = previousSettings;
@@ -12977,11 +13933,16 @@ async function runLoopRoundIntoSlot(loopNode, rootNode, outputSlot, loopIndex, c
                 const url = typeof item === 'string' ? item : item?.url || '';
                 return stripImageGenerationMeta(copyMediaSizeFields(item, {url, name:(typeof item === 'object' && item.name) || `output-${i + 1}.${ext}`, kind:(typeof item === 'object' && item.kind) || result.kind, generatedResult:true}));
             }).filter(item => item.url);
+            outputSlot = liveSmartNode(outputSlot);
+            outputSlot.images = nonPreviewOutputImages(outputSlot.images);
             replaceOutputsToNodeWithHistory(outputSlot, additions, result.kind, meta, {skipShift:Boolean(ctx?.nodeId)});
         }
+        outputSlot = liveSmartNode(outputSlot);
+        markSmartNodeComplete(outputSlot, meta);
+        clearSourceBusyStateIfDownstreamDone(rootNode);
         if(runPath?.states) {
             runPath.states[edgeKey] = 'done';
-            refreshConnectionLayer();
+            scheduleConnectionLayerRefresh();
         }
         addSmartGenerationLog({run:{...runLog, kind:result.kind || logKind}, outputs:result.urls, runMs:nowMs() - runLogStart});
         return rememberRoundOutputs(ctx, outputSlot, additions);
@@ -13047,8 +14008,7 @@ function requestSmartCascadeStop(loopId=''){
     render();
 }
 function smartCascadeParallelLimit(chain=[]){
-    const hasComfy = (chain || []).some(node => smartSettingsForNode(node)?.engine === 'comfy');
-    return hasComfy ? Math.max(1, Math.min(6, Number(comfyInstanceCount) || 1)) : 6;
+    return 6;
 }
 async function runSmartCascadeRoundsWithLimit(roundIndexes, limit, runner, runState=null){
     let next = 0;
@@ -13126,7 +14086,7 @@ async function runSmartCascade(targetNode=null){
         graph.edges.forEach(edge => { runStates[edge.key] = 'wait'; });
         runState.runPath = {states:runStates};
         smartCascadeRunPath = runState.runPath;
-        refreshConnectionLayer();
+        scheduleConnectionLayerRefresh();
         updateComposer();
     }
     try {
@@ -13161,7 +14121,7 @@ async function runSmartCascade(targetNode=null){
                     sourceLoopPrompts.forEach(loopNode => {
                         runState.runPath.states[`${loopNode.id}->${source.id}`] = 'done';
                     });
-                    refreshConnectionLayer();
+                    scheduleConnectionLayerRefresh();
                 }
                 if(loopPrompts.length && targets.length > 1){
                     const firstLoop = loopPrompts[0];
@@ -13170,7 +14130,7 @@ async function runSmartCascade(targetNode=null){
                     const selectedTarget = targets[(currentIndex - 1) % targets.length];
                     if(runState.runPath && firstLoop?.id && source?.id){
                         runState.runPath.states[`${firstLoop.id}->${source.id}`] = 'done';
-                        refreshConnectionLayer();
+                        scheduleConnectionLayerRefresh();
                     }
                     targets = [selectedTarget].filter(Boolean);
                 }
@@ -13193,11 +14153,11 @@ async function runSmartCascade(targetNode=null){
                             relayLoops.forEach(loopNode => {
                                 runState.runPath.states[`${loopNode.id}->${source.id}`] = 'done';
                             });
-                            refreshConnectionLayer();
+                            scheduleConnectionLayerRefresh();
                         }
                         if(runState.runPath){
                             runState.runPath.states[edgeKey] = 'active';
-                            refreshConnectionLayer();
+                            scheduleConnectionLayerRefresh();
                         }
                         if(target.type === 'smart-loop'){
                             outputs = outputImagesForNode(source, true, ctx).filter(img => img?.url);
@@ -13220,7 +14180,7 @@ async function runSmartCascade(targetNode=null){
                     }
                     if(runState.runPath){
                         runState.runPath.states[edgeKey] = 'done';
-                        refreshConnectionLayer();
+                        scheduleConnectionLayerRefresh();
                     }
                     const refs = target.type === 'smart-loop' ? sharedRefs : (index === 0 ? sharedRefs : cascadeRefsFromOutputs(outputs, target));
                     producedRefs.set(target.id, refs);
@@ -13324,10 +14284,8 @@ async function runGeneration(){
     const runLogStart = nowMs();
     const expectedCount = settings.engine === 'runninghub'
         ? 1
-        : settings.engine === 'comfy'
-        ? (settings.comfyMode === 'text' || settings.comfyMode === 'enhance' || settings.comfyMode === 'edit' || settings.comfyMode === 'custom' ? 1 : 1)
         : Math.max(1, Math.min(8, Number(settings.count || 1)));
-    const apiConcurrentRun = isApiLikeEngine(settings.engine) || settings.engine === 'runninghub' || settings.engine === 'modelscope' || settings.engine === 'comfy';
+    const apiConcurrentRun = isApiLikeEngine(settings.engine) || settings.engine === 'runninghub' || settings.engine === 'modelscope';
     const nodeHasImages = isSmartGroupNode(node) ? imagesForNode(node).some(img => img?.url) : (node.images || []).some(img => img?.url);
     const workflowModeRun = smartImageUsesWorkflowInput(node, smartLoopContext);
     const sourceVisualState = isSmartImageNode(node) && nodeHasImages && !workflowModeRun ? {
@@ -13369,13 +14327,6 @@ async function runGeneration(){
     }
     render();
     try {
-        if(settings.engine === 'comfy'){
-            await runComfyGeneration(pendingNode, prompt, refs, pendingNode, pendingMeta);
-            if(sourceVisualState) restoreSourceVisualState(node, sourceVisualState);
-            addSmartGenerationLog({run:runLog, outputs:(pendingNode.images || []).map(img => img.url).filter(Boolean), runMs:nowMs() - runLogStart});
-            settings = previousSettings;
-            return;
-        }
         if(isApiLikeEngine(settings.engine) && settings.apiKind === 'video'){
             const outVideos = await runApiVideoGeneration(prompt, refs);
             if(!outVideos.length) throw new Error(tr('smart.errNoOutVideos'));
@@ -13404,6 +14355,12 @@ async function runGeneration(){
             scheduleSave();
             await saveCanvas();
             await resumeSmartPendingNode(pendingNode);
+            if(taskIds.some(isSmartTaskCancelled) || !nodes.some(n => n.id === pendingNode.id)){
+                if(sourceVisualState) restoreSourceVisualState(node, sourceVisualState);
+                settings = previousSettings;
+                scheduleSave();
+                return;
+            }
             if(pendingNode.jimengPending || smartRecoverableImageTask(pendingNode)){
                 if(sourceVisualState) restoreSourceVisualState(node, sourceVisualState);
                 clearPromptInput({preserveDraft:true});
@@ -13493,7 +14450,7 @@ async function runPromptLLMNode(nodeId){
             if(!r.ok) throw new Error(await r.text());
             return r.json();
         });
-        node.text = (result.text || '').trim();
+        node.text = appendLLMOutputToPromptText(node.text, result.text || '');
         node.llmProvider = provider;
         node.llmModel = model;
         scheduleSave();
@@ -13510,15 +14467,153 @@ function comfyFieldKind(field){
     if(field?.type === 'textarea' || /prompt|text|提示词|正向|负向/.test(key)) return 'prompt';
     return 'setting';
 }
+function smartCreativeVariantRequested(prompt){
+    const text = String(prompt || '').toLowerCase();
+    return /不同(?:视角|角度|镜头|构图|风格|画面|姿势)|(?:视角|角度|镜头|构图|风格|画面|姿势).*不同|变化大|差异大|随机|多样|发散|换(?:视角|角度|镜头|构图|风格)|different\s+(?:angle|view|perspective|style|composition|camera|pose)|varied|diverse|creative\s+variation/i.test(text);
+}
+function smartRelaxPromptForCreativeVariants(prompt){
+    let text = String(prompt || '');
+    text = text.replace(
+        /Use the attached reference image as a strict composition and style reference\./gi,
+        'Use the attached reference image as a loose product, palette, lighting, and commercial-style reference.'
+    );
+    text = text.replace(
+        /Preserve its aspect ratio, poster\/campaign layout, camera angle, lens proximity, subject scale hierarchy, foreground\/background relationship, object placement, pose and interaction geometry, negative-space distribution, lighting direction, color palette, and commercial finish\./gi,
+        'Keep the product identity, fresh palette, clean lighting, and commercial finish, but allow new camera angles, framing, pose, composition, scale hierarchy, and negative-space distribution.'
+    );
+    text = text.replace(/Composition lock:/gi, 'Loose reference guidance:');
+    return text;
+}
+function smartCameraControlRequested(prompt){
+    return /HIGHEST PRIORITY CAMERA OVERRIDE|Camera control enabled/i.test(String(prompt || ''));
+}
+function smartReplaceCameraConflictSection(text, headingPattern, replacement, nextHeadings){
+    const next = nextHeadings || 'Reference summary|Shared style anchor|Generation guidance|Variant plan|Negative constraints|Case-library support|Fresh |Negative prompt|LLM additional guidance|Poster copy enabled|Original reference weight|HIGHEST PRIORITY CAMERA OVERRIDE|FINAL CAMERA CHECK';
+    const pattern = new RegExp(`(?:${headingPattern}):\\s*[\\s\\S]*?(?=\\n\\s*\\n\\s*(?:${next})\\b|$)`, 'gi');
+    return String(text || '').replace(pattern, replacement);
+}
+function smartRelaxPromptForCameraControl(prompt){
+    let text = String(prompt || '');
+    if(!smartCameraControlRequested(text)) return text;
+    const cameraBlockPattern = /HIGHEST PRIORITY CAMERA OVERRIDE:[\s\S]*?(?:technical text inside the image\.|$)/gi;
+    const legacyCameraBlockPattern = /Camera control enabled:[\s\S]*?(?:technical text inside the image\.|$)/gi;
+    let cameraBlocks = text.match(cameraBlockPattern) || text.match(legacyCameraBlockPattern) || [];
+    const canonicalCameraBlock = cameraBlocks[0] || '';
+    if(canonicalCameraBlock){
+        text = text.replace(/FINAL CAMERA CHECK:\s*/gi, '');
+        text = text.replace(cameraBlockPattern, '');
+        text = text.replace(legacyCameraBlockPattern, '');
+        text = `${canonicalCameraBlock}\n\n${text.trim()}`;
+    }
+    text = text.replace(
+        /Use the attached reference image as a strict composition and style reference\./gi,
+        'Use the attached reference image only as an identity, product, material, palette, lighting, commercial-finish, and exact-readable-poster-copy reference when Poster copy is enabled. Do not use it as a camera, crop, pose, scale, layout, or composition reference.'
+    );
+    text = text.replace(
+        /Preserve its aspect ratio, poster\/campaign layout, camera angle, lens proximity, subject scale hierarchy, foreground\/background relationship, object placement, pose and interaction geometry, negative-space distribution, lighting direction, color palette, and commercial finish\./gi,
+        'Preserve compatible product identity, model identity, material truth, lighting direction, color palette, exact readable poster copy when Poster copy is enabled, and commercial finish. Do not preserve the reference aspect ratio, poster layout, camera angle, lens proximity, crop, subject scale hierarchy, foreground/background relationship, object placement, pose geometry, or negative-space distribution when camera control changes them.'
+    );
+    text = text.replace(/Composition lock:/gi, 'Camera-overridden loose composition guidance:');
+    text = text.replace(
+        /Do not let case matches override the primary reference image's camera angle, composition skeleton, subject scale hierarchy, foreground product dominance, pose geometry, background, or color world\./gi,
+        'Do not let case matches override the explicit camera control. Case matches may only improve finish, material rendering, retouching, and advertising polish.'
+    );
+    text = text.replace(
+        /Keep the same straight-on camera,?/gi,
+        'Do not keep the same straight-on camera; follow the explicit Camera control,'
+    );
+    text = text.replace(
+        /camera may shift to slight three-quarter view/gi,
+        'camera must follow the explicit Camera control'
+    );
+    text = smartReplaceCameraConflictSection(
+        text,
+        'Reference anchors',
+        'Reference anchors (camera override): keep only identity, product truth, material, palette, lighting mood, exact readable poster copy when Poster copy is enabled, skin/product finish, and commercial polish. Ignore any camera, framing, crop, layout, pose, product scale, foreground/background, reflection, or composition anchors from reference images.',
+        'Composition lock|Reference summary|Shared style anchor|Generation guidance|Variant plan|Negative constraints|Case-library support|Fresh |Negative prompt|LLM additional guidance|Poster copy enabled|Original reference weight|HIGHEST PRIORITY CAMERA OVERRIDE|FINAL CAMERA CHECK'
+    );
+    text = smartReplaceCameraConflictSection(
+        text,
+        'Camera-overridden loose composition guidance|Composition lock|Loose reference guidance',
+        'Camera override composition rule: do not copy the reference composition skeleton, poster layout, crop, pose geometry, reflection layout, object placement, foreground/background map, subject scale hierarchy, or negative-space distribution. Recompose the whole image around the explicit camera control while keeping only identity, product truth, exact readable poster copy when Poster copy is enabled, palette, material quality, lighting mood, and commercial finish.',
+        'Reference summary|Shared style anchor|Generation guidance|Variant plan|Negative constraints|Case-library support|Fresh |Negative prompt|LLM additional guidance|Poster copy enabled|Original reference weight|HIGHEST PRIORITY CAMERA OVERRIDE|FINAL CAMERA CHECK'
+    );
+    text = smartReplaceCameraConflictSection(
+        text,
+        'Generation guidance',
+        'Generation guidance: camera control is the primary composition driver. First satisfy lens, viewpoint, foreground/midground/background, visible perspective evidence, and subject scale. Then restore the reference identity, product truth, exact readable poster copy when Poster copy is enabled, materials, palette, lighting mood, retouching, and commercial polish.',
+        'Variant plan|Negative constraints|Case-library support|Fresh |Negative prompt|LLM additional guidance|Poster copy enabled|Original reference weight|HIGHEST PRIORITY CAMERA OVERRIDE|FINAL CAMERA CHECK'
+    );
+    text = smartReplaceCameraConflictSection(
+        text,
+        'Variant plan',
+        'Variant plan: use the selected camera control as the new structural anchor. Variations may change pose and placement as needed to make the requested camera physically readable; do not keep the old reference camera family unless it matches the control.',
+        'Negative constraints|Case-library support|Fresh |Negative prompt|LLM additional guidance|Poster copy enabled|Original reference weight|HIGHEST PRIORITY CAMERA OVERRIDE|FINAL CAMERA CHECK'
+    );
+    text = text.replace(
+        /same camera angle family/gi,
+        'camera angle family selected by the explicit Camera control'
+    );
+    text = text.replace(
+        /same product-to-model scale hierarchy/gi,
+        'product-to-model scale hierarchy rebuilt for the explicit Camera control'
+    );
+    cameraBlocks = text.match(cameraBlockPattern) || text.match(legacyCameraBlockPattern) || [];
+    const cameraBlock = cameraBlocks[cameraBlocks.length - 1] || '';
+    if(cameraBlock && !/FINAL CAMERA CHECK/i.test(text)){
+        text = `${text}\n\nFINAL CAMERA CHECK: ${cameraBlock}`;
+    }
+    return text;
+}
+function smartCreativeReferenceImages(refs=[]){
+    const images = imageRefsOnly(refs);
+    const preferred = images.find(ref => ref?.styleLock || ref?.referenceLock || ref?.role === 'composition_reference') || images[0];
+    return preferred ? [preferred] : [];
+}
+function smartVariantPrompt(prompt, index, total, refs=[]){
+    const count = Math.max(1, Number(total) || 1);
+    if(count <= 1) return prompt;
+    const creative = smartCreativeVariantRequested(prompt);
+    const text = creative ? smartRelaxPromptForCreativeVariants(prompt) : String(prompt || '');
+    const refLocked = (refs || []).some(ref => ref?.styleLock || ref?.referenceLock || ref?.role === 'composition_reference')
+        || /strict composition|composition lock|reference image/i.test(text);
+    const posePlans = [
+        'Hero pose: keep the product closest to the lens, model reaches forward confidently, open expressive hand gesture, bright direct eye contact.',
+        'Alternate pose: keep the same product dominance and lens proximity, change the model body turn and arm gesture clearly, more playful expression.',
+        'Side-energy pose: preserve the same campaign layout, rotate shoulders slightly, use a different hand framing gesture, keep the product large in foreground.',
+        'Editorial pose: preserve foreground product hierarchy, model leans or twists differently, refined expression, clean silhouette and natural hands.'
+    ];
+    const creativePlans = [
+        'Fresh low-angle hero close-up, strong foreground product, playful sporty beauty-ad energy, clean sky background.',
+        'Three-quarter side view with a wider crop, different arm gesture and body turn, more lifestyle editorial styling while keeping the same mint-blue campaign palette.',
+        'Dynamic diagonal camera angle with a slightly higher viewpoint, product still clearly readable, more motion and asymmetry in the pose.',
+        'Clean portrait-ad composition with a different crop and gesture, product near camera but not identical placement, refined commercial fashion-beauty finish.'
+    ];
+    const lock = creative
+        ? 'Creative variation mode: override any earlier strict composition lock. Use the reference only for product identity, palette, lighting, and commercial polish. Each output should use a noticeably different camera angle, crop, pose, and composition while staying in the same campaign world.'
+        : refLocked
+        ? 'Keep the reference-image composition family: same commercial campaign look, same product-to-model scale hierarchy, same camera angle family, same clean palette and lighting. Vary only pose, gesture, expression, and small interaction details.'
+        : 'Create a clearly distinct variation while keeping the same campaign style, palette, lighting quality, and subject identity.';
+    const quality = 'Premium commercial advertising finish. Crisp focus on the hero product and face, refined skin texture, clean background, realistic hands, natural anatomy, polished color grading. Avoid blurry output, duplicated limbs, warped fingers, flat lighting, cheap stock-photo styling, clutter, low-detail product rendering.';
+    const plan = creative ? creativePlans[index % creativePlans.length] : posePlans[index % posePlans.length];
+    return [text, `Variant ${index + 1} of ${count}: ${plan}`, lock, quality].filter(Boolean).join('\n\n');
+}
 async function runApiGeneration(prompt, refs, runSettings=settings){
     if(!runSettings.provider_id || !runSettings.model) throw new Error(tr('smart.errNoApiModel'));
     const count = Math.max(1, Math.min(8, Number(runSettings.count || 1)));
-    const payload = {prompt, provider_id:runSettings.provider_id, model:runSettings.model, size:sizeForRun(runSettings), quality:runSettings.quality || 'auto', n:1, reference_images:imageRefsOnly(refs).slice(0, SMART_REFERENCE_IMAGE_MAX)};
-    const tasks = await Promise.all(Array.from({length:count}, () => fetch('/api/canvas-image-tasks', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)}).then(async r => {
-        if(!r.ok) throw new Error(await r.text());
-        return r.json();
-    })));
-    return {taskIds:tasks.map(task => task.task_id).filter(Boolean), count, providerId:payload.provider_id, model:payload.model};
+    const effectivePrompt = smartRelaxPromptForCameraControl(prompt);
+    const creative = smartCreativeVariantRequested(effectivePrompt);
+    const cameraControlled = smartCameraControlRequested(effectivePrompt);
+    const referenceImages = (creative || cameraControlled ? smartCreativeReferenceImages(refs) : imageRefsOnly(refs)).slice(0, SMART_REFERENCE_IMAGE_MAX);
+    const basePayload = {provider_id:runSettings.provider_id, model:runSettings.model, size:sizeForRun(runSettings), quality:runSettings.quality || 'auto', n:1, reference_images:referenceImages};
+    const tasks = await Promise.all(Array.from({length:count}, (_, index) => {
+        const payload = {...basePayload, prompt:smartVariantPrompt(effectivePrompt, index, count, referenceImages)};
+        return fetch('/api/canvas-image-tasks', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)}).then(async r => {
+            if(!r.ok) throw new Error(await r.text());
+            return r.json();
+        });
+    }));
+    return {taskIds:tasks.map(task => task.task_id).filter(Boolean), count, providerId:basePayload.provider_id, model:basePayload.model};
 }
 async function runRunningHubGeneration(prompt, refs, runSettings=settings){
     const ref = selectedRunningHubRef(runSettings);
@@ -13672,10 +14767,8 @@ async function runComfyGeneration(node, prompt, refs, pendingNode, meta){
     if(mode === 'edit') return runComfyEdit(node, prompt, refs, pendingNode, meta);
     const workflowName = settings.comfyWorkflow || comfyWorkflows[0]?.name || '';
     if(!workflowName) throw new Error(tr('smart.errNeedWorkflow'));
-    const wf = await fetch(`/api/workflows/${encodeURIComponent(workflowName)}`).then(async r => {
-        if(!r.ok) throw new Error(await r.text());
-        return r.json();
-    });
+    throw new Error(tr('smart.errNeedWorkflow'));
+    const wf = null;
     const fields = wf.config?.fields || [];
     const values = {};
     fields.filter(f => comfyFieldKind(f) === 'prompt').forEach((field, index) => {
@@ -13761,26 +14854,41 @@ async function runComfyEdit(node, prompt, refs, pendingNode, meta){
     scheduleSave();
 }
 async function comfyNameForRef(ref){
-    if(ref.comfy_name) return ref.comfy_name;
-    const response = await fetch(ref.url);
-    if(!response.ok) return ref.name || ref.url;
-    const blob = await response.blob();
-    const form = new FormData();
-    form.append('files', blob, ref.name || 'smart-ref.png');
-    const data = await fetch('/api/upload', {method:'POST', body:form}).then(async r => {
-        if(!r.ok) throw new Error(await r.text());
-        return r.json();
-    });
-    const name = data.files?.[0]?.comfy_name || ref.name || ref.url;
-    const node = selectedNode();
-    const image = node?.images?.find(img => img.url === ref.url);
-    if(image) image.comfy_name = name;
-    ref.comfy_name = name;
-    return name;
+    throw new Error(tr('smart.errNeedWorkflow'));
 }
 function smartPendingTasks(node){
     if(!node || !Array.isArray(node.pendingTasks)) return [];
     return node.pendingTasks.filter(task => task && task.taskId);
+}
+function cancelSmartNodeTasks(node){
+    smartPendingTasks(node).forEach(task => {
+        if(task.taskId) cancelledSmartTaskIds.add(task.taskId);
+        if(task.recoverTaskId) cancelledSmartTaskIds.add(task.recoverTaskId);
+    });
+    if(node?.jimengPending?.submitId) cancelledSmartTaskIds.add(node.jimengPending.submitId);
+    if(node){
+        node.running = false;
+        node.pending = 0;
+        delete node.pendingTasks;
+        delete node.jimengPending;
+    }
+}
+function isSmartTaskCancelled(taskId){
+    return Boolean(taskId && cancelledSmartTaskIds.has(taskId));
+}
+function isGeneratedSmartOutputNode(node){
+    return Boolean(
+        node &&
+        isSmartImageNode(node) &&
+        (
+            node.autoBranchOutputSourceId ||
+            node.sourceNodeId ||
+            node.runAt ||
+            node.runModelPrompt ||
+            smartPendingTasks(node).length ||
+            (node.images || []).some(img => img?.generatedResult)
+        )
+    );
 }
 class JimengPendingSignal extends Error {
     constructor(info){
@@ -14031,6 +15139,7 @@ async function pollSmartCanvasTask(taskId){
 }
 function finalizeSmartPendingTask(node, taskId, images, kind='image'){
     if(!node || !taskId) return;
+    if(isSmartTaskCancelled(taskId) || !nodes.some(n => n.id === node.id)) return;
     node.pendingTasks = smartPendingTasks(node).filter(task => task.taskId !== taskId);
     node.pending = Math.max(0, Number(node.pending || 0) - 1);
     const ext = kind === 'video' ? 'mp4' : kind === 'audio' ? 'mp3' : kind === 'text' ? 'txt' : 'png';
@@ -14040,7 +15149,7 @@ function finalizeSmartPendingTask(node, taskId, images, kind='image'){
         const itemKind = (typeof item === 'object' && item.kind) || kind;
         return stripImageGenerationMeta(copyMediaSizeFields(item, {url, name:(typeof item === 'object' && item.name) || `output-${i + 1}.${ext}`, kind:itemKind, generatedResult:true}));
     }).filter(item => item.url);
-    node.images = [...(node.images || []).map(img => stripImageGenerationMeta(img)), ...additions];
+    node.images = [...nonPreviewOutputImages(node.images).map(img => stripImageGenerationMeta({...img})), ...additions];
     if(additions.length) node.outputKind = kind;
     if(!node.pending && smartPendingTasks(node).length === 0){
         delete node.pendingTasks;
@@ -14067,10 +15176,12 @@ async function resumeSmartPendingNode(node){
         if(task.failed && task.recoverTaskId) return;
         try {
             const result = await pollSmartCanvasTask(task.taskId);
+            if(isSmartTaskCancelled(task.taskId) || !nodes.some(n => n.id === node.id)) return;
             finalizeSmartPendingTask(node, task.taskId, resultMediaUrls(result?.images?.length ? result.images : result), task.kind || 'image');
             render();
             scheduleSave();
         } catch(e) {
+            if(isSmartTaskCancelled(task.taskId) || !nodes.some(n => n.id === node.id)) return;
             if(e && e.jimengPending && e.submitId){
                 node.pendingTasks = smartPendingTasks(node).filter(item => item.taskId !== task.taskId);
                 setNodeJimengPending(node, e);
@@ -14120,9 +15231,10 @@ function updateSelectionBox(event){
     if(!selectionState) return;
     const sx = selectionState.startScreen.x, sy = selectionState.startScreen.y;
     const x = Math.min(sx, event.clientX), y = Math.min(sy, event.clientY);
+    const shellRect = shell.getBoundingClientRect();
     selectionBox.style.display = 'block';
-    selectionBox.style.left = `${x}px`;
-    selectionBox.style.top = `${y}px`;
+    selectionBox.style.left = `${x - shellRect.left}px`;
+    selectionBox.style.top = `${y - shellRect.top}px`;
     selectionBox.style.width = `${Math.abs(event.clientX - sx)}px`;
     selectionBox.style.height = `${Math.abs(event.clientY - sy)}px`;
 }
@@ -14132,7 +15244,8 @@ function finishSelection(event){
     const b = screenToWorld(event);
     const minX = Math.min(a.x, b.x), minY = Math.min(a.y, b.y);
     const maxX = Math.max(a.x, b.x), maxY = Math.max(a.y, b.y);
-    selectedIds = nodes.filter(node => {
+    const moved = Math.abs(event.clientX - selectionState.startScreen.x) + Math.abs(event.clientY - selectionState.startScreen.y);
+    selectedIds = moved < 4 ? [] : nodes.filter(node => {
         const r = nodeRect(node);
         return r.x < maxX && r.x + r.width > minX && r.y < maxY && r.y + r.height > minY;
     }).map(n => n.id);
@@ -14384,14 +15497,7 @@ shell.onmousedown = e => {
     if(zoomPreviewState && e.button === 0 && !e.target.closest('.composer,.smart-back,.asset-panel,.asset-toggle,.smart-log-toggle,.smart-shortcut-toggle,.smart-workflow-toggle,.log-modal,.shortcut-modal,.image-edit-modal,.create-menu,.smart-minimap')) return;
     if(e.target.closest('.image-node,.composer,.smart-back,.asset-panel,.asset-toggle,.smart-log-toggle,.smart-shortcut-toggle,.smart-workflow-toggle,.log-modal,.shortcut-modal,.create-menu,.smart-minimap')) return;
     closeCreateMenu();
-    if(e.button === 0 && isRKeyDown){
-        e.preventDefault();
-        didPan = false;
-        selectionState = {startScreen:{x:e.clientX, y:e.clientY}, startWorld:screenToWorld(e)};
-        updateSelectionBox(e);
-        return;
-    }
-    if(e.button === 0 && (e.ctrlKey || e.metaKey)){
+    if(e.button === 0 && !isSpaceKeyDown){
         e.preventDefault();
         didPan = false;
         selectionState = {startScreen:{x:e.clientX, y:e.clientY}, startWorld:screenToWorld(e)};
@@ -14554,6 +15660,7 @@ window.onmousemove = e => {
             // 否则拖动过程里会按成员包围盒/缩放比例收缩，松手才回到拖动宽度（用户反馈的“变宽时先缩小”）。
             node.w = Math.max(minW, Math.round(resizeState.startW + dx));
             node.h = Math.max(minH, Math.round(resizeState.startH + dy));
+            if(smartGroupCompactMembers(node).length) arrangeSmartGroupMembers(node, {skipUndo:true, syncDom:true});
             updateNodeElementDuringResize(node);
             return;
         }
@@ -14644,14 +15751,17 @@ window.onmousemove = e => {
         const dy = e.clientY - thumbDragState.startY;
         const source = nodes.find(n => n.id === thumbDragState.nodeId);
         if(!thumbDragState.detached && Math.abs(dx) + Math.abs(dy) > 6){
-            if(source && (source.images || []).length > 1){
+            const canDetachThumb = source && (isSmartGroupNode(source) ? (source.images || []).length >= 1 : (source.images || []).length > 1);
+            if(canDetachThumb){
                 const img = source.images[thumbDragState.imgIndex];
                 if(img){
                     commitPendingUndo();
                     undoSuppressed = true;
                     applyNodeMetaToImage(img, source);
                     source.images.splice(thumbDragState.imgIndex, 1);
-                    if(source.images.length <= 1){
+                    if(isSmartGroupNode(source)){
+                        arrangeSmartGroupMembers(source, {skipUndo:true, syncDom:true});
+                    } else if(source.images.length <= 1){
                         source.title = 'Image';
                         delete source.w; delete source.h;
                         inheritNodeMetaFromImage(source);
@@ -14885,7 +15995,7 @@ window.onmouseup = e => {
         loopInsertPreview = null;
         dragState = null;
         scheduleSave();
-        refreshConnectionLayer();
+        scheduleConnectionLayerRefresh();
     }
 };
 shell.addEventListener('wheel', e => {
@@ -14934,6 +16044,11 @@ window.addEventListener('paste', e => {
         e.preventDefault();
         return;
     }
+    if(imageClipboard?.item?.url && !isEditableTarget(e.target)){
+        e.preventDefault();
+        pasteImageClipboard();
+        return;
+    }
     if(nodeClipboard?.nodes?.length && !isEditableTarget(e.target)){
         e.preventDefault();
         pasteNodes();
@@ -14942,6 +16057,11 @@ window.addEventListener('paste', e => {
 window.addEventListener('keydown', e => {
     const key = String(e.key || '').toLowerCase();
     if(key === 'r' && !isEditableTarget(e.target)) isRKeyDown = true;
+    if(e.code === 'Space' && !isEditableTarget(e.target)){
+        isSpaceKeyDown = true;
+        shell.classList.add('space-pan-ready');
+        e.preventDefault();
+    }
     if(imageEditModal.classList.contains('open') && imageEditMode === 'preview' && !isEditableTarget(e.target)){
         if(e.key === 'ArrowLeft' || e.key === 'ArrowRight'){
             e.preventDefault();
@@ -14969,14 +16089,16 @@ window.addEventListener('keydown', e => {
         const selectionText = window.getSelection?.().toString() || '';
         if(selectionText) return;
         e.preventDefault();
+        if(copySelectedImage()) return;
         copySelectedNodes();
         return;
     }
-    if((e.ctrlKey || e.metaKey) && key === 'v' && !isEditableTarget(e.target) && nodeClipboard?.nodes?.length){
+    if((e.ctrlKey || e.metaKey) && key === 'v' && !isEditableTarget(e.target) && (imageClipboard?.item?.url || nodeClipboard?.nodes?.length)){
         const requestedAt = Date.now();
         setTimeout(() => {
             if(lastImagePasteAt >= requestedAt) return;
             if(lastNodePasteAt >= requestedAt) return;
+            if(pasteImageClipboard()) return;
             pasteNodes();
         }, 90);
     }
@@ -15010,12 +16132,18 @@ window.addEventListener('keydown', e => {
 });
 window.addEventListener('keyup', e => {
     if(String(e.key || '').toLowerCase() === 'r') isRKeyDown = false;
+    if(e.code === 'Space'){
+        isSpaceKeyDown = false;
+        shell.classList.remove('space-pan-ready');
+    }
 });
 window.addEventListener('blur', () => {
     isRKeyDown = false;
+    isSpaceKeyDown = false;
+    shell.classList.remove('space-pan-ready');
 });
 engineSelect.onchange = () => {
-    settings.engine = engineSelect.value;
+    settings.engine = normalizeSmartEngine(engineSelect.value);
     applyRecentSmartSettingsForCurrentMode();
     syncApiKindToggleVisibility();
     renderDynamicParams();
@@ -15213,7 +16341,7 @@ promptTemplatePanel?.addEventListener('click', e => {
 });
 if(promptPresetClose) promptPresetClose.onclick = closePromptPresetPanel;
 if(promptTemplateClose) promptTemplateClose.onclick = closePromptTemplatePanel;
-if(promptTemplateSearch) promptTemplateSearch.oninput = () => renderPromptTemplatePanel({preserveScroll:false});
+if(promptTemplateSearch) promptTemplateSearch.oninput = handlePromptTemplateSearchInput;
 if(promptTemplateLibrarySelect) promptTemplateLibrarySelect.onchange = async () => {
     activePromptLibraryId = promptTemplateLibrarySelect.value || 'system';
     promptTemplateSelectedId = '';
@@ -15730,7 +16858,7 @@ window.addEventListener('studio-theme-change', event => applyTheme(event.detail?
 try {
     const apiChannel = new BroadcastChannel('studio-api');
     apiChannel.onmessage = async event => {
-        if(event.data?.type === 'providers-changed' || event.data?.type === 'workflows-changed' || event.data?.type === 'comfy-instances-changed'){
+        if(event.data?.type === 'providers-changed' || event.data?.type === 'workflows-changed'){
             await refreshSmartConfigFromSettings();
         }
         if(event.data?.type === 'asset_library_updated') handleAssetLibraryUpdatedMessage(event.data);
@@ -15743,7 +16871,7 @@ window.addEventListener('focus', () => {
 window.addEventListener('message', event => {
     if(event.origin && event.origin !== location.origin) return;
     if(event.data?.type === 'studio-theme') applyTheme(event.data.theme || 'light');
-    if(event.data?.type === 'providers-changed' || event.data?.type === 'workflows-changed' || event.data?.type === 'comfy-instances-changed') refreshSmartConfigFromSettings();
+    if(event.data?.type === 'providers-changed' || event.data?.type === 'workflows-changed') refreshSmartConfigFromSettings();
     if(event.data?.type === 'asset_library_updated') handleAssetLibraryUpdatedMessage(event.data);
     if(event.data?.type === 'canvas_updated') handleCanvasUpdatedMessage(event.data);
     if(event.data?.type === 'studio-lang' && window.StudioI18n) {

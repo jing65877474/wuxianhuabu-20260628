@@ -690,7 +690,7 @@ button[disabled], .primary[disabled], .primary-sm[disabled], .btn[disabled], .ic
   background: var(--soft);
 }
 
-#genRhWorkflow, #genComfyWorkflow {
+#genRhWorkflow {
   width: 100%;
   margin-bottom: 8px;
 }

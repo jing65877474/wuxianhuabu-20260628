@@ -1,6 +1,7 @@
 # Runtime data and local secrets
 data/
 assets/
+output/
 API/
 history.json
 *.log

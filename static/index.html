@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
 
 <head>
@@ -23,13 +23,13 @@
             } catch(e) {}
         })();
     </script>
-    <script src="/static/vendor/js/tailwindcss-cdn.js?v=2026.06.18.1779672342"></script>
-    <script src="/static/js/theme.js?v=2026.06.18.1780456238"></script>
-    <script src="/static/js/i18n.js?v=2026.06.18.1780902932"></script>
+    <script src="/static/vendor/js/tailwindcss-cdn.js?v=2026.06.22.1782107284"></script>
+    <script src="/static/js/theme.js?v=2026.06.22.1782107272"></script>
+    <script src="/static/js/i18n.js?v=2026.06.22.1782124134"></script>
     <style>
-        @import url('/static/vendor/css/fonts.css?v=2026.06.18.1779672342');
+        @import url('/static/vendor/css/fonts.css?v=2026.06.22.1782107277');
 
-        /* 本地 Tailwind 工具类兜底：CDN 慢/未就绪时也能立刻给图标尺寸，避免首屏左侧栏空白 */
+        /* 鏈湴 Tailwind 宸ュ叿绫诲厹搴曪細CDN 鎱?鏈氨缁椂涔熻兘绔嬪埢缁欏浘鏍囧昂瀵革紝閬垮厤棣栧睆宸︿晶鏍忕┖鐧?*/
         .w-1\.5 { width: 0.375rem; }
         .h-1\.5 { height: 0.375rem; }
         .w-4 { width: 1rem; }
@@ -84,7 +84,7 @@
             --social-icon: #64748b;
         }
 
-        /* 极简滚动条 */
+        /* 鏋佺畝婊氬姩鏉?*/
         html,
         body {
             overscroll-behavior: auto;
@@ -143,7 +143,7 @@
             transition: background 0.3s;
         }
 
-        /* 侧边栏 */
+        /* 渚ц竟鏍?*/
         .sidebar {
             width: 80px;
             min-width: 80px;
@@ -165,7 +165,7 @@
             transition-delay: 0s;
         }
 
-        /* 首次加载时与 iframe 的 0.5s 淡入同步播放，避免侧栏"焊死"在原地造成视觉断层 */
+        /* 棣栨鍔犺浇鏃朵笌 iframe 鐨?0.5s 娣″叆鍚屾鎾斁锛岄伩鍏嶄晶鏍?鐒婃"鍦ㄥ師鍦伴€犳垚瑙嗚鏂眰 */
         @keyframes sidebar-enter {
             from { opacity: 0; transform: translateX(-6px); }
             to { opacity: 1; transform: translateX(0); }
@@ -187,7 +187,7 @@
             justify-content: center;
             cursor: pointer;
             flex: 0 0 auto;
-            /* 仅保留 hover 真正会用到的属性过渡，避免 transition: all 因首屏属性补齐被意外触发 */
+            /* 浠呬繚鐣?hover 鐪熸浼氱敤鍒扮殑灞炴€ц繃娓★紝閬垮厤 transition: all 鍥犻灞忓睘鎬цˉ榻愯鎰忓瑙﹀彂 */
             transition: transform 0.6s var(--fluid-ease) 0.5s, border-radius 0.6s var(--fluid-ease) 0.5s, border-color 0.3s, background-color .18s, box-shadow .2s;
         }
 
@@ -223,7 +223,7 @@
             transition: transform .16s ease, background-color .16s ease, box-shadow .16s ease;
         }
 
-        /* 导航项 */
+        /* 瀵艰埅椤?*/
         .nav-item {
             position: relative;
             width: 48px;
@@ -235,7 +235,7 @@
             justify-content: flex-start;
             border-radius: 18px;
             cursor: pointer;
-            /* 只对 width 做带延迟的过渡（侧栏悬停展开效果）；background/color 不参与过渡，避免 active 切换时底色"流动" */
+            /* 鍙 width 鍋氬甫寤惰繜鐨勮繃娓★紙渚ф爮鎮仠灞曞紑鏁堟灉锛夛紱background/color 涓嶅弬涓庤繃娓★紝閬垮厤 active 鍒囨崲鏃跺簳鑹?娴佸姩" */
             transition: width 0.3s var(--fluid-ease) 0.5s;
             color: var(--muted);
             overflow: hidden;
@@ -373,7 +373,7 @@
             flex-shrink: 0;
         }
 
-        /* 主舞台区 */
+        /* 涓昏垶鍙板尯 */
         .stage {
             flex: 1;
             background: var(--stage-bg);
@@ -405,7 +405,7 @@
             pointer-events: auto;
         }
 
-        /* 左下角监视器 */
+        /* 宸︿笅瑙掔洃瑙嗗櫒 */
         .nano-monitor {
             position: absolute;
             bottom: 24px;
@@ -491,79 +491,6 @@
             font-size: 9px;
         }
 
-        /* 作者组件 */
-        .author-box {
-            width: 100%;
-            height: 60px;
-            flex: 0 0 60px;
-            position: relative;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            overflow: hidden;
-        }
-
-        .dx-letter {
-            position: absolute;
-            font-size: 14px;
-            font-weight: 800;
-            color: var(--text);
-            /* 只过渡 hover 时真正改的 transform/opacity，避免 all 触发延迟 */
-            transition: transform 0.5s var(--fluid-ease) 0.4s, opacity 0.5s var(--fluid-ease) 0.4s;
-            z-index: 10;
-        }
-
-        .letter-d { transform: translateX(-8px); }
-        .letter-x { transform: translateX(8px); }
-
-        .sidebar:hover .letter-d {
-            transform: translateX(-120px);
-            opacity: 0;
-            transition-delay: 0s;
-        }
-
-        .sidebar:hover .letter-x {
-            transform: translateX(120px);
-            opacity: 0;
-            transition-delay: 0s;
-        }
-
-        .author-content-wrap {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            opacity: 0;
-            transform: scale(0.9);
-            transition: all 0.4s var(--fluid-ease) 0s;
-            pointer-events: none;
-        }
-
-        .sidebar:hover .author-content-wrap {
-            opacity: 1;
-            transform: scale(1);
-            transition-delay: 0.2s;
-            pointer-events: auto;
-        }
-
-        .author-name-lite {
-            font-size: 12px;
-            font-weight: 700;
-            margin-bottom: 8px;
-            color: var(--author-name);
-        }
-
-        .social-row-lite { display: flex; gap: 12px; }
-
-        .social-icon-lite {
-            color: var(--social-icon);
-            transition: color 0.2s, transform 0.2s;
-        }
-
-        .social-icon-lite:hover {
-            color: var(--text);
-            transform: translateY(-1px);
-        }
-
         .side-actions {
             margin-top:12px;
             margin-bottom:12px;
@@ -586,7 +513,7 @@
             align-items: center;
             justify-content: center;
             cursor: pointer;
-            /* 只过渡 hover/激活会改的属性，避免 all 触发延迟 */
+            /* 鍙繃娓?hover/婵€娲讳細鏀圭殑灞炴€э紝閬垮厤 all 瑙﹀彂寤惰繜 */
             transition: width 0.3s var(--fluid-ease) 0.5s, gap 0.3s var(--fluid-ease) 0.5s, background-color 0.2s, color 0.2s, border-color 0.2s;
             flex-shrink: 0;
             overflow:hidden;
@@ -609,46 +536,6 @@
             background: var(--text);
             color: var(--bg);
             border-color: var(--text);
-        }
-
-        .side-pill.update-available {
-            border-color:#22c55e;
-            color:#16a34a;
-            overflow:visible;
-        }
-
-        html.theme-dark .side-pill.update-available,
-        body.theme-dark .side-pill.update-available {
-            border-color:#86efac;
-            color:#86efac;
-        }
-
-        .side-pill.update-available::after {
-            content:"NEW";
-            position:absolute;
-            top:-7px;
-            right:-9px;
-            min-width:28px;
-            height:16px;
-            padding:0 5px;
-            border-radius:999px;
-            background:#22c55e;
-            display:flex;
-            align-items:center;
-            justify-content:center;
-            color:#fff;
-            font-size:9px;
-            font-weight:900;
-            letter-spacing:.02em;
-            box-shadow:0 6px 16px rgba(34,197,94,.28), 0 0 0 3px rgba(34,197,94,.12);
-            pointer-events:none;
-        }
-
-        html.theme-dark .side-pill.update-available::after,
-        body.theme-dark .side-pill.update-available::after {
-            background:#4ade80;
-            color:#052e16;
-            box-shadow:0 6px 16px rgba(74,222,128,.22), 0 0 0 3px rgba(74,222,128,.12);
         }
 
         .side-pill svg { width: 16px; height: 16px; flex:0 0 auto; }
@@ -702,91 +589,9 @@
             max-width:120px;
             transition-delay:.15s;
         }
-        /* 折叠态去除 gap，避免图标被推偏 */
+        /* 鎶樺彔鎬佸幓闄?gap锛岄伩鍏嶅浘鏍囪鎺ㄥ亸 */
         .side-pill { gap:0; }
         .sidebar:hover .side-pill { gap:8px; }
-
-        .project-version-badge {
-            width:44px;
-            min-height:18px;
-            padding:0 4px;
-            border-radius:999px;
-            border:1px solid var(--border);
-            background:var(--nav-hover-bg);
-            color:var(--muted);
-            display:flex;
-            align-items:center;
-            justify-content:center;
-            font-size:9px;
-            font-weight:800;
-            line-height:1;
-            white-space:nowrap;
-            overflow:hidden;
-            cursor:pointer;
-            transition:width 0.3s var(--fluid-ease) 0.5s, color .2s, border-color .2s, background-color .2s;
-        }
-        .project-version-badge:hover { color:var(--text); border-color:var(--accent, #6366f1); }
-        .project-version-badge.checking { opacity:.6; animation:badge-pulse 1s ease-in-out infinite; }
-        @keyframes badge-pulse { 0%,100%{opacity:.5;} 50%{opacity:1;} }
-
-        .sidebar:hover .project-version-badge {
-            width:170px;
-            transition-delay:0s;
-        }
-
-        .project-version-full { display:none; }
-        .sidebar:hover .project-version-compact { display:none; }
-        .sidebar:hover .project-version-full { display:inline; }
-
-        .update-now-btn {
-            display:none;
-            width:56px;
-            min-height:24px;
-            padding:0 7px;
-            border-radius:999px;
-            border:1px solid rgba(34,197,94,.35);
-            background:rgba(34,197,94,.1);
-            color:#16a34a;
-            align-items:center;
-            justify-content:center;
-            gap:5px;
-            font-size:9px;
-            font-weight:900;
-            overflow:hidden;
-            transition:width 0.3s var(--fluid-ease) 0.5s, background-color .2s, color .2s, border-color .2s;
-        }
-        .update-now-btn.show { display:flex; }
-        .sidebar:hover .update-now-btn { width:170px; transition-delay:0s; }
-        .update-now-btn:hover { background:#16a34a; color:#fff; border-color:#16a34a; }
-        .update-now-btn[disabled] { opacity:.7; cursor:wait; }
-        .update-now-btn svg { display:none; width:14px; height:14px; flex:0 0 auto; }
-        .sidebar:hover .update-now-btn svg { display:block; }
-        .update-now-text {
-            opacity:1;
-            max-width:42px;
-            white-space:nowrap;
-            overflow:hidden;
-            transition: opacity 0.3s 0.5s, max-width 0.3s var(--fluid-ease) 0.5s;
-        }
-        .update-action-prefix { display:none; }
-        .update-version-full { display:none; }
-        .sidebar:hover .update-version-compact { display:none; }
-        .sidebar:hover .update-version-full { display:inline; }
-        .sidebar:hover .update-action-prefix { display:inline; }
-        .sidebar:hover .update-now-text { max-width:130px; transition-delay:.15s; }
-        .update-now-btn.show + .project-version-badge { display:none; }
-        html.theme-dark .update-now-btn,
-        body.theme-dark .update-now-btn {
-            border-color:rgba(134,239,172,.42);
-            background:rgba(74,222,128,.12);
-            color:#86efac;
-        }
-        html.theme-dark .update-now-btn:hover,
-        body.theme-dark .update-now-btn:hover {
-            background:#86efac;
-            border-color:#86efac;
-            color:#052e16;
-        }
 
         @media (max-height: 760px) {
             .sidebar {
@@ -836,9 +641,6 @@
                 flex-basis:30px;
                 width:40px;
             }
-            .project-version-badge { width:40px; min-height:16px; font-size:8px; }
-            .update-now-btn.show { min-height:22px; width:48px; }
-            .author-box { display:none; }
         }
 
         @media (max-height: 660px) {
@@ -879,8 +681,6 @@
                 width:38px;
             }
             .side-pill svg { width:15px; height:15px; }
-            .project-version-badge { width:38px; min-height:16px; font-size:8px; }
-            .update-now-btn.show { width:46px; min-height:22px; font-size:8px; }
         }
 
         .studio-modal[hidden] {
@@ -1004,7 +804,7 @@
         .update-modal-summary.warn .update-modal-dot { background:#f59e0b; }
         .update-modal-summary.fail .update-modal-dot { background:#ef4444; }
 
-        /* 更新弹窗：双卡片需要更宽的面板，避免左右布局被裁剪 */
+        /* 鏇存柊寮圭獥锛氬弻鍗＄墖闇€瑕佹洿瀹界殑闈㈡澘锛岄伩鍏嶅乏鍙冲竷灞€琚鍓?*/
         #project-update-modal .studio-modal-panel { width:min(880px, 100%); max-height:min(840px, calc(100vh - 48px)); }
         .update-notes-box { margin:2px 0 14px; padding:12px; border:1px solid #e5e7eb; border-radius:8px; background:#fbfdff; }
         .update-notes-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:8px; }
@@ -1334,22 +1134,6 @@
             opacity: 1;
             transition-delay: 0.1s;
         }
-        .sidebar.is-pinned .letter-d {
-            transform: translateX(-120px);
-            opacity: 0;
-            transition-delay: 0s;
-        }
-        .sidebar.is-pinned .letter-x {
-            transform: translateX(120px);
-            opacity: 0;
-            transition-delay: 0s;
-        }
-        .sidebar.is-pinned .author-content-wrap {
-            opacity: 1;
-            transform: scale(1);
-            transition-delay: 0.2s;
-            pointer-events: auto;
-        }
         .sidebar.is-pinned .side-pill {
             width: 170px;
             gap: 8px;
@@ -1358,27 +1142,6 @@
         .sidebar.is-pinned .side-pill-text {
             opacity: 1;
             max-width: 120px;
-            transition-delay: .15s;
-        }
-        .sidebar.is-pinned .project-version-badge,
-        .sidebar.is-pinned .update-now-btn {
-            width: 170px;
-            transition-delay: 0s;
-        }
-        .sidebar.is-pinned .project-version-compact,
-        .sidebar.is-pinned .update-version-compact {
-            display: none;
-        }
-        .sidebar.is-pinned .project-version-full,
-        .sidebar.is-pinned .update-version-full,
-        .sidebar.is-pinned .update-action-prefix {
-            display: inline;
-        }
-        .sidebar.is-pinned .update-now-btn svg {
-            display: block;
-        }
-        .sidebar.is-pinned .update-now-text {
-            max-width: 130px;
             transition-delay: .15s;
         }
 
@@ -1397,19 +1160,6 @@
         .sidebar.is-collapsing:hover .nav-text {
             opacity: 0;
         }
-        .sidebar.is-collapsing:hover .letter-d {
-            transform: translateX(-8px);
-            opacity: 1;
-        }
-        .sidebar.is-collapsing:hover .letter-x {
-            transform: translateX(8px);
-            opacity: 1;
-        }
-        .sidebar.is-collapsing:hover .author-content-wrap {
-            opacity: 0;
-            transform: scale(0.9);
-            pointer-events: none;
-        }
         .sidebar.is-collapsing:hover .side-pill {
             width: 44px;
             gap: 0;
@@ -1418,27 +1168,7 @@
             opacity: 0;
             max-width: 0;
         }
-        .sidebar.is-collapsing:hover .project-version-badge {
-            width: 44px;
-        }
-        .sidebar.is-collapsing:hover .project-version-compact,
-        .sidebar.is-collapsing:hover .update-version-compact {
-            display: inline;
-        }
-        .sidebar.is-collapsing:hover .project-version-full,
-        .sidebar.is-collapsing:hover .update-version-full,
-        .sidebar.is-collapsing:hover .update-action-prefix {
-            display: none;
-        }
-        .sidebar.is-collapsing:hover .update-now-btn {
-            width: 56px;
-        }
-        .sidebar.is-collapsing:hover .update-now-btn svg {
-            display: none;
-        }
-        .sidebar.is-collapsing:hover .update-now-text {
-            max-width: 42px;
-        }
+
     </style>
 </head>
 
@@ -1451,66 +1181,27 @@
             </button>
 
             <nav>
-                <button class="nav-fold-toggle" id="local-nav-toggle" type="button" onclick="toggleLocalNav()" aria-expanded="true" title="折叠本地功能">
-                    <svg class="nav-fold-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                        <polyline points="6 9 12 15 18 9"></polyline>
-                    </svg>
-                    <span class="nav-text" data-i18n="nav.localTools">本地功能</span>
-                </button>
-
-                <div class="nav-fold-group" id="local-nav-group">
-                    <div class="nav-item active" onclick="switchUI(this, 'zimage')">
-                        <svg class="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.587-1.587a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
-                        </svg>
-                        <span class="nav-text" data-i18n="nav.textToImage">文生图</span>
-                    </div>
-                    <div class="nav-item" onclick="switchUI(this, 'enhance')">
-                        <svg class="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path d="M13 10V3L4 14h7v7l9-11h-7z" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
-                        </svg>
-                        <span class="nav-text" data-i18n="nav.enhance">细节增强</span>
-                    </div>
-                    <div class="nav-item" onclick="switchUI(this, 'klein')">
-                        <svg class="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
-                        </svg>
-                        <span class="nav-text" data-i18n="nav.imageEdit">图片编辑</span>
-                    </div>
-                    <div class="nav-item" onclick="switchUI(this, 'angle')">
-                        <svg class="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path>
-                            <polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline>
-                            <line x1="12" y1="22.08" x2="12" y2="12"></line>
-                        </svg>
-                        <span class="nav-text" data-i18n="nav.angle">角度控制</span>
-                    </div>
-                </div>
-
-                <!-- 分隔线 -->
-                <div style="width:32px;height:1px;background:var(--border);margin:8px auto;transition:background 0.3s;"></div>
-
                 <div class="nav-item" onclick="switchUI(this, 'online')">
                     <svg class="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                         <path d="M12 2a10 10 0 1 0 0 20A10 10 0 0 0 12 2z"></path>
                         <path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
                     </svg>
-                    <span class="nav-text" data-i18n="nav.online">在线生图</span>
+                    <span class="nav-text" data-i18n="nav.online">鍦ㄧ嚎鐢熷浘</span>
                 </div>
                 <div class="nav-item" onclick="switchUI(this, 'gpt-chat')">
                     <svg class="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                         <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
                     </svg>
-                    <span class="nav-text" data-i18n="nav.gpt">GPT 对话</span>
+                    <span class="nav-text" data-i18n="nav.gpt">GPT 瀵硅瘽</span>
                 </div>
-                <div class="nav-item" onclick="switchUI(this, 'canvas')">
+                <div class="nav-item active" onclick="switchUI(this, 'canvas')">
                     <svg class="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                         <rect x="3" y="3" width="7" height="7"></rect>
                         <rect x="14" y="3" width="7" height="7"></rect>
                         <rect x="14" y="14" width="7" height="7"></rect>
                         <rect x="3" y="14" width="7" height="7"></rect>
                     </svg>
-                    <span class="nav-text" data-i18n="nav.canvas">无限画布</span>
+                    <span class="nav-text" data-i18n="nav.canvas">鏃犻檺鐢诲竷</span>
                 </div>
                 <div class="nav-item" onclick="switchUI(this, 'asset-manager')">
                     <svg class="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -1519,31 +1210,31 @@
                         <path d="M7 12h10"></path>
                         <path d="M7 16h6"></path>
                     </svg>
-                    <span class="nav-text" data-i18n="nav.assetManager">素材库</span>
+                    <span class="nav-text" data-i18n="nav.assetManager">绱犳潗搴?/span>
                 </div>
             </nav>
 
             <div class="side-actions">
-                <button class="side-pill" onclick="switchUI(this, 'api-settings')" type="button" title="API 设置">
+                <button class="side-pill" onclick="switchUI(this, 'api-settings')" type="button" title="API 璁剧疆">
                     <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                         <path d="M15 7h3a5 5 0 0 1 0 10h-3"></path>
                         <path d="M9 17H6A5 5 0 0 1 6 7h3"></path>
                         <line x1="8" y1="12" x2="16" y2="12"></line>
                     </svg>
-                    <span class="side-pill-text" data-i18n="common.apiSettings">API 设置</span>
+                    <span class="side-pill-text" data-i18n="common.apiSettings">API 璁剧疆</span>
                 </button>
-                <button class="side-pill settings-fold-toggle" id="settings-fold-toggle" onclick="toggleSidebarSettings()" type="button" title="更多设置" aria-expanded="false">
+                <button class="side-pill settings-fold-toggle" id="settings-fold-toggle" onclick="toggleSidebarSettings()" type="button" title="鏇村璁剧疆" aria-expanded="false">
                     <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                         <circle cx="12" cy="12" r="3"></circle>
                         <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.65 1.65 0 0 0 15 19.4a1.65 1.65 0 0 0-1 .6 1.65 1.65 0 0 0-.36 1.08V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-.6-1 1.65 1.65 0 0 0-1.08-.36H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-.6 1.65 1.65 0 0 0 .36-1.08V3a2 2 0 1 1 4 0v.09A1.65 1.65 0 0 0 15 4.6a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.22.38.58.69 1 .86.2.08.42.13.65.14H21a2 2 0 1 1 0 4h-.09A1.65 1.65 0 0 0 19.4 15z"></path>
                     </svg>
-                    <span class="side-pill-text" data-i18n="common.moreSettings">更多设置</span>
+                    <span class="side-pill-text" data-i18n="common.moreSettings">鏇村璁剧疆</span>
                     <svg class="settings-fold-chevron" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                         <polyline points="6 9 12 15 18 9"></polyline>
                     </svg>
                 </button>
                 <div class="settings-fold-group is-collapsed" id="settings-fold-group">
-                    <button class="side-pill" onclick="toggleTheme()" id="theme-toggle-btn" type="button" title="切换夜间模式">
+                    <button class="side-pill" onclick="toggleTheme()" id="theme-toggle-btn" type="button" title="鍒囨崲澶滈棿妯″紡">
                         <svg id="icon-moon" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                             <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
                         </svg>
@@ -1558,7 +1249,7 @@
                             <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
                             <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
                         </svg>
-                        <span class="side-pill-text" data-i18n="common.darkMode">黑夜模式</span>
+                        <span class="side-pill-text" data-i18n="common.darkMode">榛戝妯″紡</span>
                     </button>
                     <button class="side-pill" onclick="toggleLanguage()" id="lang-toggle-btn" type="button" title="Language">
                         <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -1566,73 +1257,21 @@
                             <path d="M2 12h20"></path>
                             <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
                         </svg>
-                        <span class="side-pill-text" data-i18n="common.language">中文</span>
+                        <span class="side-pill-text" data-i18n="common.language">涓枃</span>
                     </button>
-                    <button class="side-pill" onclick="switchUI(this, 'comfyui-settings')" type="button" title="工作流设置">
-                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <rect x="3" y="3" width="7" height="7" rx="1"></rect>
-                            <rect x="14" y="3" width="7" height="7" rx="1"></rect>
-                            <rect x="3" y="14" width="7" height="7" rx="1"></rect>
-                            <path d="M14 14h7v7h-7z"></path>
-                            <line x1="10" y1="6.5" x2="14" y2="6.5"></line>
-                            <line x1="6.5" y1="10" x2="6.5" y2="14"></line>
-                        </svg>
-                        <span class="side-pill-text" data-i18n="common.comfyuiSettings">工作流设置</span>
-                    </button>
-                </div>
-                <button id="github-entry-btn" class="side-pill" onclick="openProjectPage()" type="button" title="GitHub">
-                    <svg fill="currentColor" stroke="none" viewBox="0 0 24 24" aria-hidden="true">
-                        <path d="M12 .5a12 12 0 0 0-3.79 23.39c.6.11.82-.26.82-.58v-2.05c-3.34.73-4.04-1.42-4.04-1.42-.55-1.39-1.34-1.76-1.34-1.76-1.09-.75.08-.74.08-.74 1.21.09 1.85 1.25 1.85 1.25 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.12-.3-.54-1.53.12-3.18 0 0 1.01-.32 3.3 1.23a11.45 11.45 0 0 1 6.01 0c2.29-1.55 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.77.84 1.24 1.91 1.24 3.22 0 4.61-2.81 5.63-5.49 5.93.43.37.81 1.1.81 2.22v3.29c0 .32.22.69.83.57A12 12 0 0 0 12 .5Z"></path>
-                    </svg>
-                    <span class="side-pill-text" data-i18n="common.project">项目主页</span>
-                </button>
-                <button id="update-now-btn" class="update-now-btn" onclick="runProjectUpdate()" type="button" title="一键更新">
-                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                        <path d="M21 12a9 9 0 1 1-2.64-6.36"></path>
-                        <path d="M21 3v6h-6"></path>
-                    </svg>
-                    <span id="update-now-text" class="update-now-text" data-i18n="update.oneClick">一键更新</span>
-                </button>
-                <div id="project-version-badge" class="project-version-badge" title="点击检测更新" role="button" tabindex="0" onclick="checkForUpdates(true)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();checkForUpdates(true);}">v-</div>
-            </div>
-
-            <div class="author-box">
-                <span class="dx-letter letter-d">D</span>
-                <span class="dx-letter letter-x">X</span>
-
-                <div class="author-content-wrap">
-                    <div class="author-name-lite">wuli大雄</div>
-                    <div class="social-row-lite">
-                        <a href="https://space.bilibili.com/78652351" target="_blank" class="social-icon-lite">
-                            <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
-                                <path d="M17.813 4.653h-.854L15.66 3.053a1.147 1.147 0 00-1.63 0l-1.3 1.6h-1.46L9.97 3.053a1.147 1.147 0 00-1.63 0L7.043 4.653h-.854a3.946 3.946 0 00-3.93 3.934v8.117a3.946 3.946 0 003.93 3.934h11.624a3.946 3.946 0 003.93-3.934V8.587a3.946 3.946 0 00-3.93-3.934zM7.152 13.9a1.465 1.465 0 111.47-1.462 1.465 1.465 0 01-1.47 1.462zm7.696 0a1.465 1.465 0 111.47-1.462 1.465 1.465 0 01-1.47 1.462z" />
-                            </svg>
-                        </a>
-                        <a href="https://www.xiaohongshu.com/user/profile/6433c34c000000001a023538" target="_blank" class="social-icon-lite">
-                            <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
-                                <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 14.5v-9l6 4.5-6 4.5z" />
-                            </svg>
-                        </a>
-                        <a href="https://www.youtube.com/@%E5%A4%A7%E9%9B%84dx" target="_blank" class="social-icon-lite">
-                            <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
-                                <path d="M23.498 6.186a3.016 3.016 0 00-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 00.502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 002.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 002.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z" />
-                            </svg>
-                        </a>
-                        <a href="https://x.com/dx8152?s=21" target="_blank" class="social-icon-lite">
-                            <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
-                                <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" />
-                            </svg>
-                        </a>
-                    </div>
                 </div>
             </div>
         </aside>
         <script>
-            /* 在侧栏 DOM 解析完后立即把 active 类移到当前页对应的入口，避免首屏先在文生图上闪一下 */
+            /* 鍦ㄤ晶鏍?DOM 瑙ｆ瀽瀹屽悗绔嬪嵆鎶?active 绫荤Щ鍒板綋鍓嶉〉瀵瑰簲鐨勫叆鍙ｏ紝閬垮厤棣栧睆鍏堝湪鏂囩敓鍥句笂闂竴涓?*/
             (function(){
                 try {
                     var pageId = localStorage.getItem('studio_active_page');
-                    if(pageId && pageId !== 'zimage') {
+                    if(['zimage','enhance','klein','angle'].includes(pageId)) {
+                        pageId = 'canvas';
+                        localStorage.setItem('studio_active_page', pageId);
+                    }
+                    if(pageId && pageId !== 'canvas') {
                         document.querySelectorAll('.nav-item.active, .side-pill.active').forEach(function(n){
                             n.classList.remove('active');
                         });
@@ -1644,16 +1283,11 @@
         </script>
 
         <main class="stage">
-            <iframe id="frame-zimage" data-src="/static/zimage.html?v=2026.06.18.1781589344" class="active" scrolling="yes"></iframe>
-            <iframe id="frame-enhance" data-src="/static/enhance.html?v=2026.06.18.1781847714" scrolling="yes"></iframe>
-            <iframe id="frame-klein" data-src="/static/klein.html?v=2026.06.18.1781589344" scrolling="yes"></iframe>
-            <iframe id="frame-angle" data-src="/static/angle.html?v=2026.06.18.1781847714" scrolling="yes"></iframe>
-            <iframe id="frame-online" data-src="/static/online.html?v=2026.06.18.1781589344" scrolling="yes"></iframe>
-            <iframe id="frame-gpt-chat" data-src="/static/gpt-chat.html?v=2026.06.18.1781847714" scrolling="yes"></iframe>
-            <iframe id="frame-canvas" data-src="/static/canvas-list.html?v=2026.06.19.cards1" scrolling="yes"></iframe>
-            <iframe id="frame-asset-manager" data-src="/static/asset-manager.html?v=2026.06.18.1781847714" scrolling="yes"></iframe>
-            <iframe id="frame-api-settings" data-src="/static/api-settings.html?v=2026.06.18.1781847714" scrolling="yes"></iframe>
-            <iframe id="frame-comfyui-settings" data-src="/static/comfyui-settings.html?v=2026.06.18.1781847714" scrolling="yes"></iframe>
+            <iframe id="frame-online" data-src="/static/online.html?v=2026.06.22.1782126501" scrolling="yes"></iframe>
+            <iframe id="frame-gpt-chat" data-src="/static/gpt-chat.html?v=2026.06.22.1782126501" scrolling="yes"></iframe>
+            <iframe id="frame-canvas" data-src="/static/canvas-list.html?v=2026.06.22.1782126501" class="active" scrolling="yes"></iframe>
+            <iframe id="frame-asset-manager" data-src="/static/asset-manager.html?v=2026.06.22.1782110750" scrolling="yes"></iframe>
+            <iframe id="frame-api-settings" data-src="/static/api-settings.html?v=2026.06.22.1782126501" scrolling="yes"></iframe>
 
         </main>
     </div>
@@ -1662,10 +1296,10 @@
         <div class="studio-modal-panel">
             <div class="studio-modal-head">
                 <div>
-                    <div class="studio-modal-kicker" data-i18n="update.available">发现更新</div>
-                    <h2 id="project-update-title" class="studio-modal-title">一键更新</h2>
+                    <div class="studio-modal-kicker" data-i18n="update.available">鍙戠幇鏇存柊</div>
+                    <h2 id="project-update-title" class="studio-modal-title">涓€閿洿鏂?/h2>
                 </div>
-                <button class="studio-modal-close" type="button" onclick="closeProjectUpdateModal()" title="关闭" aria-label="关闭">
+                <button class="studio-modal-close" type="button" onclick="closeProjectUpdateModal()" title="鍏抽棴" aria-label="鍏抽棴">
                     <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                         <line x1="18" y1="6" x2="6" y2="18"></line>
                         <line x1="6" y1="6" x2="18" y2="18"></line>
@@ -1676,24 +1310,24 @@
                 <p id="project-update-copy" class="studio-modal-copy"></p>
                 <div id="project-update-notes" class="update-notes-box" hidden>
                     <div class="update-notes-head">
-                        <strong id="project-update-notes-title">本次更新内容</strong>
+                        <strong id="project-update-notes-title">鏈鏇存柊鍐呭</strong>
                         <span id="project-update-notes-version" class="update-notes-version"></span>
                     </div>
                     <ol id="project-update-notes-list" class="update-notes-list"></ol>
-                    <p id="project-update-notes-empty" class="update-notes-empty" hidden>暂未获取到更新说明。</p>
+                    <p id="project-update-notes-empty" class="update-notes-empty" hidden>鏆傛湭鑾峰彇鍒版洿鏂拌鏄庛€?/p>
                 </div>
                 <div id="update-source-list" class="update-source-list">
                     <button id="update-source-github" class="update-source-card" type="button" data-update-source="github" onclick="setUpdateSource('github')">
                         <div class="update-source-head">
                             <div class="update-source-title">
-                                <strong>GitHub 下载源</strong>
-                                <span>GitHub API / raw 文件 / GitHub 网页，Google 仅作外网参考。</span>
+                                <strong>GitHub 涓嬭浇婧?/strong>
+                                <span>GitHub API / raw 鏂囦欢 / GitHub 缃戦〉锛孏oogle 浠呬綔澶栫綉鍙傝€冦€?/span>
                             </div>
                             <div class="update-source-head-right">
                                 <span class="update-source-check" aria-hidden="true">
                                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
                                 </span>
-                                <span class="update-source-badge">待测试</span>
+                                <span class="update-source-badge">寰呮祴璇?/span>
                             </div>
                         </div>
                         <div class="connectivity-list" data-connectivity-source="github"></div>
@@ -1701,14 +1335,14 @@
                     <button id="update-source-modelscope" class="update-source-card" type="button" data-update-source="modelscope" onclick="setUpdateSource('modelscope')">
                         <div class="update-source-head">
                             <div class="update-source-title">
-                                <strong>ModelScope 下载源</strong>
-                                <span>ModelScope 空间与版本文件，适合国内网络。</span>
+                                <strong>ModelScope 涓嬭浇婧?/strong>
+                                <span>ModelScope 绌洪棿涓庣増鏈枃浠讹紝閫傚悎鍥藉唴缃戠粶銆?/span>
                             </div>
                             <div class="update-source-head-right">
                                 <span class="update-source-check" aria-hidden="true">
                                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
                                 </span>
-                                <span class="update-source-badge">待测试</span>
+                                <span class="update-source-badge">寰呮祴璇?/span>
                             </div>
                         </div>
                         <div class="connectivity-list" data-connectivity-source="modelscope"></div>
@@ -1717,7 +1351,7 @@
                 <div id="project-update-summary" class="update-modal-summary warn">
                     <span class="update-modal-dot" aria-hidden="true"></span>
                     <div>
-                        <strong id="project-update-summary-title">建议先测试连通性</strong>
+                        <strong id="project-update-summary-title">寤鸿鍏堟祴璇曡繛閫氭€?/strong>
                         <span id="project-update-summary-text"></span>
                     </div>
                 </div>
@@ -1728,17 +1362,17 @@
                         <path d="M21 12a9 9 0 1 1-2.64-6.36"></path>
                         <path d="M21 3v6h-6"></path>
                     </svg>
-                    <span id="connectivity-test-text">测试连通性</span>
+                    <span id="connectivity-test-text">娴嬭瘯杩為€氭€?/span>
                 </button>
                 <button class="studio-modal-btn" type="button" onclick="closeProjectUpdateModal()">
-                    <span id="project-update-cancel-text">取消</span>
+                    <span id="project-update-cancel-text">鍙栨秷</span>
                 </button>
                 <button id="project-update-confirm-btn" class="studio-modal-btn primary" type="button" onclick="confirmProjectUpdate()">
                     <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                         <path d="M21 12a9 9 0 1 1-2.64-6.36"></path>
                         <path d="M21 3v6h-6"></path>
                     </svg>
-                    <span id="project-update-confirm-text">开始更新</span>
+                    <span id="project-update-confirm-text">寮€濮嬫洿鏂?/span>
                 </button>
             </div>
         </div>
@@ -1760,14 +1394,14 @@
         const LOCAL_NAV_COLLAPSED_KEY = 'studio_local_nav_collapsed';
         const SIDEBAR_SETTINGS_COLLAPSED_KEY = 'studio_sidebar_settings_collapsed';
         const SIDEBAR_PINNED_KEY = 'studio_sidebar_pinned';
-        const DEFAULT_PAGE_ID = 'zimage';
-        const PAGE_IDS = ['zimage','enhance','klein','angle','online','gpt-chat','canvas','asset-manager','api-settings','comfyui-settings'];
-        const LOCAL_PAGE_IDS = ['zimage','enhance','klein','angle'];
+        const DEFAULT_PAGE_ID = 'canvas';
+        const PAGE_IDS = ['online','gpt-chat','canvas','asset-manager','api-settings'];
+        const LOCAL_PAGE_IDS = [];
         const PROJECT_URL = 'https://github.com/hero8152/Infinite-Canvas';
         let appInfo = { version:'', repo_url:PROJECT_URL, version_url:'https://raw.githubusercontent.com/hero8152/Infinite-Canvas/main/VERSION' };
         let updateConnectivityResult = null;
         let projectUpdateRunning = false;
-        let projectUpdateAbort = null;  // 当前更新请求的 AbortController，便于用户中途取消
+        let projectUpdateAbort = null;
         let updateSource = localStorage.getItem('studio_update_source') || 'github';
         let projectUpdateNotes = null;
 
@@ -1806,7 +1440,7 @@
             if(group) group.classList.toggle('is-collapsed', collapsed);
             if(toggle) {
                 toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
-                toggle.title = collapsed ? '展开本地功能' : '折叠本地功能';
+                toggle.title = collapsed ? '灞曞紑鏈湴鍔熻兘' : '鎶樺彔鏈湴鍔熻兘';
             }
             if(!options.skipRemember) localStorage.setItem(LOCAL_NAV_COLLAPSED_KEY, collapsed ? '1' : '0');
         }
@@ -1827,7 +1461,7 @@
             if(group) group.classList.toggle('is-collapsed', collapsed);
             if(toggle) {
                 toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
-                toggle.title = collapsed ? '展开更多设置' : '收起更多设置';
+                toggle.title = collapsed ? '灞曞紑鏇村璁剧疆' : '鏀惰捣鏇村璁剧疆';
             }
             if(!options.skipRemember) localStorage.setItem(SIDEBAR_SETTINGS_COLLAPSED_KEY, collapsed ? '1' : '0');
         }
@@ -1839,7 +1473,7 @@
 
         function restoreSidebarSettings(id) {
             const savedCollapsed = localStorage.getItem(SIDEBAR_SETTINGS_COLLAPSED_KEY) !== '0';
-            setSidebarSettingsCollapsed(savedCollapsed && id !== 'comfyui-settings', { skipRemember:true });
+            setSidebarSettingsCollapsed(savedCollapsed, { skipRemember:true });
         }
 
         function resetStudioRootScroll() {
@@ -1852,6 +1486,7 @@
 
         function switchUI(el, id, options = {}) {
             resetStudioRootScroll();
+            if(['zimage','enhance','klein','angle'].includes(id)) id = DEFAULT_PAGE_ID;
             if(!PAGE_IDS.includes(id)) id = DEFAULT_PAGE_ID;
             document.querySelectorAll('.nav-item,.side-pill').forEach(n => n.classList.remove('active'));
             if(el) el.classList.add('active');
@@ -1868,10 +1503,6 @@
             } else {
                 setLocalNavCollapsed(localStorage.getItem(LOCAL_NAV_COLLAPSED_KEY) === '1', { skipRemember:true });
             }
-            if(id === 'comfyui-settings') {
-                setSidebarSettingsCollapsed(false, { skipRemember:true });
-            }
-            // 切换到画布时通知刷新工作流列表（防止在 comfyui-settings 修改后画布未及时更新）
             if (id === 'canvas' && target.src) {
                 try { target.contentWindow?.postMessage({ type: 'canvas-focus' }, '*'); } catch(e) {}
             }
@@ -1879,7 +1510,7 @@
         }
 
         function forwardStudioApiChange(data) {
-            if(!data || !['providers-changed','workflows-changed','comfy-instances-changed'].includes(data.type)) return;
+            if(!data || !['providers-changed','workflows-changed'].includes(data.type)) return;
             document.querySelectorAll('iframe').forEach(iframe => {
                 try {
                     if (iframe && iframe.contentWindow) iframe.contentWindow.postMessage(data, '*');
@@ -1957,7 +1588,7 @@
             setInterval(syncStatus, 2000);
         }
 
-        // --- 夜间模式 ---
+        // --- 澶滈棿妯″紡 ---
 
         function syncThemeToFrame(iframe) {
             const theme = (window.StudioTheme || {get: () => 'light'}).get();
@@ -2028,7 +1659,6 @@
             updateThemeIcon(theme);
             if(window.StudioI18n) window.StudioI18n.apply();
             broadcastLanguage();
-            checkForUpdates();
         });
 
         // sync theme when iframe loads
@@ -2088,8 +1718,8 @@
                 badge.textContent = 'v-';
             }
             badge.title = window.StudioI18n?.lang?.() === 'en'
-                ? `Current version: ${full} · click to check for updates`
-                : `当前版本：${full} · 点击检测更新`;
+                ? `Current version: ${full} 路 click to check for updates`
+                : `当前版本：${full} · 点击检查更新`;
         }
 
         function refreshUpdateButtonText() {
@@ -2126,12 +1756,12 @@
             const remoteVersion = gitBtn.dataset.remoteVersion || '';
             const isEn = window.StudioI18n?.lang?.() === 'en';
             gitBtn.title = isEn
-                ? `Current ${versionLabel(gitBtn.dataset.localVersion || appInfo.version)} · latest ${versionLabel(remoteVersion)}`
-                : `当前 ${versionLabel(gitBtn.dataset.localVersion || appInfo.version)} · 最新 ${versionLabel(remoteVersion)}`;
+                ? `Current ${versionLabel(gitBtn.dataset.localVersion || appInfo.version)} 路 latest ${versionLabel(remoteVersion)}`
+                : `褰撳墠 ${versionLabel(gitBtn.dataset.localVersion || appInfo.version)} 路 鏈€鏂?${versionLabel(remoteVersion)}`;
             const updateBtn = document.getElementById('update-now-btn');
             if(updateBtn) updateBtn.title = remoteVersion
-                ? (isEn ? `Update to ${versionLabel(remoteVersion)}` : `更新到 ${versionLabel(remoteVersion)}`)
-                : (isEn ? 'Update main.py and static files from GitHub' : '从 GitHub 更新 main.py 和 static 文件');
+                ? (isEn ? `Update to ${versionLabel(remoteVersion)}` : `鏇存柊鍒?${versionLabel(remoteVersion)}`)
+                : (isEn ? 'Update main.py and static files from GitHub' : '浠?GitHub 鏇存柊 main.py 鍜?static 鏂囦欢');
             refreshUpdateButtonText();
         }
 
@@ -2160,7 +1790,7 @@
             const isEn = window.StudioI18n?.lang?.() === 'en';
             const notes = projectUpdateNotes || {};
             const items = Array.isArray(notes.items) ? notes.items.filter(Boolean) : [];
-            if(titleEl) titleEl.textContent = isEn ? 'What changed' : '本次更新内容';
+            if(titleEl) titleEl.textContent = isEn ? 'What changed' : '鏈鏇存柊鍐呭';
             if(versionEl) versionEl.textContent = notes.version ? versionLabel(notes.version) : '';
             if(list) {
                 list.replaceChildren();
@@ -2182,13 +1812,13 @@
 
         function describeNetworkError(err, isEn){
             const msg = String(err?.message || err || '');
-            const isNetwork = (err instanceof TypeError) || /Failed to fetch|NetworkError|ERR_|timed? ?out|超时|无法连接|GitHub|HTTP 4|HTTP 5/i.test(msg);
+            const isNetwork = (err instanceof TypeError) || /Failed to fetch|NetworkError|ERR_|timed? ?out|瓒呮椂|鏃犳硶杩炴帴|GitHub|HTTP 4|HTTP 5/i.test(msg);
             if(isNetwork){
                 return isEn
                     ? 'Cannot reach the selected update source. Check your network, proxy, or DNS, then try again.'
                     : '无法连接当前选择的更新源。请检查网络、代理或 DNS 后重试。';
             }
-            return msg || (isEn ? 'Update failed' : '更新失败');
+            return msg || (isEn ? 'Update failed' : '鏇存柊澶辫触');
         }
 
         function updateUiText(zh, en) {
@@ -2228,13 +1858,13 @@
 
         function updateTargetLabel(name) {
             const labels = {
-                'GitHub 更新列表': ['GitHub 更新列表', 'GitHub update API'],
-                'GitHub 版本文件': ['GitHub 版本文件', 'GitHub version file'],
-                'GitHub 主页': ['GitHub 主页', 'GitHub home page'],
-                'ModelScope 更新列表': ['ModelScope 更新列表', 'ModelScope update list'],
-                'ModelScope 版本文件': ['ModelScope 版本文件', 'ModelScope version file'],
-                'ModelScope 空间页面': ['ModelScope 空间页面', 'ModelScope space page'],
-                'ModelScope 主页': ['ModelScope 主页', 'ModelScope home page'],
+                'GitHub 鏇存柊鍒楄〃': ['GitHub 鏇存柊鍒楄〃', 'GitHub update API'],
+                'GitHub 鐗堟湰鏂囦欢': ['GitHub 鐗堟湰鏂囦欢', 'GitHub version file'],
+                'GitHub 涓婚〉': ['GitHub 涓婚〉', 'GitHub home page'],
+                'ModelScope 鏇存柊鍒楄〃': ['ModelScope 鏇存柊鍒楄〃', 'ModelScope update list'],
+                'ModelScope 鐗堟湰鏂囦欢': ['ModelScope 鐗堟湰鏂囦欢', 'ModelScope version file'],
+                'ModelScope 绌洪棿椤甸潰': ['ModelScope 绌洪棿椤甸潰', 'ModelScope space page'],
+                'ModelScope 涓婚〉': ['ModelScope 涓婚〉', 'ModelScope home page'],
                 'Google 连通性': ['Google 连通性', 'Google connectivity'],
             };
             const item = labels[name] || [name, name];
@@ -2242,11 +1872,11 @@
         }
 
         function updateStatusLabel(item) {
-            if(item.pending) return updateUiText('检测中...', 'Testing...');
-            if(item.ok) return `${updateUiText('正常', 'OK')} · ${item.elapsed_ms || 0}ms`;
-            if(item.timed_out) return updateUiText('失败 · 超时', 'Failed · timeout');
+            if(item.pending) return updateUiText('妫€娴嬩腑...', 'Testing...');
+            if(item.ok) return `${updateUiText('姝ｅ父', 'OK')} 路 ${item.elapsed_ms || 0}ms`;
+            if(item.timed_out) return updateUiText('澶辫触 路 瓒呮椂', 'Failed 路 timeout');
             if(item.status) return `HTTP ${item.status}`;
-            return updateUiText('失败', 'Failed');
+            return updateUiText('澶辫触', 'Failed');
         }
 
         function setUpdateSummary(kind, title, text) {
@@ -2266,12 +1896,12 @@
             const github = sources.github || {};
             const ms = sources.modelscope || {};
             return [
-                { name:'GitHub 更新列表', url:github.tree_url || appInfo.tree_url || 'https://api.github.com/repos/hero8152/Infinite-Canvas/git/trees/main?recursive=1', source:'github', required:true },
-                { name:'GitHub 版本文件', url:github.version_url || appInfo.version_url || 'https://raw.githubusercontent.com/hero8152/Infinite-Canvas/main/VERSION', source:'github', required:true },
-                { name:'GitHub 主页', url:'https://github.com/', source:'github' },
-                { name:'ModelScope 版本文件', url:ms.version_url || 'https://www.modelscope.cn/api/v1/studio/Daniel8152/Infinite-Canvas/repo?Revision=master&FilePath=VERSION', source:'modelscope', required:true },
-                { name:'ModelScope 空间页面', url:ms.repo_url || 'https://modelscope.cn/studios/Daniel8152/Infinite-Canvas', source:'modelscope' },
-                { name:'ModelScope 主页', url:'https://modelscope.cn/', source:'modelscope' },
+                { name:'GitHub 鏇存柊鍒楄〃', url:github.tree_url || appInfo.tree_url || 'https://api.github.com/repos/hero8152/Infinite-Canvas/git/trees/main?recursive=1', source:'github', required:true },
+                { name:'GitHub 鐗堟湰鏂囦欢', url:github.version_url || appInfo.version_url || 'https://raw.githubusercontent.com/hero8152/Infinite-Canvas/main/VERSION', source:'github', required:true },
+                { name:'GitHub 涓婚〉', url:'https://github.com/', source:'github' },
+                { name:'ModelScope 鐗堟湰鏂囦欢', url:ms.version_url || 'https://www.modelscope.cn/api/v1/studio/Daniel8152/Infinite-Canvas/repo?Revision=master&FilePath=VERSION', source:'modelscope', required:true },
+                { name:'ModelScope 绌洪棿椤甸潰', url:ms.repo_url || 'https://modelscope.cn/studios/Daniel8152/Infinite-Canvas', source:'modelscope' },
+                { name:'ModelScope 涓婚〉', url:'https://modelscope.cn/', source:'modelscope' },
                 { name:'Google 连通性', url:'https://www.google.com/generate_204', source:'reference' },
             ];
         }
@@ -2360,7 +1990,7 @@
                     'warn',
                     updateUiText('建议先测试连通性', 'Connectivity test recommended'),
                     updateUiText(
-                        '测试会同时测速 GitHub 和 ModelScope。你可以根据结果切换下载源。',
+                        '测试会同时检测 GitHub 和 ModelScope。你可以根据结果切换下载源。',
                         'The test checks both GitHub and ModelScope. Choose the faster reachable source before updating.'
                     )
                 );
@@ -2407,7 +2037,6 @@
         }
 
         function closeProjectUpdateModal() {
-            // 更新进行中允许关闭：中止在途请求并恢复 UI，避免「卡在更新中、无法关闭」
             if(projectUpdateRunning) {
                 try { projectUpdateAbort?.abort(); } catch(e) {}
             }
@@ -2455,7 +2084,7 @@
                 if(!items.length) return;
                 const done = items.filter(it => !it.pending && !it.untouched);
                 if(done.length < items.length) {
-                    setSourceBadge(badge, '', updateUiText(`检测中 ${done.length}/${items.length}`, `${done.length}/${items.length}`));
+                    setSourceBadge(badge, '', updateUiText(`妫€娴嬩腑 ${done.length}/${items.length}`, `${done.length}/${items.length}`));
                     return;
                 }
                 const stats = sourceConnectivityStats(source, results);
@@ -2466,17 +2095,16 @@
 
         let connectivityTesting = false;
         async function runUpdateConnectivityTest() {
-            if(connectivityTesting) return; // 防止重复点击导致状态错乱
+            if(connectivityTesting) return;
             const isEn = window.StudioI18n?.lang?.() === 'en';
             const btn = document.getElementById('connectivity-test-btn');
             const text = document.getElementById('connectivity-test-text');
             connectivityTesting = true;
             if(btn) btn.disabled = true;
-            if(text) text.textContent = isEn ? 'Testing...' : '检测中...';
+            if(text) text.textContent = isEn ? 'Testing...' : '妫€娴嬩腑...';
             updateConnectivityResult = null;
 
             const targets = updateConnectivityTargets();
-            // 实时状态数组：先全部置为「检测中」，每条探测完成立即刷新对应行
             const live = targets.map(item => ({...item, pending:true, untouched:false}));
             let backendMissing = false;
             const applyResult = (name, patch) => {
@@ -2488,13 +2116,11 @@
             };
 
             const probeOne = async (t) => {
-                // 客户端兜底超时：5s 探测 + 1s 网络余量，超时即报「超时」，不会永远卡在「检测中」
                 const ac = new AbortController();
                 const killer = setTimeout(() => ac.abort(), 6000);
                 try {
                     const res = await fetch(`/api/update-connectivity/probe?name=${encodeURIComponent(t.name)}`, { cache:'no-store', signal:ac.signal });
                     const data = await res.json().catch(() => ({}));
-                    // 旧后端没有单条探测接口 → 404 Not Found，标记后回退到整体接口
                     if(res.status === 404 && (data.detail === 'Not Found' || data.detail === undefined)) {
                         backendMissing = true;
                         return;
@@ -2502,11 +2128,11 @@
                     if(res.ok) {
                         applyResult(t.name, { ok:!!data.ok, status:data.status || 0, elapsed_ms:data.elapsed_ms || 0, error:data.error || '', timed_out:!!data.timed_out });
                     } else {
-                        applyResult(t.name, { ok:false, error:data.detail || (isEn ? 'Failed' : '失败') });
+                        applyResult(t.name, { ok:false, error:data.detail || (isEn ? 'Failed' : '澶辫触') });
                     }
                 } catch(e) {
                     if(e && e.name === 'AbortError') {
-                        applyResult(t.name, { ok:false, timed_out:true, error:isEn ? 'Timed out (over 5s)' : '连接超时（超过 5s）' });
+                        applyResult(t.name, { ok:false, timed_out:true, error:isEn ? 'Timed out (over 5s)' : '连接超时（超过 5 秒）' });
                     } else {
                         applyResult(t.name, { ok:false, error:describeNetworkError(e, isEn) });
                     }
@@ -2516,13 +2142,12 @@
             };
 
             try {
-                setUpdateSummary('warn', isEn ? 'Testing connectivity' : '正在测试连通性', isEn ? 'Probing each endpoint — results stream in live.' : '正在逐条检测各节点，结果实时显示。');
+                setUpdateSummary('warn', isEn ? 'Testing connectivity' : '正在测试连通性', isEn ? 'Probing each endpoint; results stream in live.' : '正在逐条检测各节点，结果会实时显示。');
                 renderConnectivityList(live);
                 renderSourceBadgesLive(live);
                 await Promise.all(targets.map(probeOne));
 
                 if(backendMissing) {
-                    // 兜底：尝试旧的整体接口
                     try {
                         const res = await fetch('/api/update-connectivity', { cache:'no-store' });
                         const data = await res.json().catch(() => ({}));
@@ -2570,7 +2195,6 @@
             if(confirmText) confirmText.textContent = isEn ? 'Updating...' : '更新中...';
             const sourceName = updateSourceLabel();
             setUpdateSummary('warn', isEn ? 'Updating' : '正在更新', isEn ? `Downloading files from ${sourceName} and creating a local backup.` : `正在从 ${sourceName} 下载文件，并创建本地备份。`);
-            // 客户端兜底超时：即使后端异常挂起，UI 也能恢复，不会永远停在「更新中」
             const ac = new AbortController();
             const killer = setTimeout(() => ac.abort(), 300000);
             try {
@@ -2581,14 +2205,14 @@
                     signal:ac.signal
                 });
                 const data = await res.json().catch(() => ({}));
-                if(!res.ok) throw new Error(data.detail || (isEn ? 'Update failed' : '更新失败'));
+                if(!res.ok) throw new Error(data.detail || (isEn ? 'Update failed' : '鏇存柊澶辫触'));
                 if(data.update_notes) setProjectUpdateNotes(data.update_notes);
                 const restarting = data.restart_scheduled;
                 const usedLabel = data.source_label || (data.source === 'modelscope' ? 'ModelScope' : 'GitHub');
                 const fallbackNote = data.fallback_used
                     ? (isEn
                         ? ` (${sourceName} was unreachable, so it fell back to ${usedLabel})`
-                        : `（${sourceName} 不可用，已自动兜底切换到 ${usedLabel}）`)
+                        : `（${sourceName} 不可用，已自动切换到 ${usedLabel}）`)
                     : '';
                 setUpdateSummary(
                     'ok',
@@ -2637,7 +2261,7 @@
             try {
                 const list = await fetch('/api/update-backups').then(r => r.json());
                 const backups = list.backups || [];
-                if(!backups.length){ alert(isEn ? 'No backups available.' : '没有可用的备份'); return; }
+                if(!backups.length){ alert(isEn ? 'No backups available.' : '没有可用的备份。'); return; }
                 const lines = backups.slice(0, 8).map((b, i) => {
                     const d = new Date((b.created_at || 0) * 1000);
                     const ts = d.toLocaleString();
@@ -2657,7 +2281,7 @@
                     body:JSON.stringify({ name:target.name, auto_restart:true, restart_delay:3 })
                 });
                 const data = await res.json().catch(() => ({}));
-                if(!res.ok) throw new Error(data.detail || (isEn ? 'Rollback failed' : '回滚失败'));
+                if(!res.ok) throw new Error(data.detail || (isEn ? 'Rollback failed' : '鍥炴粴澶辫触'));
                 alert(isEn
                     ? `Restored ${data.count || 0} files. Backend is restarting.`
                     : `已还原 ${data.count || 0} 个文件。后端正在重启。`);
@@ -2680,7 +2304,7 @@
                 let best = null;
                 let reachable = false;
                 let serverChecked = false;
-                // 优先走后端检测：服务端用系统代理同时检测 GitHub 和 ModelScope，避免浏览器跨域/被墙
+                // 浼樺厛璧板悗绔娴嬶細鏈嶅姟绔敤绯荤粺浠ｇ悊鍚屾椂妫€娴?GitHub 鍜?ModelScope锛岄伩鍏嶆祻瑙堝櫒璺ㄥ煙/琚
                 try {
                     const r = await fetch('/api/check-update', { cache:'no-store' });
                     if(r.ok) {
@@ -2691,7 +2315,7 @@
                         if(d.latest?.version) best = {source:d.latest.source, version:d.latest.version, update_notes:d.latest.update_notes || d.update_notes || null};
                     }
                 } catch(e) {}
-                // 兜底：旧后端无 /api/check-update 时，浏览器直接拉取双源 VERSION
+                // 鍏滃簳锛氭棫鍚庣鏃?/api/check-update 鏃讹紝娴忚鍣ㄧ洿鎺ユ媺鍙栧弻婧?VERSION
                 if(!serverChecked) {
                     const sources = appInfo.sources || {};
                     const candidates = [
@@ -2716,14 +2340,13 @@
                     if(hasUpdate) {
                         openProjectUpdateModal();
                     } else if(reachable) {
-                        alert(isEn ? `You are on the latest version (${versionLabel(current)}).` : `已是最新版本（${versionLabel(current)}）。`);
+                        alert(isEn ? `You are on the latest version (${versionLabel(current)}).` : `已经是最新版本（${versionLabel(current)}）。`);
                     } else {
                         alert(isEn ? 'Could not reach GitHub or ModelScope. Check your network/proxy and try again.' : '无法连接 GitHub 或 ModelScope 更新源，请检查网络或代理后重试。');
                     }
                 }
             } catch(e) {
-                // 离线包里没有网络时保持安静，不影响本地使用。
-                if(manual) alert(isEn ? 'Update check failed.' : '检测更新失败。');
+                if(manual) alert(isEn ? 'Update check failed.' : '检查更新失败。');
             } finally {
                 if(badge) badge.classList.remove('checking');
             }
