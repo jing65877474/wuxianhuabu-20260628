@@ -283,7 +283,6 @@ let internalDrag = false;
 let selected = new Set();
 let saveTimer = null;
 let creatingCanvas = false;
-let createCanvasKind = 'classic';
 let trashMode = false;
 let pendingDeleteCanvasId = null;
 let pendingPurgeCanvasId = null;
@@ -973,17 +972,14 @@ function ensureCanvas(){
     setStatus(tr('canvas.needCanvas'));
     return false;
 }
-function setCreateMode(active, kind='classic'){
+function setCreateMode(active){
     creatingCanvas = active;
-    createCanvasKind = active ? ((kind === 'smart') ? 'smart' : 'classic') : 'classic';
     if(active) trashMode = false;
     canvasGate.classList.toggle('creating', active);
     refreshGateViewControls();
     setStatus(active ? tr('canvas.enterCanvasName') : (canvases.length ? tr('canvas.chooseFirst') : tr('canvas.noCanvasCreateFirst')));
     if(active) {
-        gateTitleInput.placeholder = createCanvasKind === 'smart'
-            ? (tr('canvas.newSmartCanvasPlaceholder') || tr('canvas.newCanvasPlaceholder'))
-            : tr('canvas.newCanvasPlaceholder');
+        gateTitleInput.placeholder = tr('canvas.newSmartCanvasPlaceholder') || tr('canvas.newCanvasPlaceholder');
         gateTitleInput.focus();
         gateTitleInput.select();
     } else {
@@ -1690,8 +1686,7 @@ function positionCanvasMetaPopover(){
 }
 async function createCanvas(){
     const customTitle = gateTitleInput?.value.trim();
-    const isSmart = createCanvasKind === 'smart';
-    const titleBase = isSmart ? tr('canvas.newSmartCanvas') : tr('canvas.newCanvas');
+    const titleBase = tr('canvas.newSmartCanvas');
     const title = customTitle || `${titleBase} ${new Date().toLocaleTimeString(window.StudioI18n?.lang() === 'en' ? 'en-US' : 'zh-CN', {hour:'2-digit', minute:'2-digit'})}`;
     trashMode = false;
     refreshGateViewControls();
@@ -1700,39 +1695,21 @@ async function createCanvas(){
         const res = await fetch('/api/canvases', {
             method:'POST',
             headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({title, icon:isSmart ? 'sparkles' : '馃З', kind:isSmart ? 'smart' : 'classic'})
+            body:JSON.stringify({title, icon:'sparkles', kind:'smart'})
         });
         if(!res.ok) throw new Error(tr('canvas.createFailed'));
         const data = await res.json();
-        if(isSmart){
-            setCreateMode(false);
-            await loadCanvasList(false);
-            openSmartCanvasPage(data.canvas?.id);
-            return;
-        }
-        resetCascadeRuntimeState();
-        canvas = data.canvas;
-        canvas.logs = canvas.logs || [];
-        nodes = canvas.nodes || [];
-        connections = canvas.connections || [];
-        viewport = localViewportForCanvas(canvas.id, canvas.viewport || {x:0, y:0, scale:1});
-        canvas.viewport = {...viewport};
-        resetTransientRunState(nodes);
-        sanitizeConnections();
-        selected.clear();
-        setCanvasMode(true);
-        render();
-        setStatus('Saved');
         setCreateMode(false);
         await loadCanvasList(false);
-        renderCanvasList();
+        openSmartCanvasPage(data.canvas?.id);
+        return;
     } catch(e) {
         setStatus(tr('canvas.createFailed'));
         console.error(e);
     }
 }
 async function createSmartCanvas(){
-    setCreateMode(true, 'smart');
+    setCreateMode(true);
 }
 function openSmartCanvasPage(id){
     if(!id) return;

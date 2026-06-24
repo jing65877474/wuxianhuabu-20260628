@@ -4,6 +4,8 @@
 
 GPT-Image2 风格匹配库已随项目集成在 `style_libraries/gpt-image-2/`。另一台电脑拉取仓库后，无需额外安装本机 Codex skill，也可以继续使用智能画布里的“匹配提示词 / 风格案例检索”能力；如需改用外部库，可设置环境变量 `STYLE_LIBRARY_DIR`。
 
+项目内 GPT-Image2 风格库会在服务启动时每天最多后台自动更新一次；运行状态和缓存只写入项目目录，不会影响本机 `~/.codex/skills/gpt-image-2-style-library`。如需关闭自动更新，设置 `STYLE_LIBRARY_AUTO_UPDATE=0`。
+
 Supports comfyui/API calls/modelscope calls
 
 

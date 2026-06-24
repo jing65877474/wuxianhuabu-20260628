@@ -181,6 +181,7 @@ async def startup_event():
     global GLOBAL_LOOP
     GLOBAL_LOOP = asyncio.get_running_loop()
     sync_static_html_versions()
+    schedule_project_style_library_daily_update()
     # 启动时整理资产库：给所有图片分组（含默认角色/场景）建好文件夹，并把根目录里的旧素材归整进去。
     try:
         await asyncio.to_thread(migrate_asset_library_into_dirs)
@@ -1101,6 +1102,8 @@ def provider_endpoint_url(provider, key, default_path):
         if parsed.scheme and parsed.netloc:
             return f"{parsed.scheme}://{parsed.netloc}{override}"
         return override
+    if base_url.endswith("/v1") and default_path.startswith("/v1beta/"):
+        return f"{base_url[:-len('/v1')]}{default_path}"
     for prefix in ("/api/v3", "/v1beta", "/v1", "/v2"):
         if base_url.endswith(prefix) and default_path.startswith(f"{prefix}/"):
             return f"{base_url}{default_path[len(prefix):]}"
@@ -2358,6 +2361,8 @@ class AIReference(BaseModel):
     inputFidelity: str = ""
     textOnlyReference: bool = False
     uploadReference: bool = True
+    generatedEditBase: bool = False
+    structureLock: bool = False
 
 class OnlineImageRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=ONLINE_IMAGE_PROMPT_MAX_LENGTH)
@@ -2535,13 +2540,24 @@ class StyleLibraryMatchImageRequest(BaseModel):
     ms_model: str = ""
     limit: int = 4
 
+class StyleLibraryRematchPromptRequest(BaseModel):
+    image: str = Field(default="", max_length=2000000)
+    analysis: Dict[str, Any] = {}
+    current_prompt: str = Field(default="", max_length=LLM_MESSAGE_MAX_LENGTH)
+    user_request: str = Field(min_length=1, max_length=6000)
+    provider: str = "comfly"
+    model: str = ""
+    ms_model: str = ""
+    limit: int = 4
+    reference_weight: int = 65
+
 class ConversationCreateRequest(BaseModel):
     title: str = "新对话"
 
 class CanvasCreateRequest(BaseModel):
-    title: str = "未命名画布"
-    icon: str = "🧩"
-    kind: str = "classic"
+    title: str = "智能画布"
+    icon: str = "sparkles"
+    kind: str = "smart"
     project: Optional[str] = None
     board_x: Optional[float] = None
     board_y: Optional[float] = None
@@ -2896,7 +2912,7 @@ def list_projects():
         out.append(rec)
     return out
 
-def new_canvas(title="未命名画布", icon="layers", kind="classic", project=None, board_x=None, board_y=None):
+def new_canvas(title="智能画布", icon="sparkles", kind="smart", project=None, board_x=None, board_y=None):
     timestamp = now_ms()
     canvas_kind = normalize_canvas_kind(kind)
     canvas = {
@@ -3221,8 +3237,11 @@ def api_headers(json_body=True, provider=None, model=""):
         api_key = AI_API_KEY
         if not api_key:
             raise HTTPException(status_code=400, detail="未配置 COMFLY_API_KEY，请在 API/.env 中填写。")
-    if provider and effective_protocol(provider, model) == "gemini":
-        headers = {"Accept": "application/json", "x-goog-api-key": api_key}
+    if provider and should_use_gemini_native(provider, model):
+        if is_yunwu_provider(provider):
+            headers = {"Accept": "application/json", "Authorization": bearer_auth_value(api_key)}
+        else:
+            headers = {"Accept": "application/json", "x-goog-api-key": api_key}
     else:
         headers = {"Accept": "application/json", "Authorization": bearer_auth_value(api_key)}
     if json_body:
@@ -3581,6 +3600,46 @@ def effective_image_request_mode(provider, model=""):
     if detected:
         return detected
     return normalize_image_request_mode((provider or {}).get("image_request_mode"))
+
+def is_yunwu_provider(provider):
+    host = urllib.parse.urlparse(str((provider or {}).get("base_url") or "")).netloc.lower()
+    return "yunwu.ai" in host
+
+def image_output_format_for_provider(provider):
+    return "png"
+
+def should_use_yunwu_legacy_image_fields(provider, prompt):
+    if not is_yunwu_provider(provider):
+        return False
+    text = str(prompt or "")
+    return "NO HUMAN SUBJECT LOCK:" in text or "MECHANICAL STRUCTURE LOCK:" in text
+
+GEMINI_IMAGE_MODEL_ALIASES = {
+    "gemini-2.5-flash-image",
+    "gemini-2.5-flash-image-preview",
+    "gemini-3-pro-image",
+    "gemini-3-pro-image-preview",
+    "gemini-3.1-flash-image",
+    "gemini-3.1-flash-image-preview",
+}
+
+def is_gemini_image_model(model):
+    raw = str(model or "").strip()
+    if not raw:
+        return False
+    value = raw[len("models/"):] if raw.startswith("models/") else raw
+    if "gemini" in value.lower() and "image" in value.lower():
+        value = re.sub(r"(?i)[-_](?:0\.5k|512|1k|2k|4k)$", "", value)
+    value = value.lower()
+    return value in GEMINI_IMAGE_MODEL_ALIASES or ("gemini" in value and "image" in value)
+
+def should_use_gemini_native(provider, model=""):
+    if not provider:
+        return False
+    if effective_protocol(provider, model) == "gemini":
+        return True
+    base_url = str((provider or {}).get("base_url") or "").strip().lower()
+    return is_gemini_image_model(model) and (is_yunwu_provider(provider) or "/v1beta" in base_url)
 
 def is_gemini_provider(provider):
     return provider_protocol(provider) == "gemini"
@@ -5708,13 +5767,21 @@ def image_reference_role(ref) -> str:
 
 def image_reference_max_size(ref, default=1024) -> int:
     role = image_reference_role(ref)
+    if isinstance(ref, dict):
+        input_fidelity = str(ref.get("inputFidelity") or "").strip().lower()
+        structure_lock = bool(ref.get("generatedEditBase") or ref.get("structureLock"))
+    else:
+        input_fidelity = str(getattr(ref, "inputFidelity", "") or "").strip().lower()
+        structure_lock = bool(getattr(ref, "generatedEditBase", False) or getattr(ref, "structureLock", False))
+    if structure_lock or input_fidelity == "high":
+        return 1536
     if role in {"product_truth_reference", "product_detail_reference", "mask"}:
         return 1536
     if role == "case_style_reference":
         return 512
     weight = ai_ref_weight(ref, 50) if "ai_ref_weight" in globals() else 50
     if role in {"composition_reference", "primary_style_reference", "primary_reference"}:
-        return 1024 if weight >= 75 else 768
+        return 1024 if weight >= 85 else 768
     return default
 
 def reference_to_sized_data_url(ref):
@@ -7368,17 +7435,31 @@ async def generate_modelscope_provider_image(prompt, size, model, reference_imag
 
 def gemini_model_name(model):
     value = selected_model(model, "gemini-3-pro-image-preview").strip()
-    return value[len("models/"):] if value.startswith("models/") else value
+    value = value[len("models/"):] if value.startswith("models/") else value
+    if "gemini" in value.lower() and "image" in value.lower():
+        value = re.sub(r"(?i)[-_](?:0\.5k|512|1k|2k|4k)$", "", value)
+    return value
 
 def gemini_endpoint_url(provider, model):
     model_name = urllib.parse.quote(gemini_model_name(model), safe="")
     return provider_endpoint_url(provider, "image_generation_endpoint", f"/v1beta/models/{model_name}:generateContent")
 
+def gemini_provider_model_name(provider, model):
+    name = gemini_model_name(model)
+    if is_yunwu_provider(provider):
+        return {
+            "gemini-3-pro-image": "gemini-3-pro-image-preview",
+            "gemini-3.1-flash-image": "gemini-3.1-flash-image-preview",
+        }.get(name, name)
+    return name
+
 def gemini_image_config(size):
     width, height = parse_size_pair(size)
     if not width or not height:
         raw = str(size or "").strip().upper()
-        if raw in {"1K", "2K", "4K"}:
+        if raw == "0.5K":
+            raw = "512"
+        if raw in {"512", "1K", "2K", "4K"}:
             return {"aspectRatio": "1:1", "imageSize": raw}
         if re.fullmatch(r"\d+\s*:\s*\d+", raw):
             return {"aspectRatio": raw.replace(" ", ""), "imageSize": "1K"}
@@ -7399,7 +7480,7 @@ def gemini_reference_part(ref):
     return None
 
 async def generate_gemini_provider_image(prompt, size, model, reference_images=None, provider=None):
-    model_name = gemini_model_name(model)
+    model_name = gemini_provider_model_name(provider, model)
     endpoint = gemini_endpoint_url(provider, model_name)
     parts = [{"text": prompt.strip()}]
     for ref in (reference_images or [])[:ONLINE_IMAGE_REFERENCE_MAX]:
@@ -7409,12 +7490,12 @@ async def generate_gemini_provider_image(prompt, size, model, reference_images=N
     body = {
         "contents": [{"role": "user", "parts": parts}],
         "generationConfig": {
-            "responseModalities": ["TEXT", "IMAGE"],
+            "responseModalities": ["Text", "Image"] if is_yunwu_provider(provider) else ["TEXT", "IMAGE"],
             "imageConfig": gemini_image_config(size),
         },
     }
     async with httpx.AsyncClient(timeout=httpx.Timeout(connect=20.0, read=1800.0, write=120.0, pool=20.0)) as client:
-        response = await client.post(endpoint, headers=api_headers(provider=provider), json=body)
+        response = await client.post(endpoint, headers=api_headers(provider=provider, model=model_name), json=body)
         response.raise_for_status()
         raw = response.json()
         return extract_image(raw), raw
@@ -8504,7 +8585,7 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
         return await generate_jimeng_provider_image(prompt, size, model, reference_images, provider)
     if is_runninghub_provider(provider):
         return await generate_runninghub_provider_image(prompt, size, model, reference_images, provider)
-    if effective_protocol(provider, model) == "gemini":
+    if should_use_gemini_native(provider, model):
         return await generate_gemini_provider_image(prompt, size, model, reference_images, provider)
     if is_volcengine_provider(provider):
         return await generate_volcengine_provider_image(prompt, size, model, reference_images, provider)
@@ -8524,6 +8605,7 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
     mask_refs = [ref for ref in refs if str(ref.get("role") or "").strip().lower() == "mask" or str(ref.get("name") or "").lower().endswith("_mask.png")]
     image_refs = [ref for ref in refs if ref not in mask_refs]
     image_request_mode = effective_image_request_mode(provider, model)
+    use_yunwu_legacy_fields = should_use_yunwu_legacy_image_fields(provider, prompt)
     request_timeout = httpx.Timeout(connect=20.0, read=1800.0, write=120.0, pool=20.0) if (is_gpt2 or is_apimart or image_request_mode == "openai-json") else AI_REQUEST_TIMEOUT
     async with httpx.AsyncClient(timeout=request_timeout) as client:
         response = None
@@ -8531,6 +8613,9 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
             data = {"model": model, "prompt": prompt, "size": size}
             if quality:
                 data["quality"] = quality
+            if use_yunwu_legacy_fields:
+                data["format"] = image_output_format_for_provider(provider)
+                data["n"] = "1"
             if is_gpt2 and image_refs and should_use_high_input_fidelity(image_refs):
                 data["input_fidelity"] = "high"
             return await client.post(
@@ -8568,6 +8653,9 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
             body = {"model": model, "prompt": prompt, "size": size}
             if quality:
                 body["quality"] = quality
+            if use_yunwu_legacy_fields:
+                body["format"] = image_output_format_for_provider(provider)
+                body["n"] = 1
             response = await client.post(gen_url, headers=api_headers(provider=provider, model=model), json=body)
             if response.status_code >= 400 and images_api_unsupported(response):
                 response = await post_openai_edits()
@@ -8627,6 +8715,8 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
                 }
                 if quality:
                     body["quality"] = quality
+                if use_yunwu_legacy_fields:
+                    body["format"] = image_output_format_for_provider(provider)
                 response = await client.post(gen_url, headers=api_headers(provider=provider, model=model), json=body)
                 if response.status_code >= 400 and images_api_unsupported(response):
                     raise HTTPException(
@@ -8637,6 +8727,8 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
             body = {"model": model, "prompt": prompt, "size": size, "response_format": "url", "n": 1}
             if quality:
                 body["quality"] = quality
+            if use_yunwu_legacy_fields:
+                body["format"] = image_output_format_for_provider(provider)
             response = await client.post(
                 gen_url,
                 headers=api_headers(provider=provider, model=model),
@@ -10283,15 +10375,22 @@ def api_key_from_payload(payload, protocol: str = ""):
 
 def upstream_models_url(base_url: str, protocol: str):
     if protocol == "gemini":
-        return f"{base_url}/models" if base_url.endswith("/v1beta") else f"{base_url}/v1beta/models"
+        if base_url.endswith("/v1beta"):
+            return f"{base_url}/models"
+        if base_url.endswith("/v1"):
+            return f"{base_url[:-len('/v1')]}/v1beta/models"
+        return f"{base_url}/v1beta/models"
     if protocol == "volcengine":
         return f"{base_url}/models" if base_url.endswith("/api/v3") else f"{base_url}/api/v3/models"
     if protocol == "runninghub":
         return runninghub_openapi_url({"base_url": base_url}, "models")
     return f"{base_url}/models" if base_url.endswith("/v1") else f"{base_url}/v1/models"
 
-def upstream_model_headers(api_key: str, protocol: str):
+def upstream_model_headers(api_key: str, protocol: str, base_url: str = ""):
     if protocol == "gemini":
+        host = urllib.parse.urlparse(str(base_url or "")).netloc.lower()
+        if "yunwu.ai" in host:
+            return {"Authorization": bearer_auth_value(api_key), "Accept": "application/json"}
         return {"x-goog-api-key": api_key, "Accept": "application/json"}
     if protocol == "runninghub":
         return {"Authorization": bearer_auth_value(api_key), "Accept": "application/json"}
@@ -10512,7 +10611,7 @@ async def test_provider_connection(payload: TestConnectionPayload):
     url = upstream_models_url(base_url, protocol)
     try:
         async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(url, headers=upstream_model_headers(api_key, protocol))
+            resp = await client.get(url, headers=upstream_model_headers(api_key, protocol, base_url))
             if resp.status_code in (301, 302, 303, 307, 308):
                 location = resp.headers.get("Location") or resp.headers.get("location") or ""
                 suffix = f"：{location}" if location else ""
@@ -10716,7 +10815,7 @@ async def fetch_models_from_upstream(base_url: str, api_key: str, protocol: str 
     url = upstream_models_url(base_url, protocol)
     try:
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(url, headers=upstream_model_headers(api_key, protocol))
+            resp = await client.get(url, headers=upstream_model_headers(api_key, protocol, base_url))
             endpoint_label = "/v1beta/models" if protocol == "gemini" else "/api/v3/models" if protocol == "volcengine" else "/openapi/v2/models" if protocol == "runninghub" else "/v1/models"
             if resp.status_code in (301, 302, 303, 307, 308):
                 location = resp.headers.get("Location") or resp.headers.get("location") or ""
@@ -12229,6 +12328,11 @@ STYLE_LIBRARY_DIR = os.getenv("STYLE_LIBRARY_DIR", "").strip() or (
     PROJECT_STYLE_LIBRARY_DIR if os.path.isfile(os.path.join(PROJECT_STYLE_LIBRARY_DIR, "scripts", "search_all.py"))
     else CODEX_STYLE_LIBRARY_DIR
 )
+STYLE_LIBRARY_AUTO_UPDATE_ENV = "STYLE_LIBRARY_AUTO_UPDATE"
+STYLE_LIBRARY_AUTO_UPDATE_TIMEOUT_ENV = "STYLE_LIBRARY_AUTO_UPDATE_TIMEOUT"
+STYLE_LIBRARY_UPDATE_SCRIPT = os.path.join(PROJECT_STYLE_LIBRARY_DIR, "scripts", "update_daily_sources.py")
+STYLE_LIBRARY_UPDATE_STATE_FILE = os.path.join(PROJECT_STYLE_LIBRARY_DIR, "references", "daily-update-state.json")
+STYLE_LIBRARY_UPDATE_LOG_FILE = os.path.join(PROJECT_STYLE_LIBRARY_DIR, "references", "daily-update.log")
 STYLE_PROMPT_LIBRARY_ID = "gpt_image_2_style_library"
 STYLE_PROMPT_LIBRARY_DEFAULT_QUERY = "commercial product portrait editorial cinematic beauty poster design"
 STYLE_PROMPT_LIBRARY_CATEGORIES = [
@@ -12325,6 +12429,65 @@ Use the case library only as supplement. Strong reference image structure beats 
 For multi-image series, keep shared_style_anchor stable and describe what may change in variant_plan.
 Keep search_query broad and semantic, 6 to 14 English words.
 """.strip()
+
+def project_style_library_today() -> str:
+    return datetime.datetime.now().astimezone().date().isoformat()
+
+def project_style_library_auto_update_enabled() -> bool:
+    value = str(os.getenv(STYLE_LIBRARY_AUTO_UPDATE_ENV, "1") or "1").strip().lower()
+    return value not in {"0", "false", "no", "off", "disabled"}
+
+def project_style_library_last_update_date() -> str:
+    try:
+        with open(STYLE_LIBRARY_UPDATE_STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return str(data.get("last_check_date") or "")
+    except Exception:
+        return ""
+
+def project_style_library_update_due() -> bool:
+    if not project_style_library_auto_update_enabled():
+        return False
+    if not os.path.isfile(STYLE_LIBRARY_UPDATE_SCRIPT):
+        return False
+    return project_style_library_last_update_date() != project_style_library_today()
+
+def run_project_style_library_daily_update():
+    """Refresh the vendored project style library only; never mutates the Codex skill directory."""
+    os.makedirs(os.path.dirname(STYLE_LIBRARY_UPDATE_LOG_FILE), exist_ok=True)
+    timeout = int(os.getenv(STYLE_LIBRARY_AUTO_UPDATE_TIMEOUT_ENV, "900") or "900")
+    cmd = [sys.executable, "-X", "utf8", STYLE_LIBRARY_UPDATE_SCRIPT, "--timeout", "20"]
+    started_at = datetime.datetime.now().astimezone().isoformat()
+    try:
+        with open(STYLE_LIBRARY_UPDATE_LOG_FILE, "a", encoding="utf-8") as log:
+            log.write(f"\n[{started_at}] project style-library daily update start\n")
+            log.write(f"target={PROJECT_STYLE_LIBRARY_DIR}\n")
+            completed = subprocess.run(
+                cmd,
+                cwd=PROJECT_STYLE_LIBRARY_DIR,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+                check=False,
+            )
+            log.write(f"[{datetime.datetime.now().astimezone().isoformat()}] exit={completed.returncode}\n")
+        print(f"项目 GPT-Image2 风格库每日更新完成 exit={completed.returncode}")
+    except subprocess.TimeoutExpired:
+        print(f"项目 GPT-Image2 风格库每日更新超时（>{timeout}s），继续使用本地缓存")
+    except Exception as exc:
+        print(f"项目 GPT-Image2 风格库每日更新失败，继续使用本地缓存: {exc}")
+
+def schedule_project_style_library_daily_update():
+    if not project_style_library_update_due():
+        return
+    try:
+        Thread(target=run_project_style_library_daily_update, daemon=True).start()
+        print(f"已在后台触发项目 GPT-Image2 风格库每日更新：{PROJECT_STYLE_LIBRARY_DIR}")
+    except Exception as exc:
+        print(f"启动项目 GPT-Image2 风格库每日更新失败: {exc}")
 
 def style_library_search_script() -> str:
     script = os.path.join(STYLE_LIBRARY_DIR, "scripts", "search_all.py")
@@ -12830,6 +12993,87 @@ def style_prompt_from_analysis(analysis: Dict[str, Any], cases: List[Dict[str, A
         return f"{positive}\n\nNegative prompt:\n{negative}"
     return positive
 
+STYLE_REMATCH_SYSTEM_PROMPT = """
+You revise prompt-library image generation prompts for an infinite canvas workflow.
+Return strict JSON only. Do not wrap it in markdown.
+Schema:
+{
+  "search_query": "6-14 English words for searching a visual style/case library",
+  "summary": "short updated Chinese summary",
+  "positive_prompt": "complete updated image-generation prompt in Chinese, preserving all useful reference-image structure/style constraints and applying the user's latest modification",
+  "negative_prompt": "short negative prompt",
+  "generation_guidance": "Chinese guidance for the generator",
+  "variant_plan": "Chinese notes on what may vary and what must remain locked"
+}
+Rules:
+- The latest user modification request is highest priority.
+- If the latest request asks for people, model, face, hands, holding, use scenario, or lifestyle usage, remove or override older product-only / no-human constraints from the revised positive prompt.
+- Preserve the reference image/product/person/composition structure unless the latest request explicitly changes it.
+- Keep exact product identity and material truth when product references are present.
+- The case library is secondary: use it to improve commercial polish, lighting, texture, styling, and finish, not to replace the reference structure.
+- The search_query must target the revised scene/style after the modification.
+""".strip()
+
+def merge_style_rematch_analysis(base: Dict[str, Any], revised: Dict[str, Any], current_prompt: str, user_request: str) -> Dict[str, Any]:
+    analysis = dict(base or {})
+    for key in ("search_query", "summary", "positive_prompt", "negative_prompt", "generation_guidance", "variant_plan"):
+        value = revised.get(key) if isinstance(revised, dict) else None
+        if isinstance(value, str) and value.strip():
+            analysis[key] = value.strip()
+    if not str(analysis.get("positive_prompt") or "").strip():
+        seed = str(current_prompt or "").strip() or str(analysis.get("summary") or "").strip()
+        analysis["positive_prompt"] = "\n\n".join(part for part in [
+            seed,
+            f"Latest user modification request: {str(user_request or '').strip()}"
+        ] if part)
+    if user_request:
+        guidance = str(analysis.get("generation_guidance") or "").strip()
+        analysis["generation_guidance"] = "\n".join(part for part in [
+            f"Latest user modification request (highest priority): {str(user_request or '').strip()}",
+            guidance
+        ] if part)
+    return analysis
+
+async def rematch_style_prompt_with_llm(payload: StyleLibraryRematchPromptRequest, base_analysis: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
+    chat_base, chat_hdrs, model = resolve_chat_provider(payload.provider, payload.model, payload.ms_model)
+    provider_cfg = get_api_provider(payload.provider) if payload.provider not in ("modelscope",) else {}
+    is_apimart = is_apimart_provider(provider_cfg)
+    analysis_text = json.dumps(base_analysis or {}, ensure_ascii=False)[:9000]
+    current_prompt = str(payload.current_prompt or "").strip()[:9000]
+    user_request = str(payload.user_request or "").strip()
+    message = "\n\n".join([
+        "Existing reference style analysis JSON:",
+        analysis_text or "{}",
+        "Existing generated prompt:",
+        current_prompt or "(empty)",
+        "Latest user modification request:",
+        user_request,
+        f"Reference similarity weight: {max(0, min(100, int(payload.reference_weight or 65)))}/100",
+        "Revise the prompt and create a fresh search_query for re-matching the style/case library."
+    ])
+    try:
+        async with httpx.AsyncClient(timeout=AI_REQUEST_TIMEOUT) as client:
+            body = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": STYLE_REMATCH_SYSTEM_PROMPT},
+                    {"role": "user", "content": message},
+                ],
+            }
+            if is_apimart:
+                body["stream"] = False
+            response = await client.post(f"{chat_base}/chat/completions", headers=chat_hdrs, json=body)
+            response.raise_for_status()
+            raw = response.json()
+    except httpx.HTTPStatusError as exc:
+        text = exc.response.text or ""
+        friendly = friendly_chat_error_detail(text, model, provider_cfg)
+        raise HTTPException(status_code=exc.response.status_code, detail=friendly or text[:800] or "Style rematch model request failed") from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Style rematch model request failed: {exc}") from exc
+    parsed = parse_style_json(text_from_chat_response(raw).strip())
+    return merge_style_rematch_analysis(base_analysis, parsed, current_prompt, user_request), model
+
 async def analyze_image_for_style(payload: StyleLibraryMatchImageRequest) -> Tuple[Dict[str, Any], str]:
     image_value = str(payload.image or "").strip()
     if not image_value.startswith(("data:image/", "/output/", "/assets/", "http://", "https://")):
@@ -12900,6 +13144,38 @@ async def style_library_match_image(payload: StyleLibraryMatchImageRequest):
         "query": query,
         "cases": cases,
         "model": model,
+        "source": STYLE_LIBRARY_DIR,
+    }
+
+@app.post("/api/style-library/rematch-prompt")
+async def style_library_rematch_prompt(payload: StyleLibraryRematchPromptRequest):
+    base_analysis = payload.analysis if isinstance(payload.analysis, dict) else {}
+    analyzed_model = ""
+    if not base_analysis and str(payload.image or "").strip():
+        image_payload = StyleLibraryMatchImageRequest(
+            image=payload.image,
+            provider=payload.provider,
+            model=payload.model,
+            ms_model=payload.ms_model,
+            limit=payload.limit,
+        )
+        base_analysis, analyzed_model = await analyze_image_for_style(image_payload)
+    if not base_analysis:
+        base_analysis = {
+            "summary": "User-provided prompt context",
+            "positive_prompt": payload.current_prompt,
+            "search_query": "commercial advertising product portrait",
+        }
+    analysis, model = await rematch_style_prompt_with_llm(payload, base_analysis)
+    query = style_search_query_from_analysis(analysis)
+    cases = await asyncio.to_thread(run_style_library_search, query, payload.limit, False)
+    prompt = style_prompt_from_analysis(analysis, cases)
+    return {
+        "prompt": prompt,
+        "analysis": analysis,
+        "query": query,
+        "cases": cases,
+        "model": model or analyzed_model,
         "source": STYLE_LIBRARY_DIR,
     }
 

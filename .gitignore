@@ -8,6 +8,7 @@ history.json
 server.log
 server.err.log
 _self_restart.bat
+backups/generation-logic/
 
 # Local bundled Python install artifacts generated after dependency install
 python/Lib/
@@ -22,6 +23,14 @@ standalone-canvas/
 # Python caches
 __pycache__/
 *.py[cod]
+
+# Project-vendored GPT-Image2 style-library runtime state
+style_libraries/gpt-image-2/references/.cache/
+style_libraries/gpt-image-2/references/.daily-update.lock
+style_libraries/gpt-image-2/references/daily-update-state.json
+style_libraries/gpt-image-2/references/*-update-state.json
+style_libraries/gpt-image-2/references/*-source-cache.json
+style_libraries/gpt-image-2/references/daily-update.log
 
 # Environment files
 .env
