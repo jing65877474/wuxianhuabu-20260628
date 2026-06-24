@@ -238,6 +238,7 @@ ASSET_LIBRARY_PATH = os.path.join(DATA_DIR, "asset_library.json")
 PROMPT_LIBRARY_PATH = os.path.join(DATA_DIR, "prompt_libraries.json")
 API_PROVIDERS_FILE = os.path.join(DATA_DIR, "api_providers.json")
 RUNNINGHUB_WORKFLOW_STORE_FILE = os.path.join(DATA_DIR, "runninghub_workflows.json")
+BUILTIN_API_PROVIDER_IDS = {"comfly", "modelscope", "runninghub", "volcengine"}
 SHARED_FOLDERS_FILE = os.path.join(DATA_DIR, "shared_folders.json")
 GLOBAL_CONFIG_FILE = os.path.join(BASE_DIR, "global_config.json")
 CANVAS_TRASH_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
@@ -687,7 +688,33 @@ def bearer_auth_value(value):
     token = strip_auth_scheme(value, "Bearer")
     return f"Bearer {token}" if token else ""
 
+def custom_api_provider_template():
+    return {
+        "id": "custom-api",
+        "name": "API",
+        "base_url": "",
+        "protocol": "openai",
+        "image_request_mode": "openai",
+        "image_generation_endpoint": "",
+        "image_edit_endpoint": "",
+        "enabled": True,
+        "primary": False,
+        "image_models": [],
+        "chat_models": [],
+        "video_models": [],
+        "ms_loras": [],
+        "ms_defaults_version": 0,
+    }
+
+def user_api_providers_only(providers):
+    filtered = [
+        item for item in (providers or [])
+        if str((item or {}).get("id") or "").strip().lower() not in BUILTIN_API_PROVIDER_IDS
+    ]
+    return filtered or [custom_api_provider_template()]
+
 def default_api_providers():
+    return [custom_api_provider_template()]
     # 独立入口平台强制保留，其他平台均可自定义增删
     return [
         {
@@ -817,7 +844,7 @@ def merge_default_api_providers(providers):
             *[item for item in (current.get("video_models") or []) if str(item or "").strip() not in JIMENG_LEGACY_VIDEO_MODELS],
             *JIMENG_DEFAULT_VIDEO_MODELS,
         ])
-    return merged
+    return user_api_providers_only(merged)
 
 def normalize_model_list(values):
     return model_list_from_values(values)
@@ -1161,6 +1188,7 @@ def load_api_providers():
 
 def save_api_providers(providers):
     os.makedirs(DATA_DIR, exist_ok=True)
+    providers = user_api_providers_only(providers)
     with GLOBAL_CONFIG_LOCK:
         with open(API_PROVIDERS_FILE, "w", encoding="utf-8") as f:
             json.dump(providers, f, ensure_ascii=False, indent=2)
@@ -1533,6 +1561,8 @@ def prompt_template_markdown_path() -> str:
 
 def prompt_template_category(name: str, scene: str) -> str:
     text = f"{name} {scene}"
+    if any(k in text for k in ["排版", "版式", "海报", "社媒", "字体", "层级", "留白", "网格", "信息架构"]):
+        return "layout"
     if any(k in text for k in ["光影", "灯光", "光效", "电影级"]):
         return "lighting"
     if any(k in text for k in ["视角", "全景", "VR", "镜头", "俯拍", "仰拍", "景别", "构图", "透视"]):
@@ -2323,6 +2353,11 @@ class AIReference(BaseModel):
     role: str = ""
     kind: str = ""
     mime: str = ""
+    referenceWeight: Optional[int] = None
+    similarityIntent: str = ""
+    inputFidelity: str = ""
+    textOnlyReference: bool = False
+    uploadReference: bool = True
 
 class OnlineImageRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=ONLINE_IMAGE_PROMPT_MAX_LENGTH)
@@ -2336,6 +2371,7 @@ class OnlineImageRequest(BaseModel):
 class ImageTaskQueryRequest(BaseModel):
     provider_id: str = "comfly"
     task_id: str = Field(min_length=1, max_length=240)
+    size: str = Field(default="", max_length=32)
 
 CANVAS_TASKS: Dict[str, Dict[str, Any]] = {}
 CANVAS_TASK_LOCK = Lock()
@@ -5330,6 +5366,7 @@ def defaultPromptTemplateCategories():
         {"id": "storyboard", "name": "分镜"},
         {"id": "character", "name": "角色"},
         {"id": "product", "name": "产品"},
+        {"id": "layout", "name": "排版"},
         {"id": "lighting", "name": "光影"},
         {"id": "custom", "name": "我的"},
     ]
@@ -5521,7 +5558,28 @@ def edit_reference_file_from_ref(ref: Dict[str, Any], temp_paths: List[str]) -> 
     url = str((ref or {}).get("url") or "").strip()
     path = output_file_from_url(url)
     if path:
-        return path
+        max_size = image_reference_max_size(ref)
+        try:
+            with Image.open(path) as img:
+                img.load()
+                if max(img.size or (0, 0)) <= max_size:
+                    return path
+                img.thumbnail((max_size, max_size), Image.LANCZOS)
+                if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
+                    bg = Image.new("RGB", img.size, (255, 255, 255))
+                    rgba = img.convert("RGBA")
+                    bg.paste(rgba, mask=rgba.split()[-1])
+                    img = bg
+                else:
+                    img = img.convert("RGB")
+                fd, temp_path = tempfile.mkstemp(prefix="sized_ref_", suffix=".jpg", dir=OUTPUT_INPUT_DIR)
+                with os.fdopen(fd, "wb") as f:
+                    img.save(f, format="JPEG", quality=88, optimize=True)
+                temp_paths.append(temp_path)
+                return temp_path
+        except Exception as exc:
+            print(f"reference temp resize failed, fallback to raw: {exc}")
+            return path
     if not url.startswith(("http://", "https://")):
         return None
     remote = fetch_remote_media_bytes(url, timeout=30.0, max_bytes=24 * 1024 * 1024)
@@ -5538,7 +5596,7 @@ def edit_reference_file_from_ref(ref: Dict[str, Any], temp_paths: List[str]) -> 
     with os.fdopen(fd, "wb") as f:
         f.write(content)
     temp_paths.append(temp_path)
-    return temp_path
+    return edit_reference_file_from_ref({**(ref or {}), "url": f"/assets/input/{os.path.basename(temp_path)}"}, temp_paths) or temp_path
 
 def is_image_reference_value(value):
     if not isinstance(value, str) or not value:
@@ -5635,7 +5693,32 @@ def is_image_reference(ref):
     return bool(re.search(r"\.(png|jpe?g|webp|gif|bmp|tiff?)(\?|#|$)", url))
 
 def image_references(refs):
-    return [ref for ref in (refs or []) if is_image_reference(ref)]
+    return [
+        ref for ref in (refs or [])
+        if is_image_reference(ref)
+        and not bool(ref.get("textOnlyReference") if isinstance(ref, dict) else getattr(ref, "textOnlyReference", False))
+        and (str(ref.get("uploadReference", "true")).lower() != "false" if isinstance(ref, dict) else str(getattr(ref, "uploadReference", "true")).lower() != "false")
+        and image_reference_role(ref) != "case_style_reference"
+    ]
+
+def image_reference_role(ref) -> str:
+    if isinstance(ref, dict):
+        return str(ref.get("role") or "").strip().lower()
+    return str(getattr(ref, "role", "") or "").strip().lower()
+
+def image_reference_max_size(ref, default=1024) -> int:
+    role = image_reference_role(ref)
+    if role in {"product_truth_reference", "product_detail_reference", "mask"}:
+        return 1536
+    if role == "case_style_reference":
+        return 512
+    weight = ai_ref_weight(ref, 50) if "ai_ref_weight" in globals() else 50
+    if role in {"composition_reference", "primary_style_reference", "primary_reference"}:
+        return 1024 if weight >= 75 else 768
+    return default
+
+def reference_to_sized_data_url(ref):
+    return reference_to_data_url(ref, max_size=image_reference_max_size(ref))
 
 TEXT_ATTACHMENT_EXTS = {".txt", ".md", ".markdown", ".json", ".csv", ".log", ".py", ".js", ".ts", ".tsx", ".jsx", ".html", ".css", ".xml", ".yaml", ".yml"}
 XLSX_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff"}
@@ -6781,7 +6864,7 @@ async def upload_local_video_to_cloud(ref_url: str, service: str = "auto") -> Di
 async def upload_local_video_to_temp_sh(ref_url: str) -> Dict[str, str]:
     return await upload_local_video_to_cloud(ref_url, "auto")
 
-async def save_ai_image_to_output(image_data, prefix="online_", category="output"):
+async def save_ai_image_to_output(image_data, prefix="online_", category="output", requested_size=""):
     filename = f"{prefix}{uuid.uuid4().hex[:10]}.png"
     path = output_path_for(filename, category)
     if image_data["type"] == "b64":
@@ -6794,9 +6877,23 @@ async def save_ai_image_to_output(image_data, prefix="online_", category="output
             path = output_path_for(filename, category)
         with open(path, "wb") as f:
             f.write(base64.b64decode(image_data["value"]))
+        fit_image_to_requested_canvas(path, requested_size)
         return output_url_for(filename, category)
     value = image_data["value"]
     if value.startswith("/output/") or value.startswith("/assets/"):
+        local_path = output_file_from_url(value)
+        if local_path and parse_size_pair(requested_size) != (0, 0):
+            if value.startswith("/output/"):
+                fit_image_to_requested_canvas(local_path, requested_size)
+                return value
+            ext = os.path.splitext(local_path)[1].lower()
+            if ext not in {".png", ".jpg", ".jpeg", ".webp"}:
+                ext = ".png"
+            filename = f"{prefix}{uuid.uuid4().hex[:10]}{ext}"
+            copied_path = output_path_for(filename, category)
+            shutil.copyfile(local_path, copied_path)
+            fit_image_to_requested_canvas(copied_path, requested_size)
+            return output_url_for(filename, category)
         return value
     try:
         timeout = httpx.Timeout(connect=20.0, read=300.0, write=60.0, pool=20.0)
@@ -6812,6 +6909,7 @@ async def save_ai_image_to_output(image_data, prefix="online_", category="output
                 path = output_path_for(filename, category)
             with open(path, "wb") as f:
                 f.write(response.content)
+            fit_image_to_requested_canvas(path, requested_size)
             return output_url_for(filename, category)
     except Exception as e:
         print(f"保存上游图片失败: {e}")
@@ -6877,6 +6975,69 @@ def parse_size_pair(size):
     if not match:
         return 0, 0
     return int(match.group(1)), int(match.group(2))
+
+def fit_image_to_requested_canvas(path: str, requested_size: str, tolerance: float = 0.012) -> bool:
+    """If an upstream image endpoint ignores size/aspect ratio, normalize the saved file locally.
+
+    Prefer padding/extension over hard crop so product references and hands are not cut away.
+    """
+    target_w, target_h = parse_size_pair(requested_size)
+    if not path or target_w <= 0 or target_h <= 0 or str(requested_size or "").strip().lower() == "auto":
+        return False
+    try:
+        with Image.open(path) as img:
+            img.load()
+            src = img.convert("RGBA") if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info) else img.convert("RGB")
+            src_w, src_h = src.size
+            if src_w <= 0 or src_h <= 0:
+                return False
+            target_ratio = target_w / max(1, target_h)
+            src_ratio = src_w / max(1, src_h)
+            same_ratio = abs(math.log(src_ratio / target_ratio)) <= tolerance
+            same_size = src_w == target_w and src_h == target_h
+            if same_ratio and same_size:
+                return False
+
+            # Fit the whole generated image inside the requested canvas, then extend edges.
+            scale = min(target_w / src_w, target_h / src_h)
+            fit_w = max(1, int(round(src_w * scale)))
+            fit_h = max(1, int(round(src_h * scale)))
+            resample = Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS
+            fitted = src.resize((fit_w, fit_h), resample)
+
+            # Use a blurred cover layer as the backing canvas. It preserves palette/lighting
+            # better than white bars and is safer than cropping foreground subjects.
+            cover_scale = max(target_w / src_w, target_h / src_h)
+            cover_w = max(target_w, int(round(src_w * cover_scale)))
+            cover_h = max(target_h, int(round(src_h * cover_scale)))
+            cover = src.resize((cover_w, cover_h), resample)
+            left = max(0, int(round((cover_w - target_w) / 2)))
+            top = max(0, int(round((cover_h - target_h) / 2)))
+            canvas_img = cover.crop((left, top, left + target_w, top + target_h))
+            try:
+                from PIL import ImageFilter
+                canvas_img = canvas_img.filter(ImageFilter.GaussianBlur(radius=max(8, int(max(target_w, target_h) * 0.012))))
+            except Exception:
+                pass
+            ox = int(round((target_w - fit_w) / 2))
+            oy = int(round((target_h - fit_h) / 2))
+            if canvas_img.mode == "RGBA":
+                canvas_img.alpha_composite(fitted, (ox, oy))
+            else:
+                canvas_img.paste(fitted, (ox, oy), fitted.split()[-1] if fitted.mode == "RGBA" else None)
+
+            save_kwargs = {}
+            ext = os.path.splitext(path)[1].lower()
+            if ext in {".jpg", ".jpeg"}:
+                canvas_img = canvas_img.convert("RGB")
+                save_kwargs = {"quality": 95, "optimize": True}
+            elif ext == ".webp":
+                save_kwargs = {"quality": 95, "method": 6}
+            canvas_img.save(path, **save_kwargs)
+            return True
+    except Exception as exc:
+        print(f"output canvas ratio normalize failed: {exc}")
+        return False
 
 CHAT_RATIO_SIZE_OPTIONS = {
     "1:1": ("1024x1024", "1536x1536", "2048x2048"),
@@ -7226,7 +7387,7 @@ def gemini_image_config(size):
     return {"aspectRatio": aspect_ratio, "imageSize": resolution.upper()}
 
 def gemini_reference_part(ref):
-    value = reference_to_data_url(ref, max_size=1536)
+    value = reference_to_sized_data_url(ref)
     if not value:
         return None
     if isinstance(value, str) and value.startswith("data:image/") and ";base64," in value:
@@ -7262,7 +7423,7 @@ def volcengine_endpoint_url(provider):
     return provider_endpoint_url(provider, "image_generation_endpoint", "/api/v3/images/generations")
 
 def volcengine_image_payload(ref):
-    value = reference_to_data_url(ref, max_size=1536)
+    value = reference_to_sized_data_url(ref)
     if not value:
         return None
     return value
@@ -8370,6 +8531,8 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
             data = {"model": model, "prompt": prompt, "size": size}
             if quality:
                 data["quality"] = quality
+            if is_gpt2 and image_refs and should_use_high_input_fidelity(image_refs):
+                data["input_fidelity"] = "high"
             return await client.post(
                 edit_url,
                 headers=api_headers(json_body=False, provider=provider, model=model),
@@ -8383,7 +8546,7 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
             # 文生图只传 extra_body.response_format，图生图把参考图放进 extra_body.image。
             extra_body = {"response_format": "url"}
             if image_refs:
-                extra_body["image"] = [reference_to_data_url(ref, max_size=1536) for ref in image_refs[:ONLINE_IMAGE_REFERENCE_MAX]]
+                extra_body["image"] = [reference_to_sized_data_url(ref) for ref in image_refs[:ONLINE_IMAGE_REFERENCE_MAX]]
             body = {"model": model, "prompt": prompt, "size": size, "extra_body": extra_body}
             response = await client.post(gen_url, headers=api_headers(provider=provider, model=model), json=body)
         elif is_apimart:
@@ -8399,7 +8562,7 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
                 "official_fallback": False,
             }
             if image_refs:
-                body["image_urls"] = [reference_to_data_url(ref, max_size=1536) for ref in image_refs[:ONLINE_IMAGE_REFERENCE_MAX]]
+                body["image_urls"] = [reference_to_sized_data_url(ref) for ref in image_refs[:ONLINE_IMAGE_REFERENCE_MAX]]
             response = await client.post(gen_url, headers=api_headers(provider=provider, model=model), json=body)
         elif is_gpt2 and not image_refs and not mask_refs:
             body = {"model": model, "prompt": prompt, "size": size}
@@ -8456,7 +8619,7 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
                         detail=f"GPT-Image-2 编辑接口 /images/edits 调用失败：{edit_failed_text[:300] or edit_failed_status}。已停止自动重试，避免上游可能已扣费后再次请求。"
                     )
                 print(f"/images/edits failed ({edit_failed_status}): {edit_failed_text[:200]} → 回退到 /images/generations + image:[] JSON")
-                image_payload = [reference_to_data_url(ref, max_size=1536) for ref in image_refs[:ONLINE_IMAGE_REFERENCE_MAX]]
+                image_payload = [reference_to_sized_data_url(ref) for ref in image_refs[:ONLINE_IMAGE_REFERENCE_MAX]]
                 body = {
                     "model": model, "prompt": prompt, "size": size,
                     "response_format": "url", "n": 1,
@@ -8553,6 +8716,43 @@ def image_size_from_reference(ref):
     except Exception as exc:
         print(f"[chat-agent] failed to read reference image size: {exc}")
     return ""
+
+def ai_ref_get(ref, key, default=None):
+    if isinstance(ref, dict):
+        return ref.get(key, default)
+    return getattr(ref, key, default)
+
+def ai_ref_role(ref) -> str:
+    return str(ai_ref_get(ref, "role", "") or "").strip().lower()
+
+def ai_ref_weight(ref, default=50) -> int:
+    raw = ai_ref_get(ref, "referenceWeight", None)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = default
+    return max(0, min(100, value))
+
+def ai_refs_have_product_truth(refs) -> bool:
+    return any(ai_ref_role(ref) in {"product_truth_reference", "product_detail_reference"} for ref in (refs or []))
+
+def ai_refs_have_style_or_composition(refs) -> bool:
+    roles = {"composition_reference", "primary_style_reference", "primary_reference", "case_style_reference", "supporting_reference"}
+    return any(ai_ref_role(ref) in roles for ref in (refs or []))
+
+def should_use_high_input_fidelity(refs) -> bool:
+    image_refs = [ref for ref in (refs or []) if ai_ref_get(ref, "url", "")]
+    if not image_refs:
+        return False
+    if any(str(ai_ref_get(ref, "inputFidelity", "") or "").strip().lower() == "high" and ai_ref_role(ref) not in {"product_truth_reference", "product_detail_reference"} for ref in image_refs):
+        return True
+    has_product = ai_refs_have_product_truth(image_refs)
+    has_style = ai_refs_have_style_or_composition(image_refs)
+    if has_product and has_style:
+        return False
+    if has_product and all(ai_ref_role(ref) in {"product_truth_reference", "product_detail_reference"} for ref in image_refs):
+        return True
+    return max((ai_ref_weight(ref, 50) for ref in image_refs), default=50) >= 90 and not has_style
 
 def chat_requested_image_count(message):
     text = str(message or "")
@@ -10642,7 +10842,7 @@ async def build_online_image_result(payload: OnlineImageRequest):
             image_items = [image_data]
         local_urls = []
         for item in image_items:
-            local_url = await save_ai_image_to_output(item, prefix="online_")
+            local_url = await save_ai_image_to_output(item, prefix="online_", requested_size=payload.size)
             if local_url:
                 local_urls.append(local_url)
         return local_urls, raw_item
@@ -10711,7 +10911,7 @@ async def query_image_task(payload: ImageTaskQueryRequest):
     if image_items:
         local_urls = []
         for item in image_items:
-            local_url = await save_ai_image_to_output(item, prefix="online_")
+            local_url = await save_ai_image_to_output(item, prefix="online_", requested_size=payload.size)
             if local_url:
                 local_urls.append(local_url)
         result = {
@@ -10725,7 +10925,7 @@ async def query_image_task(payload: ImageTaskQueryRequest):
             "provider_name": provider.get("name") or provider["id"],
             "task_id": task_id,
             "request_id": raw.get("id") if isinstance(raw, dict) else "",
-            "params": {"provider_id": provider["id"]},
+            "params": {"provider_id": provider["id"], "size": payload.size},
             "raw": raw,
         }
         save_to_history(result)
@@ -10793,6 +10993,14 @@ async def run_canvas_image_task(task_id: str, payload: OnlineImageRequest):
 
 @app.post("/api/canvas-image-tasks")
 async def create_canvas_image_task(payload: OnlineImageRequest):
+    refs = [ref for ref in payload.reference_images if ref.url]
+    prompt_requires_refs = bool(
+        "Product truth references:" in payload.prompt
+        or "HIGHEST PRIORITY PRODUCT REPLACEMENT RULE:" in payload.prompt
+        or re.search(r"(?:图|图片|参考图)\s*[2-9]|(?:image|reference)\s*#?\s*[2-9]", payload.prompt, re.I)
+    )
+    if prompt_requires_refs and not refs:
+        raise HTTPException(status_code=400, detail="提示词要求使用产品/参考图，但请求未携带任何图片，已阻止纯文本误生成")
     task_id = f"canvas_img_{uuid.uuid4().hex}"
     with CANVAS_TASK_LOCK:
         CANVAS_TASKS[task_id] = {
@@ -10805,6 +11013,8 @@ async def create_canvas_image_task(payload: OnlineImageRequest):
             "error": "",
             "provider_id": payload.provider_id,
             "model": payload.model,
+            "prompt_length": len(payload.prompt or ""),
+            "reference_count": len(refs),
         }
     asyncio.create_task(run_canvas_image_task(task_id, payload))
     return {"task_id": task_id, "status": "queued"}
@@ -12013,9 +12223,11 @@ async def smart_canvas_prompt_templates():
         print(f"读取提示词模板失败: {e}")
         return {"templates": []}
 
-STYLE_LIBRARY_DIR = os.getenv(
-    "STYLE_LIBRARY_DIR",
-    os.path.join(os.path.expanduser("~"), ".codex", "skills", "gpt-image-2-style-library"),
+PROJECT_STYLE_LIBRARY_DIR = os.path.join(BASE_DIR, "style_libraries", "gpt-image-2")
+CODEX_STYLE_LIBRARY_DIR = os.path.join(os.path.expanduser("~"), ".codex", "skills", "gpt-image-2-style-library")
+STYLE_LIBRARY_DIR = os.getenv("STYLE_LIBRARY_DIR", "").strip() or (
+    PROJECT_STYLE_LIBRARY_DIR if os.path.isfile(os.path.join(PROJECT_STYLE_LIBRARY_DIR, "scripts", "search_all.py"))
+    else CODEX_STYLE_LIBRARY_DIR
 )
 STYLE_PROMPT_LIBRARY_ID = "gpt_image_2_style_library"
 STYLE_PROMPT_LIBRARY_DEFAULT_QUERY = "commercial product portrait editorial cinematic beauty poster design"
@@ -12039,7 +12251,8 @@ Return only compact JSON with these keys:
     "style_reference": "what visual style, mood and campaign type the image provides",
     "key_constraints": ["non-copy and preservation constraints"]
   },
-  "layout_lock_prompt": "English prompt fragment that strictly preserves the reference image composition skeleton, aspect ratio, camera angle, subject scale hierarchy, foreground/background relationship, object placement, pose/interaction geometry, negative space, and advertising layout",
+  "layout_lock_prompt": "English prompt fragment that preserves only the broad campaign composition family, camera mood, subject scale idea, foreground/background relationship, object-placement logic, pose/interaction idea, negative-space style, and advertising feel. It must explicitly allow the downstream selected output canvas/aspect ratio to override the reference image aspect ratio and crop.",
+  "lighting_material_lock_prompt": "English prompt fragment that strictly preserves lighting quality, background tone, contrast curve, shadow softness, catchlights, skin finish, hair texture, tabletop surface, product surface material, contact shadows and retouching style",
   "positive_prompt": "clean English generation prompt focused on composition, lighting, camera, palette, material and commercial finish",
   "negative_prompt": "short avoid list",
   "style_fingerprint": {
@@ -12067,10 +12280,19 @@ Return only compact JSON with these keys:
       "type": "",
       "contrast": "",
       "highlights": "",
-      "skin_treatment": ""
+      "shadow_quality": "",
+      "catchlights": "",
+      "skin_treatment": "",
+      "skin_specularity": "",
+      "background_tone": "",
+      "color_temperature": ""
     },
     "material": {
       "product_surface": "",
+      "packaging_finish": "",
+      "tabletop_surface": "",
+      "fabric_texture": "",
+      "hair_texture": "",
       "texture_or_props": ""
     },
     "mood": "",
@@ -12097,7 +12319,8 @@ Return only compact JSON with these keys:
 }
 Do not copy logos, watermarks, brand text, signatures, or exact copyrighted artwork.
 Do not reduce the image to a generic scene caption. Identify the structural anchors that make the image recognizable.
-The layout_lock_prompt must be explicit enough for image-to-image generation and should preserve poster/layout geometry before changing details.
+The layout_lock_prompt must be useful for image generation, but it must not lock the reference image aspect ratio or exact crop. The downstream selected output canvas/aspect ratio always has priority over the reference image shape.
+The lighting_material_lock_prompt must be explicit enough to preserve visible photographic evidence: background brightness, softbox direction, shadow softness, skin pore/dewy/matte balance, hair strand detail, fabric ribs, product box paper/plastic/gloss/matte finish, table reflectance and contact shadows.
 Use the case library only as supplement. Strong reference image structure beats generic search matches.
 For multi-image series, keep shared_style_anchor stable and describe what may change in variant_plan.
 Keep search_query broad and semantic, 6 to 14 English words.
@@ -12529,14 +12752,44 @@ def style_reference_lock_prompt(analysis: Dict[str, Any]) -> str:
             anchors.append(f"{key}: {value}")
     anchor_text = "; ".join(anchors[:7])
     base = (
-        "Use the attached reference image as a strict composition and style reference. "
-        "Preserve its aspect ratio, poster/campaign layout, camera angle, lens proximity, "
-        "subject scale hierarchy, foreground/background relationship, object placement, "
-        "pose and interaction geometry, negative-space distribution, lighting direction, "
-        "color palette, and commercial finish. Recreate the concept with clean new details; "
-        "do not copy logos, brand text, watermarks, signatures, or exact artwork."
+        "Use the attached reference image as loose campaign-style guidance, not as an exact canvas, crop, or identity copy. "
+        "The downstream selected output canvas size/aspect ratio overrides the reference image aspect ratio. "
+        "Preserve broad campaign mood, lighting direction, color palette, product-to-subject relationship, material quality, "
+        "skin/product finish, background tone, and commercial polish, while allowing a new crop, pose, camera distance, "
+        "object placement, negative-space rhythm, and canvas shape. "
+        "Do not copy logos, brand text, watermarks, signatures, exact artwork, or exact same-person identity."
     )
     return f"{base}\n\nReference anchors: {anchor_text}" if anchor_text else base
+
+def style_lighting_material_lock_prompt(analysis: Dict[str, Any]) -> str:
+    explicit = str(analysis.get("lighting_material_lock_prompt") or "").strip()
+    if explicit:
+        return explicit[:1600]
+    fp = analysis.get("style_fingerprint") if isinstance(analysis.get("style_fingerprint"), dict) else {}
+    shared = analysis.get("shared_style_anchor") if isinstance(analysis.get("shared_style_anchor"), dict) else {}
+    lighting = compact_style_value(fp.get("lighting") or shared.get("lighting"), max_len=420)
+    material = compact_style_value(fp.get("material") or shared.get("material"), max_len=420)
+    palette = compact_style_value(fp.get("palette") or shared.get("palette"), max_len=260)
+    finish = compact_style_value(fp.get("finish") or shared.get("commercial_finish"), max_len=220)
+    parts = []
+    if lighting:
+        parts.append(f"reference lighting evidence: {lighting}")
+    if material:
+        parts.append(f"reference material evidence: {material}")
+    if palette:
+        parts.append(f"reference color evidence: {palette}")
+    if finish:
+        parts.append(f"reference finish evidence: {finish}")
+    evidence = "; ".join(parts)
+    base = (
+        "Lighting and material fidelity lock: preserve the reference image's visible photographic surface qualities, "
+        "not just the broad composition. Match background tone and gradient strength, overall exposure, contrast curve, "
+        "softbox direction, shadow softness, catchlights, skin retouching level, skin specularity, hair strand detail, "
+        "fabric texture, tabletop reflectance, product packaging finish, realistic edge sharpness and contact shadows. "
+        "Avoid drifting into a warmer generic studio portrait, plastic skin, oily highlights, heavy gray vignette, "
+        "CG-looking packaging, over-sharpened product edges, or unrelated glossy materials."
+    )
+    return f"{base}\n{evidence}" if evidence else base
 
 def style_prompt_from_analysis(analysis: Dict[str, Any], cases: List[Dict[str, Any]]) -> str:
     positive = str(analysis.get("positive_prompt") or analysis.get("prompt") or "").strip()
@@ -12552,14 +12805,16 @@ def style_prompt_from_analysis(analysis: Dict[str, Any], cases: List[Dict[str, A
         or ""
     ).strip()
     prompt_parts = [
-        "Reference priority: the attached user reference image is the primary reference. Any matched case-library image or case prompt is secondary and may only supplement finish, texture, lighting polish, and commercial advertising quality.",
+        "Reference priority: the attached user reference image is the primary reference. Any matched case-library image or case prompt is secondary and may only supplement finish, texture, lighting polish, and commercial advertising quality. Do not let case matches replace the reference lighting, background tone, material finish, skin treatment, or product surface quality.",
         style_reference_lock_prompt(analysis),
+        style_lighting_material_lock_prompt(analysis),
     ]
     if lock_prompt:
         prompt_parts.append(f"Composition lock:\n{lock_prompt}")
     structured_sections = [
         style_analysis_section("Reference summary", analysis.get("reference_summary"), 700),
         style_analysis_section("Shared style anchor", analysis.get("shared_style_anchor"), 900),
+        style_analysis_section("Lighting/material lock", analysis.get("lighting_material_lock_prompt"), 700),
         style_analysis_section("Generation guidance", analysis.get("generation_guidance"), 700),
         style_analysis_section("Variant plan", analysis.get("variant_plan"), 800),
         style_analysis_section("Negative constraints", analysis.get("negative_constraints"), 500),

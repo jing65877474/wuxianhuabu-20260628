@@ -268,6 +268,94 @@ seam, visible seam, hard seam, broken panorama, discontinuous edge, mismatched l
 
 ---
 
+## 预设11：品牌海报网格排版
+
+### 适用场景
+品牌主视觉、活动海报、电商促销海报、饮品/美妆/服饰海报的版式控制；适合需要明确标题区、主体区、辅助信息区和留白比例的画面。
+
+### 正向提示词
+```
+Brand poster layout system for [品牌/产品/主题], clean editorial graphic design, content-aware asymmetrical grid composition, one clear hero subject area occupying about 55-65% of the canvas, large headline area reserved for exact poster copy [主标题文案], secondary copy area for [副标题/卖点], small badge or seal area only if needed, disciplined typography hierarchy, generous negative space, strong visual balance, aligned margins, baseline grid, clear foreground/midground/background separation, premium commercial poster finish, color palette [主色/辅助色/强调色], lighting and material style [风格说明]. If reference image is attached, preserve product truth, brand mood, exact readable copy, and visual hierarchy; do not copy old camera angle or cluttered layout unless explicitly requested. Text must be intentional and readable only when exact copy is provided; no random pseudo text.
+```
+
+### 负向提示词
+```
+random text, pseudo words, fake brand name, misspelled typography, unrelated slogans, watermark, logo artifacts, messy layout, crowded composition, weak hierarchy, too many badges, cheap flyer design, stock template look, inconsistent margins, broken alignment, floating text, text covering face or product, unreadable small copy, low resolution, blurry product, distorted hands, deformed face, bad anatomy, cluttered background, noisy decoration, excessive gradients, copied reference poster layout when camera or composition control requests a change
+```
+
+### 平台参数建议
+- **GPT-Image-2 / OpenAI兼容**：开启「海报文案」时填写准确文案；若只要画面不需要文字则关闭「海报文案」
+- **Midjourney**: `--ar 2:3 --style raw --s 75`
+- **即梦/可灵**：建议先用参考图锁定产品/人物，再用相机控制重构构图
+
+---
+
+## 预设12：电商主图信息层级排版
+
+### 适用场景
+电商主图、产品卖点图、平台首图；适合一个核心产品 + 1-3个卖点信息块 + 干净商业背景的高转化画面。
+
+### 正向提示词
+```
+High-conversion ecommerce hero image layout for [产品名称/品类], product-first commercial composition, hero product large and crisp in the main focal zone, product scale about 45-60% of the canvas, clean background with controlled depth, clear information hierarchy: primary hero product, secondary usage/benefit cue [核心卖点], optional small supporting props [辅助道具], optional exact readable benefit labels [卖点文案] only when provided. Use precise spacing, clean edges, realistic product material, polished reflections, accurate label/product structure, premium retouching, platform-ready square or vertical crop, strong thumbnail readability at small size. Preserve product truth from reference images; do not invent labels, claims, random text, extra packaging, or unrelated accessories.
+```
+
+### 负向提示词
+```
+wrong product, changed package shape, invented label, random marketing text, pseudo text, unreadable claims, excessive props, messy shelf, crowded composition, weak product focus, product too small, cropped product, warped logo, deformed material, plastic fake render, low quality, blurry, bad reflections, inconsistent shadows, cheap marketplace collage, noisy background, overdecorated frame, watermark, QR code, price tag unless explicitly requested
+```
+
+### 平台参数建议
+- **GPT-Image-2 / OpenAI兼容**：参考图权重建议60-85；需要换角度时开启相机控制
+- **Midjourney**: `--ar 1:1 --style raw --s 50`
+- **即梦/可灵**：主图建议先测1:1，再扩展到3:4或4:5
+
+---
+
+## 预设13：详情页模块化长图排版
+
+### 适用场景
+电商详情页单屏、产品介绍模块、品牌说明长图；适合把产品、标题、卖点、材质细节、场景图拆成清晰模块。
+
+### 正向提示词
+```
+Modular ecommerce detail-page section design for [产品/品牌], vertical long-form composition, structured information architecture with 3-5 clean modules: top hero module with product and headline [主标题], feature module with 2-3 benefit cards [卖点], material/detail close-up module [材质/细节], lifestyle usage module [使用场景], closing brand mood module. Use consistent margins, quiet grid, clear spacing rhythm, restrained typography hierarchy, high-end commercial visual system, product truth preserved, readable exact copy only when provided, no filler text. Every module should feel connected by shared color palette [配色], lighting style [光影], and material treatment [质感]. Keep the layout usable and scannable, not a chaotic collage.
+```
+
+### 负向提示词
+```
+random paragraph text, fake body copy, dense unreadable typography, cluttered collage, inconsistent module sizes, broken grid, overlapping text and product, too many icons, fake UI controls, watermark, QR code, price tag unless requested, low quality, blurry details, wrong product material, changed packaging, distorted product, cheap template style, excessive decorative blobs, noisy background, inconsistent lighting between modules
+```
+
+### 平台参数建议
+- **GPT-Image-2 / OpenAI兼容**：适合竖图 `1024x1536` 或 `1536x2048`
+- **Midjourney**: `--ar 9:16 --style raw --s 50`
+- **即梦/可灵**：如果文字要求很准，建议每屏单独生成，不要一次生成完整超长详情页
+
+---
+
+## 预设14：社媒方图留白排版
+
+### 适用场景
+小红书/Instagram 方图、品牌公告、产品种草卡片、轻量活动视觉；强调主体、短标题、留白和缩略图可读性。
+
+### 正向提示词
+```
+Premium social media square graphic layout for [主题/产品], 1:1 composition, strong thumbnail readability, one dominant focal subject, short exact headline [标题文案] placed in a clean safe area, optional small subtitle [副标题] with restrained typography, generous negative space, modern editorial spacing, clear margin system, balanced asymmetry, subtle brand color accents [品牌色], polished commercial lighting, refined material texture, no clutter. If using a reference image, keep the product/person identity, color mood, and exact readable copy; rebuild layout only when needed for better social-card clarity. Text must be exact and intentional; avoid all invented words.
+```
+
+### 负向提示词
+```
+random text, fake title, unreadable typography, excessive copy, cluttered stickers, crowded decorations, weak focal point, subject too small, text over face, text over product label, inconsistent margins, cheap Canva template look, noisy background, watermark, logo artifacts, QR code, distorted face, deformed hands, wrong product, blurry, low quality, harsh over-sharpening
+```
+
+### 平台参数建议
+- **GPT-Image-2 / OpenAI兼容**：适合 `1024x1024`；开启「海报文案」时只放短标题
+- **Midjourney**: `--ar 1:1 --style raw --s 50`
+- **即梦/可灵**：建议少字大留白，先保证缩略图视觉中心
+
+---
+
 ## 通用负面词库（所有预设共用补充）
 
 ```

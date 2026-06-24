@@ -97,6 +97,7 @@ let rhWorkflowEditorState = { open:false, index:-1, entry:null, config:null, exp
 let rhEditorMode = 'workflow';
 let recommendInlineOpen = false;
 let providerDragId = '';
+const BUILTIN_PROVIDER_IDS = new Set(['comfly', 'modelscope', 'runninghub', 'volcengine']);
 const RECOMMENDED_APIS = [
     {
         name:'APIMART',
@@ -247,7 +248,7 @@ function provider(){
     return visibleProviders().find(item => item.id === selectedId) || visibleProviders()[0] || providers[0];
 }
 function isProviderTemporarilyHidden(item){
-    return false;
+    return Boolean(item && BUILTIN_PROVIDER_IDS.has(item.id));
 }
 function visibleProviders(){
     return (providers || []).filter(item => !isProviderTemporarilyHidden(item));
@@ -255,7 +256,7 @@ function visibleProviders(){
 function isFixedProvider(itemOrId){
     const id = typeof itemOrId === 'string' ? itemOrId : itemOrId?.id;
     // 即梦 CLI 不再是固定平台：可删除、可排序，未添加则不存在。
-    return id === 'modelscope' || id === 'runninghub' || id === 'volcengine';
+    return BUILTIN_PROVIDER_IDS.has(id);
 }
 function unique(values){
     const seen = new Set();
@@ -1943,7 +1944,7 @@ function renderRhEntryList(target, list, kind){
     `).join('');
 }
 function openRecommendApi(){
-    recommendInlineOpen = true;
+    recommendInlineOpen = false;
     syncRecommendView();
     renderRecommendApi();
     renderProviderOnboarding(provider());
@@ -2981,6 +2982,13 @@ function addProvider(){
     selectedId = id;
     renderEditor();
 }
+function ensureCustomProvider(){
+    if(visibleProviders().length) return;
+    let id = 'custom-api';
+    let index = 2;
+    while(providers.some(item => item.id === id)) id = `custom-api-${index++}`;
+    providers.push({id, name:'API', base_url:'', protocol:'openai', image_request_mode:'openai', image_generation_endpoint:'', image_edit_endpoint:'', enabled:true, primary:false, image_models:[], chat_models:[], video_models:[], has_key:false, key_preview:''});
+}
 function deleteProvider(){
     const item = provider();
     if(!item) return;
@@ -3101,9 +3109,9 @@ async function loadProviders(){
     try {
         const data = await fetch('/api/providers').then(r => r.json());
         providers = data.providers || [];
+        ensureCustomProvider();
         selectedId = sortedProviders()[0]?.id || '';
         renderEditor();
-        openRecommendApi();
         setStatus('');
     } catch(err) {
         setStatus(tr('api.loadFailed'));
@@ -3149,7 +3157,8 @@ async function saveProviders(){
             note:String(lora.note || '').trim()
         })).filter(lora => lora.id && lora.target_model);
     });
-    if(new Set(providers.map(item => item.id)).size !== providers.length){
+    const providersToSave = visibleProviders();
+    if(new Set(providersToSave.map(item => item.id)).size !== providersToSave.length){
         alert(tr('api.duplicateId'));
         return false;
     }
@@ -3158,7 +3167,7 @@ async function saveProviders(){
         const res = await fetch('/api/providers', {
             method:'PUT',
             headers:{'Content-Type':'application/json'},
-            body:JSON.stringify(providers.map(item => ({
+            body:JSON.stringify(providersToSave.map(item => ({
                 id:item.id,
                 name:item.name,
                 base_url:item.base_url,

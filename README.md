@@ -1,4 +1,9 @@
 # Infinite-Canvas
+
+本地维护规范、智能画布生成链路、参考图权重、输出节点状态清理规则见：[项目手册.md](项目手册.md)
+
+GPT-Image2 风格匹配库已随项目集成在 `style_libraries/gpt-image-2/`。另一台电脑拉取仓库后，无需额外安装本机 Codex skill，也可以继续使用智能画布里的“匹配提示词 / 风格案例检索”能力；如需改用外部库，可设置环境变量 `STYLE_LIBRARY_DIR`。
+
 Supports comfyui/API calls/modelscope calls
 
 
