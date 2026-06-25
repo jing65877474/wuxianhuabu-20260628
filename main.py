@@ -3,6 +3,7 @@ import uuid
 import base64
 import hashlib
 import hmac
+import copy
 import datetime
 import urllib.request
 import urllib.parse
@@ -13169,13 +13170,14 @@ Schema:
 {
   "search_query": "6-14 English words for searching a visual style/case library",
   "summary": "short updated Chinese summary",
-  "positive_prompt": "complete updated image-generation prompt in Chinese, preserving all useful reference-image structure/style constraints and applying the user's latest modification",
+  "positive_prompt": "complete updated image-generation prompt in Chinese, preserving only stable reference/product/style facts and applying the user's latest modification as a full replacement",
   "negative_prompt": "short negative prompt",
   "generation_guidance": "Chinese guidance for the generator",
-  "variant_plan": "Chinese notes on what may vary and what must remain locked"
+  "variant_plan": "Chinese notes on what may vary and what must remain locked; leave empty unless the latest request explicitly asks for multiple outputs, variants, different angles, or a series"
 }
 Rules:
-- The latest user modification request is highest priority.
+- The latest user modification request is highest priority and is a full replacement pass. Do not carry over any earlier user request, old output count, old variant plan, old "different angle/view/pose" requirement, or old active additional guidance unless the latest request repeats it.
+- The existing generated prompt is non-authoritative context only. Use it only for stable product truth, reference roles, lighting/material quality, and commercial finish; discard stale instruction blocks such as "Latest user modification request", "Highest priority user modification request", "Active additional generation guidance", "LLM additional guidance", and old "Variant plan".
 - UI camera control is an immutable downstream control. If a camera-control block is supplied, preserve its focal length, horizontal view, camera height/elevation, perspective and crop family. Requests for different actions/poses must vary the model gesture or product interaction without changing the selected camera.
 - If the latest request asks for people, model, face, hands, holding, use scenario, or lifestyle usage, remove or override older product-only / no-human constraints from the revised positive prompt.
 - If the latest request changes the background or color palette, remove older background/palette locks and do not restore the reference image's old background color.
@@ -13198,6 +13200,60 @@ STYLE_REMATCH_BACKGROUND_PALETTE_PATTERN = re.compile(
 def style_rematch_changes_background_palette(user_request: str) -> bool:
     return bool(STYLE_REMATCH_BACKGROUND_PALETTE_PATTERN.search(str(user_request or "")))
 
+STYLE_REMATCH_VARIANT_REQUEST_PATTERN = re.compile(
+    r"(?:\d+\s*张|[一二两三四五六七八九十]+张|多张|组图|套图|系列图|不同(?:视角|角度|镜头|动作|姿势|构图|画面)|多(?:角度|视角|机位|姿势)|"
+    r"\b(?:two|three|four|multiple|several|batch|series|variants?|different|varied|diverse)\b.{0,40}\b(?:images?|outputs?|angles?|views?|viewpoints?|poses?|shots?)\b|"
+    r"\b(?:images?|outputs?|variants?)\b.{0,40}\b(?:two|three|four|multiple|several|different|varied|diverse)\b)",
+    re.I,
+)
+
+STYLE_REMATCH_STALE_VARIANT_PATTERNS = [
+    re.compile(r"生成同一套[^。\n]*(?:\d+\s*张|[一二两三四五六七八九十]+张|多张)[^。\n]*(?:新图|图片|图像|照片|海报|广告图)[。.\n]*", re.I),
+    re.compile(r"(?:生成|输出|制作|创建|渲染)[^。\n]{0,80}(?:\d+\s*张|[一二两三四五六七八九十]+张|多张)[^。\n]{0,80}(?:不同(?:角度|视角|镜头|动作|姿势)|多(?:角度|视角|机位|姿势))[^。\n]*[。.\n]*", re.I),
+    re.compile(r"(?:生成|输出|制作|创建|渲染)[^。\n]{0,80}(?:不同(?:角度|视角|镜头|动作|姿势)|多(?:角度|视角|机位|姿势))[^。\n]{0,80}(?:\d+\s*张|[一二两三四五六七八九十]+张|多张)[^。\n]*[。.\n]*", re.I),
+    re.compile(r"(?:create|generate|render|produce)[^.\n]{0,90}(?:two|three|four|multiple|several|a pair of|\d+)[^.\n]{0,90}(?:images|outputs|variants|shots)[^.\n]*[.\n]*", re.I),
+    re.compile(r"(?:two|three|four|multiple|several|\d+)[^.\n]{0,70}(?:different|varied|diverse)[^.\n]{0,70}(?:angles|views|viewpoints|camera angles|poses|shots|images|outputs|variants)[^.\n]*[.\n]*", re.I),
+]
+
+STYLE_REMATCH_PRIOR_REQUEST_SECTION_RE = re.compile(
+    r"(?:^|\n\s*\n)\s*(?:Highest priority user modification request|Latest user modification request|Active additional generation guidance from the prompt node|LLM additional guidance|Variant plan)\s*:\s*[\s\S]*?(?=\n\s*\n\s*(?:Reference priority|Use the attached|Reference anchors|Soft high-key|Composition lock|Reference summary|Shared style anchor|Lighting/material lock|Generation guidance|Negative constraints|Case-library support|Original reference weight|Poster copy|Product truth|Product identity|HIGHEST PRIORITY CAMERA OVERRIDE|FINAL CAMERA CHECK|Negative prompt)\b|\Z)",
+    re.I,
+)
+
+def style_rematch_requests_variants(user_request: str) -> bool:
+    return bool(STYLE_REMATCH_VARIANT_REQUEST_PATTERN.search(str(user_request or "")))
+
+def strip_prior_user_request_sections(text: str) -> str:
+    clean = STYLE_REMATCH_PRIOR_REQUEST_SECTION_RE.sub("\n\n", str(text or ""))
+    return re.sub(r"\n{3,}", "\n\n", clean).strip()
+
+def strip_stale_rematch_variant_constraints(text: str, user_request: str) -> str:
+    clean = str(text or "")
+    if not clean or style_rematch_requests_variants(user_request):
+        return clean.strip()
+    for pattern in STYLE_REMATCH_STALE_VARIANT_PATTERNS:
+        clean = pattern.sub("", clean)
+    clean = re.sub(r"\n{3,}", "\n\n", clean)
+    clean = re.sub(r"[ \t]{2,}", " ", clean)
+    return clean.strip()
+
+def style_rematch_non_authoritative_prompt_context(current_prompt: str, user_request: str) -> str:
+    clean = strip_poster_copy_control_blocks(str(current_prompt or ""))
+    clean = strip_prior_user_request_sections(clean)
+    clean = strip_stale_rematch_variant_constraints(clean, user_request)
+    return clean[:9000].strip()
+
+def sanitize_style_rematch_analysis_for_latest_request(analysis: Dict[str, Any], user_request: str) -> Dict[str, Any]:
+    data = copy.deepcopy(analysis or {})
+    wants_variants = style_rematch_requests_variants(user_request)
+    for key in ("summary", "positive_prompt", "prompt", "generation_guidance", "search_query"):
+        value = data.get(key)
+        if isinstance(value, str):
+            data[key] = strip_stale_rematch_variant_constraints(strip_prior_user_request_sections(value), user_request)
+    if not wants_variants:
+        data.pop("variant_plan", None)
+    return data
+
 def merge_style_rematch_analysis(
     base: Dict[str, Any],
     revised: Dict[str, Any],
@@ -13209,19 +13265,23 @@ def merge_style_rematch_analysis(
     # A rematch is a full replacement pass. Do not silently re-append stale
     # reference-summary, palette, lighting-lock or composition fields from the
     # previous match after GPT has revised the prompt for the latest request.
+    wants_variants = style_rematch_requests_variants(user_request)
     analysis: Dict[str, Any] = {}
     for key in ("search_query", "summary", "positive_prompt", "negative_prompt", "generation_guidance", "variant_plan"):
         value = revised.get(key) if isinstance(revised, dict) else None
         if isinstance(value, str) and value.strip():
-            analysis[key] = value.strip()
+            if key == "variant_plan" and not wants_variants:
+                continue
+            analysis[key] = strip_stale_rematch_variant_constraints(strip_prior_user_request_sections(value), user_request)
     analysis["_rematched"] = True
     analysis["_camera_control"] = str(camera_control or "").strip()
     analysis["_latest_changes_background_palette"] = style_rematch_changes_background_palette(user_request)
     analysis["_poster_copy_enabled"] = bool(poster_copy_enabled)
+    analysis["_latest_requests_variants"] = wants_variants
     if not str(analysis.get("positive_prompt") or "").strip():
-        seed = str(current_prompt or "").strip() or str(analysis.get("summary") or "").strip()
+        seed = style_rematch_non_authoritative_prompt_context(current_prompt, user_request) or str(analysis.get("summary") or "").strip()
         analysis["positive_prompt"] = "\n\n".join(part for part in [
-            seed,
+            seed and f"Stable context from previous prompt (non-authoritative; old user requests removed):\n{seed}",
             f"Latest user modification request: {str(user_request or '').strip()}"
         ] if part)
     if user_request:
@@ -13236,15 +13296,16 @@ async def rematch_style_prompt_with_llm(payload: StyleLibraryRematchPromptReques
     chat_base, chat_hdrs, model = resolve_chat_provider(payload.provider, payload.model, payload.ms_model)
     provider_cfg = get_api_provider(payload.provider) if payload.provider not in ("modelscope",) else {}
     is_apimart = is_apimart_provider(provider_cfg)
-    analysis_text = json.dumps(base_analysis or {}, ensure_ascii=False)[:9000]
-    current_prompt = strip_poster_copy_control_blocks(str(payload.current_prompt or "").strip())[:9000]
     user_request = str(payload.user_request or "").strip()
+    safe_base_analysis = sanitize_style_rematch_analysis_for_latest_request(base_analysis or {}, user_request)
+    analysis_text = json.dumps(safe_base_analysis or {}, ensure_ascii=False)[:9000]
+    current_prompt = style_rematch_non_authoritative_prompt_context(payload.current_prompt or "", user_request)
     camera_control = str(payload.camera_control or "").strip()[:6000]
     poster_copy_state = "enabled" if bool(payload.poster_copy_enabled) else "disabled"
     message = "\n\n".join([
         "Existing reference style analysis JSON:",
         analysis_text or "{}",
-        "Existing generated prompt:",
+        "Existing generated prompt (non-authoritative stable context only; prior user modification and variant/count sections were removed):",
         current_prompt or "(empty)",
         "Latest user modification request:",
         user_request,
@@ -13255,6 +13316,7 @@ async def rematch_style_prompt_with_llm(payload: StyleLibraryRematchPromptReques
         poster_copy_state,
         "If Poster copy is enabled, readable poster/ad copy in the primary reference is allowed and should be preserved when compatible. If disabled, visible readable text must be removed unless the latest user request explicitly typed exact text.",
         f"Reference similarity weight: {max(0, min(100, int(payload.reference_weight or 65)))}/100",
+        "This is an independent rerun. The latest request must replace previous prompt demands, not append to them.",
         "Revise the prompt and create a fresh search_query for re-matching the style/case library."
     ])
     try:

@@ -15057,6 +15057,7 @@ async function smartRematchImageNodeRun(node, runSettings=settings){
     node.text = prompt;
     node.promptDraftText = prompt;
     node.promptDraftHtml = escapeHtml(prompt);
+    node.llmInstruction = '';
     node.imageEditRefs = uniqueReferenceImages([
         editBase,
         ...generatedImageProductRefs(node)
@@ -15134,6 +15135,7 @@ async function rematchStylePromptForPromptNode(node){
     if(!rawPrompt) throw new Error('重新匹配后没有生成可用提示词');
     const promptBudget = smartCompressPromptToBudget(rawPrompt, SMART_MATCHED_PROMPT_BUDGET);
     node.text = promptBudget.prompt;
+    node.llmInstruction = '';
     node.llmProvider = provider;
     node.llmModel = model;
     node.styleMatch = {
