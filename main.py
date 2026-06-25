@@ -2919,9 +2919,10 @@ def list_projects():
 def new_canvas(title="智能画布", icon="sparkles", kind="smart", project=None, board_x=None, board_y=None):
     timestamp = now_ms()
     canvas_kind = normalize_canvas_kind(kind)
+    fallback_title = "智能画布" if canvas_kind == "smart" else "未命名画布"
     canvas = {
         "id": uuid.uuid4().hex,
-        "title": (title or ("智能画布" if canvas_kind == "smart" else "未命名画布"))[:80],
+        "title": clean_canvas_title(title, fallback_title),
         "icon": (icon or ("sparkles" if canvas_kind == "smart" else "🧩"))[:32],
         "kind": canvas_kind,
         "owner": "",
@@ -2947,6 +2948,7 @@ def load_canvas(canvas_id):
         raise HTTPException(status_code=404, detail="画布不存在")
     with open(path, 'r', encoding='utf-8') as f:
         canvas = json.load(f)
+    canvas["title"] = clean_canvas_title(canvas.get("title"), "未命名画布")
     if canvas.get("deleted_at"):
         raise HTTPException(status_code=404, detail="画布已在回收站")
     return canvas
@@ -2956,7 +2958,9 @@ def load_canvas_any(canvas_id):
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="画布不存在")
     with open(path, 'r', encoding='utf-8') as f:
-        return json.load(f)
+        canvas = json.load(f)
+    canvas["title"] = clean_canvas_title(canvas.get("title"), "未命名画布")
+    return canvas
 
 CANVAS_COLORS = {"", "red", "orange", "amber", "green", "teal", "blue", "violet", "pink", "slate"}
 
@@ -2964,10 +2968,33 @@ def normalize_canvas_color(value):
     color = str(value or "").strip().lower()
     return color if color in CANVAS_COLORS else ""
 
+def repair_mojibake_text(value):
+    """Repair common UTF-8-as-Latin-1 mojibake in user-visible short labels."""
+    text = str(value or "")
+    if not text:
+        return text
+    markers = ("Ã", "Â", "â", "æ", "è", "å", "ç", "é", "\u0080", "\u0081", "\u0082", "\u0083", "\u0084", "\u0085", "\u0099")
+    if not any(marker in text for marker in markers):
+        return text
+    try:
+        repaired = text.encode("latin1").decode("utf-8")
+    except UnicodeError:
+        return text
+    def score(s):
+        cjk = sum(1 for ch in s if "\u4e00" <= ch <= "\u9fff")
+        bad = sum(1 for ch in s if ch == "\ufffd" or 0x80 <= ord(ch) <= 0x9f)
+        latin_noise = sum(s.count(marker) for marker in ("Ã", "Â", "â", "æ", "è", "å", "ç"))
+        return cjk * 3 - bad * 4 - latin_noise * 2
+    return repaired if score(repaired) > score(text) else text
+
+def clean_canvas_title(value, fallback="未命名画布", limit=80):
+    title = repair_mojibake_text(value).strip()
+    return (title or fallback)[:limit]
+
 def canvas_record(data):
     return {
         "id": data.get("id"),
-        "title": data.get("title", "未命名画布"),
+        "title": clean_canvas_title(data.get("title"), "未命名画布"),
         "icon": data.get("icon", "🧩"),
         "kind": normalize_canvas_kind(data.get("kind")),
         "owner": str(data.get("owner") or "")[:40],
@@ -10294,7 +10321,7 @@ async def ai_config():
         "video_models": VIDEO_MODELS,
         "api_providers": providers,
         "has_api_key": bool(AI_API_KEY),
-        "ms_chat_models": MODELSCOPE_CHAT_MODELS,
+        "ms_chat_models": [],
         "has_ms_key": bool(modelscope_api_key()),
     }
 
@@ -12316,7 +12343,7 @@ async def get_canvas_meta(canvas_id: str):
     return {
         "id": canvas.get("id"),
         "updated_at": canvas.get("updated_at", 0),
-        "title": canvas.get("title", "未命名画布"),
+        "title": clean_canvas_title(canvas.get("title"), "未命名画布"),
         "icon": canvas.get("icon", "layers"),
         "kind": normalize_canvas_kind(canvas.get("kind")),
     }
@@ -12327,7 +12354,7 @@ async def update_canvas_meta(canvas_id: str, payload: CanvasMetaUpdate):
     刻意不走 save_canvas（它会刷新 updated_at），以免打标签/置顶把画布顶到列表最前。"""
     canvas = load_canvas(canvas_id)
     if payload.title is not None:
-        canvas["title"] = (payload.title or canvas.get("title") or "未命名画布")[:80]
+        canvas["title"] = clean_canvas_title(payload.title or canvas.get("title"), "未命名画布")
     if payload.icon is not None:
         canvas["icon"] = (payload.icon or "layers")[:32]
     if payload.owner is not None:
@@ -14428,7 +14455,7 @@ async def update_canvas(canvas_id: str, payload: CanvasSaveRequest):
             "canvas": canvas,
             "updated_at": current_updated_at,
         })
-    canvas["title"] = (payload.title or canvas.get("title") or "未命名画布")[:80]
+    canvas["title"] = clean_canvas_title(payload.title or canvas.get("title"), "未命名画布")
     canvas["icon"] = (payload.icon or canvas.get("icon") or "layers")[:32]
     canvas["kind"] = normalize_canvas_kind(canvas.get("kind"))
     canvas["nodes"] = payload.nodes

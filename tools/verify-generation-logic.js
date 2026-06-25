@@ -69,6 +69,29 @@ check(
         source.includes("node.text = prompt"),
     "Generated-image prompt rematching must use the current image, preserve camera control, and replace the current prompt."
 );
+const filterTransientUploads = new Function(
+    "isTransientUploadPlaceholderNode",
+    `${functionSource("filterTransientUploadPlaceholders")}; return filterTransientUploadPlaceholders;`
+)((node) => node?.empty === true);
+const connectedEmptyUpload = filterTransientUploads(
+    [
+        {id:"source", empty:false},
+        {id:"linked-empty", empty:true},
+        {id:"legacy-linked-empty", empty:true, inputNodeIds:["source"]},
+        {id:"orphan-empty", empty:true}
+    ],
+    [{from:"source", to:"linked-empty", kind:"input"}]
+);
+check(
+    connectedEmptyUpload.nodes.some((node) => node.id === "linked-empty") &&
+        connectedEmptyUpload.nodes.some((node) => node.id === "legacy-linked-empty") &&
+        connectedEmptyUpload.connections.some((conn) => conn.to === "linked-empty"),
+    "An empty upload node with a real input connection must be preserved."
+);
+check(
+    !connectedEmptyUpload.nodes.some((node) => node.id === "orphan-empty"),
+    "A truly orphaned empty upload placeholder should still be cleaned."
+);
 check(
     source.includes('class="generated-edit-base-weight-range" type="range" min="0" max="100" step="5"') &&
         !source.includes('min="100" max="100" value="100" disabled'),
@@ -88,11 +111,13 @@ const styleUpload = new Function(
     "smartReferenceRoleIsProduct",
     "smartReferenceRoleIsCase",
     "smartReferenceLikelyContainsPerson",
+    "smartPosterCopyEnabledForGeneration",
     `${functionSource("smartStyleReferenceShouldUpload")}; return smartStyleReferenceShouldUpload;`
 )(
     (ref) => ref?.role === "product_truth_reference" || ref?.role === "product_detail_reference",
     (ref) => ref?.role === "case_style_reference",
-    (node, ref) => ref?.containsPerson === true
+    (node, ref) => ref?.containsPerson === true,
+    (node) => node?.posterCopyEnabled === true
 );
 
 const personReference = { role: "composition_reference", containsPerson: true };
@@ -110,6 +135,8 @@ var promptNodeReferenceWeight = (node) => Number(node?.referenceWeight ?? 65);
 var smartStyleReferenceShouldUpload = () => false;
 var inputNodesFor = () => [];
 var isSmartGroupNode = () => false;
+var isGeneratedImagePromptComposerNode = (node) => node?.type === "smart-image" && node?.generatedPromptInitialized === true;
+var generatedEditBaseSimilarityIntent = () => "balanced_edit_base";
 
 const referenceStart = source.indexOf("function smartReferenceRoleIsCase(");
 const referenceEnd = source.indexOf("function smartNormalizeProductReferenceText(", referenceStart);
@@ -141,6 +168,37 @@ const posterCopyPersonWithProduct = route([primary, product, caseRef], 65, { pos
 check(posterCopyPersonWithProduct.some((ref) => ref.role === "composition_reference" && ref.posterCopyReference && ref.inputFidelity === "high"), "Poster-copy primary reference must upload with high fidelity alongside product refs.");
 check(posterCopyPersonWithProduct.some((ref) => ref.role === "product_truth_reference"), "Poster-copy mode must still keep product truth references.");
 
+const posterPromptUpstream = { id: "poster-prompt-upstream", type: "smart-prompt", posterCopyEnabled: true };
+const posterTargetNode = { id: "poster-target-node", type: "smart-image" };
+inputNodesFor = (node) => node?.id === posterTargetNode.id ? [posterPromptUpstream] : [];
+check(
+    smartPosterCopyEnabledForGeneration(posterTargetNode),
+    "A downstream image node must inherit Poster copy from its upstream prompt node."
+);
+const inheritedPosterRefs = smartDecorateReferenceWeights(posterTargetNode, [{
+    ...primary,
+    generatedEditBase: true,
+    referenceWeight: 65
+}]);
+check(
+    inheritedPosterRefs[0]?.posterCopyReference === true &&
+        inheritedPosterRefs[0]?.copyTextLock === true &&
+        inheritedPosterRefs[0]?.inputFidelity === "high",
+    "An inherited Poster-copy edit base must remain uploaded at high fidelity with copy-lock metadata."
+);
+const posterOverrideOff = {
+    id: "poster-override-off",
+    type: "smart-image",
+    generatedPromptInitialized: true,
+    posterCopyEnabled: false
+};
+inputNodesFor = (node) => node?.id === posterOverrideOff.id ? [posterPromptUpstream] : [];
+check(
+    !smartPosterCopyEnabledForGeneration(posterOverrideOff),
+    "A generated-image card explicitly switched off must override an upstream Poster-copy switch."
+);
+inputNodesFor = () => [];
+
 const highPersonWithCase = route([primary, caseRef], 85);
 check(highPersonWithCase.length === 1, "At 85+, only the original person/style reference may upload.");
 check(highPersonWithCase[0].role === "composition_reference", "A case image must never replace the original high-weight reference.");
@@ -150,12 +208,65 @@ const productFlow = route([primary, product, caseRef], 65);
 check(productFlow.some((ref) => ref.role === "product_truth_reference"), "Product truth reference must upload.");
 check(!productFlow.some((ref) => ref.role === "case_style_reference"), "Case reference must not upload when product truth exists.");
 
+const firstGeneratedBase = {
+    url: "generated-color.png",
+    kind: "image",
+    role: "composition_reference",
+    generatedEditBase: true,
+    structureLock: true,
+    referenceWeight: 100
+};
+const secondGeneratedBase = {
+    url: "generated-line-art.png",
+    kind: "image",
+    role: "composition_reference",
+    generatedEditBase: true,
+    structureLock: true,
+    referenceWeight: 100
+};
+const multipleGeneratedRefs = route([firstGeneratedBase, secondGeneratedBase], 65);
+check(multipleGeneratedRefs.length === 2, "Multiple directly linked generated images must all remain visible and uploadable.");
+check(
+    multipleGeneratedRefs[0].generatedEditBase === true &&
+        multipleGeneratedRefs[0].role === "composition_reference",
+    "The first linked generated image must remain the primary edit base."
+);
+check(
+    multipleGeneratedRefs[1].generatedEditBase === false &&
+        multipleGeneratedRefs[1].structureLock === false &&
+        multipleGeneratedRefs[1].role === "supporting_reference",
+    "Additional linked generated images must become supporting references instead of being dropped or competing as strict edit bases."
+);
+
 const nonPersonStyle = { url: "studio.png", kind: "image", role: "composition_reference", name: "clean studio reference" };
 check(route([nonPersonStyle], 65).length === 1, "A normal non-person style reference at 65 should upload.");
 check(
     route([nonPersonStyle], 65, { llmInstruction: "背景颜色配色改变一下" }).length === 0,
     "An explicit background/palette change must make a sub-85 style reference text-only."
 );
+
+check(
+    smartTextExplicitlyRequestsHuman("人物和产品有互动，两只脚踩在产品踏板上"),
+    "Foot/leg/product-interaction requests must explicitly allow a human subject."
+);
+check(
+    !smartTextExplicitlyRequestsHuman("不要人物，纯产品静物图"),
+    "An explicit product-only request must still forbid a human subject."
+);
+const generatedEditUpstream = {
+    id: "generated-edit-upstream",
+    type: "smart-image",
+    generatedPromptInitialized: true,
+    llmInstruction: "人物和产品有互动，两只脚踩在产品踏板上",
+    promptDraftText: "NO HUMAN SUBJECT LOCK: stale product-only instruction."
+};
+const generatedEditTarget = { id: "generated-edit-target", type: "smart-image" };
+inputNodesFor = (node) => node?.id === generatedEditTarget.id ? [generatedEditUpstream] : [];
+check(
+    smartGenerationAllowsHuman(generatedEditTarget, [], "NO HUMAN SUBJECT LOCK: stale product-only instruction."),
+    "A downstream image node must inherit the generated edit node's latest human-interaction request and suppress a stale no-human lock."
+);
+inputNodesFor = () => [];
 
 check(smartPersonSimilarityInstruction(20).includes("very low"), "0-34 person tier changed.");
 check(smartPersonSimilarityInstruction(45).includes("low"), "35-59 person tier changed.");
@@ -191,6 +302,19 @@ check(
         backendSource.includes("_poster_copy_enabled") &&
         backendSource.includes("_latest_changes_background_palette"),
     "Prompt rematching must preserve UI camera/poster-copy controls and clear stale background/palette locks."
+);
+check(
+    source.includes("image:editBase.url") &&
+        source.includes("analysis:{}") &&
+        source.includes("user_request:userRequest"),
+    "Generated-image prompt rematching must force a fresh visual analysis of the current generated image."
+);
+check(
+    source.includes("if(!smartPosterCopyEnabledForGeneration(node)) return '';") &&
+        source.includes("posterCopyReference:posterCopyLock") &&
+        source.includes("copyTextLock:posterCopyLock") &&
+        source.includes("This lock overrides earlier no-readable-text"),
+    "Poster-copy state must propagate downstream and override stale no-text instructions."
 );
 check(
     backendSource.includes("Product surface quality guard:") &&

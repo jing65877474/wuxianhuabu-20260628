@@ -5206,7 +5206,22 @@ function filterStaleEmptyRunPlaceholders(sourceNodes=[], sourceConnections=[]){
     };
 }
 function filterTransientUploadPlaceholders(sourceNodes=[], sourceConnections=[]){
-    const removed = new Set((sourceNodes || []).filter(isTransientUploadPlaceholderNode).map(node => node.id));
+    const connectedNodeIds = new Set();
+    const existingNodeIds = new Set((sourceNodes || []).map(node => node?.id).filter(Boolean));
+    (sourceConnections || []).forEach(conn => {
+        if(conn?.from) connectedNodeIds.add(conn.from);
+        if(conn?.to) connectedNodeIds.add(conn.to);
+    });
+    (sourceNodes || []).forEach(node => {
+        const inputIds = Array.isArray(node?.inputNodeIds)
+            ? node.inputNodeIds.filter(id => existingNodeIds.has(id))
+            : [];
+        if(inputIds.length) connectedNodeIds.add(node.id);
+        inputIds.forEach(id => connectedNodeIds.add(id));
+    });
+    const removed = new Set((sourceNodes || [])
+        .filter(node => isTransientUploadPlaceholderNode(node) && !connectedNodeIds.has(node.id))
+        .map(node => node.id));
     if(!removed.size) return {
         nodes:sourceNodes || [],
         connections:sourceConnections || [],
@@ -13345,6 +13360,9 @@ function smartHumanNegativePattern(){
 function smartHumanPositivePattern(){
     return /(?:^|[^a-z])(?:person|people|human|human model|model|woman|man|girl|boy|female|male|portrait|face|facial|hand|hands|finger|palm|arm|body|torso|shoulder|leg|limb|holding|hold|grip|wearing|consumer|lifestyle person)(?:[^a-z]|$)|人物|人像|真人|模特|女人|女性|男人|男性|女孩|男孩|消费者|生活方式人物|脸|面部|五官|手部|手指|掌心|手掌|手臂|胳膊|肢体|身体|肩膀|腿部|拿着|握着|托着|抓着|捧着|佩戴|穿着|手持产品|手拿|手里|手中/i;
 }
+function smartHumanInteractionPositivePattern(){
+    return /(?:\u4eba\u7269|\u4eba\u50cf|\u771f\u4eba|\u6a21\u7279|\u5973\u6027|\u5973\u4eba|\u7537\u6027|\u7537\u4eba|\u8138\u90e8|\u624b\u90e8|\u80a2\u4f53|\u8eab\u4f53|\u817f|\u817f\u90e8|\u811a|\u53cc\u811a|\u4e24\u53ea\u811a|\u811a\u638c|\u811a\u8dbe|\u819d\u76d6|\u5750\u59ff|\u7ad9\u59ff|\u7a7f\u7740|\u624b\u6301|\u62ff\u7740|\u63e1\u7740|\u8e29|\u8e29\u5728|\u8e29\u8e0f|\u4f7f\u7528\u573a\u666f|\u4f7f\u7528\u6548\u679c|\u4e92\u52a8)|(?:\u4ea7\u54c1|\u5546\u54c1|\u673a\u5668|\u5668\u68b0|\u8e0f\u677f).{0,24}(?:\u4e92\u52a8|\u8e29|\u811a|\u817f|\u4f7f\u7528|\u63a5\u89e6)|(?:\u4eba|\u6a21\u7279|\u5973|\u7537).{0,24}(?:\u4ea7\u54c1|\u5546\u54c1|\u673a\u5668|\u5668\u68b0|\u8e0f\u677f|\u4e92\u52a8|\u8e29|\u811a|\u817f|\u4f7f\u7528)|\b(?:woman|man|person|people|human|model|female|male|leg|legs|foot|feet|barefoot|shoe|shoes|knee|knees|sitting|standing|wearing|holding|using|interacting|step(?:ping)?\s+on|feet\s+on)\b/i;
+}
 function smartStripHumanAntiCopyClauses(text){
     return String(text || '')
         .replace(/(?:do not|don't|never|avoid|ignore|without)\s+[^.\n;。；]*(?:person|people|human|model|face|hand|hands|finger|arm|body|limb|pose|skin|hair)[^.\n;。；]*[.\n;。；]?/gi, ' ')
@@ -13357,19 +13375,30 @@ function smartTextExplicitlyForbidsHuman(text){
 }
 function smartTextExplicitlyRequestsHuman(text){
     const value = String(text || '');
-    if(!value.trim() || smartTextExplicitlyForbidsHuman(value)) return false;
-    if(/(?:\u4eba\u7269|\u4eba\u50cf|\u771f\u4eba|\u6a21\u7279|\u4eba\u8138|\u8138\u90e8|\u624b\u90e8|\u624b\u6301|\u62ff\u7740|\u63e1\u7740|\u4f7f\u7528\u573a\u666f|\u4f7f\u7528\u6548\u679c|\u4e0a\u8138|\u62a4\u7406\u573a\u666f|人物|人像|真人|模特|人脸|脸部|手部|手持|拿着|握着|使用场景|使用效果|上脸|护理场景)/i.test(value)) return true;
-    return smartHumanPositivePattern().test(smartStripHumanAntiCopyClauses(value));
+    if(!value.trim()) return false;
+    const stripped = smartStripHumanAntiCopyClauses(value);
+    if(/(?:\u4eba\u7269|\u4eba\u50cf|\u771f\u4eba|\u6a21\u7279|\u4eba\u8138|\u8138\u90e8|\u624b\u90e8|\u624b\u6301|\u62ff\u7740|\u63e1\u7740|\u4f7f\u7528\u573a\u666f|\u4f7f\u7528\u6548\u679c|\u4e0a\u8138|\u62a4\u7406\u573a\u666f|人物|人像|真人|模特|人脸|脸部|手部|手持|拿着|握着|使用场景|使用效果|上脸|护理场景)/i.test(stripped)) return true;
+    if(smartHumanInteractionPositivePattern().test(stripped)) return true;
+    return smartHumanPositivePattern().test(stripped);
 }
 function smartPromptHighestPriorityRequestText(prompt=''){
     const text = String(prompt || '');
-    const marker = 'Highest priority user modification request:';
-    const start = text.indexOf(marker);
-    if(start < 0) return '';
-    const rest = text.slice(start + marker.length);
+    const markers = [
+        'Highest priority user modification request:',
+        'Latest user modification request (highest priority):',
+        'Latest user modification request:'
+    ];
+    const found = markers
+        .map(marker => ({marker, start:text.indexOf(marker)}))
+        .filter(item => item.start >= 0)
+        .sort((a, b) => a.start - b.start)[0];
+    if(!found) return '';
+    const rest = text.slice(found.start + found.marker.length);
     const endMarkers = [
         '\nApply this latest user request',
         '\nThis is a high-priority constraint',
+        '\nVariant plan:',
+        '\nNegative prompt:',
         '\n\n'
     ];
     const ends = endMarkers.map(markerText => rest.indexOf(markerText)).filter(index => index >= 0);
@@ -13379,13 +13408,14 @@ function smartPromptHighestPriorityRequestText(prompt=''){
 function smartLatestUserRequestText(node, prompt='', seen=new Set()){
     if(!node?.id || seen.has(node.id)) return smartPromptHighestPriorityRequestText(prompt);
     seen.add(node.id);
+    const directInstruction = String(node.llmInstruction || '').trim();
     const parts = [
         smartPromptHighestPriorityRequestText(prompt),
-        node.llmInstruction,
-        node.promptDraftText
+        directInstruction,
+        directInstruction ? '' : node.promptDraftText
     ].map(value => String(value || '').trim()).filter(Boolean);
     inputNodesFor(node).forEach(input => {
-        if(input?.type === 'smart-prompt' || input?.type === 'smart-loop' || isSmartGroupNode(input)){
+        if(input?.type === 'smart-prompt' || input?.type === 'smart-loop' || isSmartGroupNode(input) || (isGeneratedImagePromptComposerNode(input) && input?.generatedPromptInitialized)){
             const nested = smartLatestUserRequestText(input, '', seen);
             if(nested) parts.push(nested);
         }
@@ -13420,7 +13450,7 @@ function smartNodeUserIntentText(node, seen=new Set()){
         own.push(...smartGroupMembers(node).map(member => smartNodeUserIntentText(member, seen)).filter(Boolean));
     }
     inputNodesFor(node).forEach(input => {
-        if(input?.type === 'smart-prompt' || input?.type === 'smart-loop' || isSmartGroupNode(input)){
+        if(input?.type === 'smart-prompt' || input?.type === 'smart-loop' || isSmartGroupNode(input) || (isGeneratedImagePromptComposerNode(input) && input?.generatedPromptInitialized)){
             own.push(smartNodeUserIntentText(input, seen));
         }
     });
@@ -13454,10 +13484,13 @@ function smartRefsLikelyContainPerson(node, refs=[]){
 }
 function smartGenerationAllowsHuman(node, refs=[], prompt=''){
     const latestUserRequest = smartLatestUserRequestText(node, prompt);
-    if(smartTextExplicitlyForbidsHuman(latestUserRequest)) return false;
     if(smartTextExplicitlyRequestsHuman(latestUserRequest)) return true;
-    if(smartTextExplicitlyForbidsHuman([prompt, smartNodeUserIntentText(node)].filter(Boolean).join('\n\n'))) return false;
-    return smartPromptExplicitlyRequestsHuman(node, prompt)
+    if(smartTextExplicitlyForbidsHuman(latestUserRequest)) return false;
+    const intentText = smartNodeUserIntentText(node);
+    if(smartTextExplicitlyRequestsHuman(intentText)) return true;
+    if(smartTextExplicitlyForbidsHuman(intentText)) return false;
+    if(smartTextExplicitlyForbidsHuman(prompt)) return false;
+    return smartTextExplicitlyRequestsHuman(prompt)
         || smartRefsLikelyContainPerson(node, refs)
         || smartStyleMatchLikelyContainsPerson(node);
 }
@@ -13469,6 +13502,22 @@ function smartNoHumanSubjectPrompt(allowHuman=false){
         'This is a product-only / object-only scene. If style references, case-library matches, or older prompt fragments mention model, person, face, skin, pose, hand placement, holding, beauty portrait, or lifestyle person, ignore those human/body parts.',
         'Use product stands, props, packaging, surface contact, shadows, environment, machinery, particles, or lighting to support the product instead of hands or people.'
     ].join(' ');
+}
+function smartPosterCopyControlForGeneration(node, seen=new Set()){
+    if(!node?.id || seen.has(node.id)) return null;
+    seen.add(node.id);
+    const ownsControl = node.type === 'smart-prompt'
+        || (isGeneratedImagePromptComposerNode(node) && node?.generatedPromptInitialized);
+    if(node.posterCopyEnabled === true) return true;
+    if(ownsControl && node.posterCopyEnabled === false) return false;
+    const upstream = inputNodesFor(node)
+        .map(input => smartPosterCopyControlForGeneration(input, seen))
+        .filter(value => value !== null);
+    if(!upstream.length) return null;
+    return upstream.some(Boolean);
+}
+function smartPosterCopyEnabledForGeneration(node){
+    return smartPosterCopyControlForGeneration(node) === true;
 }
 function smartReferenceLikelyContainsPerson(node, ref){
     const analysis = node?.styleMatch?.analysis || {};
@@ -13491,7 +13540,7 @@ function smartStyleReferenceShouldUpload(node, ref, weight){
     if(smartReferenceRoleIsCase(ref)) return false;
     const role = ref?.role || '';
     if(!['composition_reference','primary_style_reference','primary_reference'].includes(role)) return true;
-    if(node?.posterCopyEnabled === true) return true;
+    if(smartPosterCopyEnabledForGeneration(node)) return true;
     const value = Math.max(0, Math.min(100, Math.round(Number(weight) || 0)));
     if(smartReferenceLikelyContainsPerson(node, ref)){
         return value >= 85;
@@ -13524,8 +13573,20 @@ function smartPrioritizeGenerationReferences(refs=[]){
     const generatedBase = list.filter(ref => ref?.generatedEditBase || ref?.structureLock);
     const allPrimary = list.filter(ref => !smartReferenceRoleIsCase(ref) && ['composition_reference','primary_style_reference','primary_reference'].includes(ref?.role));
     const primary = generatedBase.length
-        ? generatedBase
+        ? generatedBase.slice(0, 1)
         : allPrimary;
+    const secondaryGenerated = generatedBase.slice(1).map(ref => ({
+        ...ref,
+        role:'supporting_reference',
+        generatedEditBase:false,
+        structureLock:false,
+        referenceLock:false,
+        referenceWeight:Math.min(smartReferenceRoleWeight(ref), 55),
+        similarityIntent:'supporting_generated_reference',
+        inputFidelity:'low',
+        uploadReference:true,
+        textOnlyReference:false
+    }));
     const explicitProducts = list.filter(ref => ref?.productTruthExplicit);
     const products = uniqueReferenceImages([
         ...explicitProducts,
@@ -13539,6 +13600,7 @@ function smartPrioritizeGenerationReferences(refs=[]){
     const ordered = [
         ...primary.slice(0, 1),
         ...products.slice(0, productLimit),
+        ...secondaryGenerated,
         ...supporting
     ];
     return uniqueReferenceImages(ordered).slice(0, 5);
@@ -13555,6 +13617,7 @@ function smartReferenceRoleWeight(ref){
 function smartDecorateReferenceWeights(node, refs=[]){
     const styleWeight = promptNodeReferenceWeight(node);
     const latestChangesBackgroundPalette = smartLatestRequestChangesBackgroundPalette(node);
+    const posterCopyLock = smartPosterCopyEnabledForGeneration(node);
     return (refs || []).map(ref => {
         if(!ref?.url) return ref;
         const role = ref.role || '';
@@ -13578,10 +13641,11 @@ function smartDecorateReferenceWeights(node, refs=[]){
                     uploadReference:true,
                     textOnlyReference:false,
                     referenceLock:strictEditBase,
-                    structureLock:strictEditBase
+                    structureLock:strictEditBase,
+                    posterCopyReference:posterCopyLock,
+                    copyTextLock:posterCopyLock
                 };
             }
-            const posterCopyLock = node?.posterCopyEnabled === true;
             const upload = latestChangesBackgroundPalette
                 && styleWeight < 85
                 && !ref?.styleLock
@@ -13834,7 +13898,7 @@ function smartUploadedReferenceMapPrompt(refs=[], allowHuman=false){
     ].join('\n');
 }
 function smartPosterCopyLockPrompt(node, refs=[]){
-    if(node?.posterCopyEnabled !== true) return '';
+    if(!smartPosterCopyEnabledForGeneration(node)) return '';
     const uploaded = imageRefsOnly(refs).filter(ref => (ref?.posterCopyReference || ref?.copyTextLock) && smartReferenceUploadAllowed(ref));
     if(!uploaded.length) return '';
     const labels = uploaded.map((ref, index) => `${smartReferenceDisplayLabel(index)} (${ref.name || 'primary poster reference'})`).join(', ');
@@ -13843,6 +13907,7 @@ function smartPosterCopyLockPrompt(node, refs=[]){
         `Use ${labels} as the authoritative source for readable poster/ad copy.`,
         'Reproduce visible headline, slogan, badge copy, language, capitalization, line breaks, approximate placement, and typography hierarchy from the primary poster reference when compatible with the latest request.',
         'Product-detail references control only SKU/product appearance and must not suppress, remove, replace, translate, or invent the poster copy.',
+        'This lock overrides earlier no-readable-text, no-brand-text, clean-no-text, or text-removal instructions unless the user explicitly switched Poster copy off. Do not interpret “do not invent random text” as permission to erase readable copy that already exists in the primary poster reference.',
         'If exact tiny text is unreadable, preserve the same text-block location and hierarchy with clean non-random marks; do not hallucinate new marketing words.'
     ].join(' ');
 }
@@ -14970,7 +15035,7 @@ async function smartRematchImageNodeRun(node, runSettings=settings){
         headers:{'Content-Type':'application/json'},
         body:JSON.stringify({
             image:editBase.url,
-            analysis:node.styleMatch?.analysis || {},
+            analysis:{},
             current_prompt:currentPrompt,
             user_request:userRequest,
             camera_control:cameraControl,
