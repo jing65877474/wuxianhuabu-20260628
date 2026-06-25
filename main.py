@@ -2363,6 +2363,8 @@ class AIReference(BaseModel):
     uploadReference: bool = True
     generatedEditBase: bool = False
     structureLock: bool = False
+    posterCopyReference: bool = False
+    copyTextLock: bool = False
 
 class OnlineImageRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=ONLINE_IMAGE_PROMPT_MAX_LENGTH)
@@ -2545,6 +2547,8 @@ class StyleLibraryRematchPromptRequest(BaseModel):
     analysis: Dict[str, Any] = {}
     current_prompt: str = Field(default="", max_length=LLM_MESSAGE_MAX_LENGTH)
     user_request: str = Field(min_length=1, max_length=6000)
+    camera_control: str = Field(default="", max_length=6000)
+    poster_copy_enabled: bool = False
     provider: str = "comfly"
     model: str = ""
     ms_model: str = ""
@@ -3039,6 +3043,47 @@ def canvas_asset_downloadable_url(url):
     text = str(url or "").strip()
     return text if text.startswith(("/output/", "/assets/", "http://", "https://")) else ""
 
+CANVAS_ASSET_NON_MEDIA_URL_KEYS = {
+    "gallery_url",
+    "galleryurl",
+    "source_url",
+    "sourceurl",
+    "source_link",
+    "sourcelink",
+    "page_url",
+    "pageurl",
+    "detail_url",
+    "detailurl",
+    "original_page_url",
+    "originalpageurl",
+    "post_url",
+    "posturl",
+    "webpage_url",
+    "webpageurl",
+    "permalink",
+    "href",
+    "link",
+}
+
+def canvas_asset_should_scan_key(key):
+    normalized = re.sub(r"[^a-z0-9]+", "_", str(key or "").strip().lower()).strip("_")
+    return normalized not in CANVAS_ASSET_NON_MEDIA_URL_KEYS
+
+def canvas_asset_local_file_ready(url):
+    path = output_file_from_url(url)
+    if not path or not os.path.isfile(path):
+        return False
+    try:
+        return os.path.getsize(path) > 0
+    except OSError:
+        return False
+
+def canvas_asset_record_is_usable(url):
+    text = str(url or "").strip()
+    if text.startswith(("/output/", "/assets/")):
+        return canvas_asset_local_file_ready(text)
+    return True
+
 def canvas_asset_kind(value, url=""):
     explicit = ""
     if isinstance(value, dict):
@@ -3069,6 +3114,8 @@ def iter_canvas_asset_values(value, path=""):
         for key, child in value.items():
             if key in {"run", "runs", "settings", "params", "metadata", "meta", "prompt", "text", "caption", "logs"}:
                 continue
+            if not canvas_asset_should_scan_key(key):
+                continue
             yield from iter_canvas_asset_values(child, f"{path}.{key}" if path else str(key))
     elif isinstance(value, list):
         for index, child in enumerate(value):
@@ -3095,6 +3142,8 @@ def extract_canvas_assets(canvas):
         node_id = str(node.get("id") or f"node_{node_index}")
         node_title = canvas_node_title(node)
         for field_path, raw, url in iter_canvas_asset_values(node):
+            if not canvas_asset_record_is_usable(url):
+                continue
             dedupe_key = url
             if dedupe_key in seen:
                 continue
@@ -5770,10 +5819,12 @@ def image_reference_max_size(ref, default=1024) -> int:
     if isinstance(ref, dict):
         input_fidelity = str(ref.get("inputFidelity") or "").strip().lower()
         structure_lock = bool(ref.get("generatedEditBase") or ref.get("structureLock"))
+        poster_copy_lock = bool(ref.get("posterCopyReference") or ref.get("copyTextLock"))
     else:
         input_fidelity = str(getattr(ref, "inputFidelity", "") or "").strip().lower()
         structure_lock = bool(getattr(ref, "generatedEditBase", False) or getattr(ref, "structureLock", False))
-    if structure_lock or input_fidelity == "high":
+        poster_copy_lock = bool(getattr(ref, "posterCopyReference", False) or getattr(ref, "copyTextLock", False))
+    if structure_lock or poster_copy_lock or input_fidelity == "high":
         return 1536
     if role in {"product_truth_reference", "product_detail_reference", "mask"}:
         return 1536
@@ -12954,6 +13005,83 @@ def style_lighting_material_lock_prompt(analysis: Dict[str, Any]) -> str:
     )
     return f"{base}\n{evidence}" if evidence else base
 
+POSTER_COPY_CONTROL_BLOCK_RE = re.compile(
+    r"\n*Poster copy (?:enabled|disabled):.*?(?=\n\n(?:Reference summary|Shared style anchor|Lighting/material lock|Generation guidance|Variant plan|Negative constraints|Case-library support|Negative prompt|Original reference weight|HIGHEST PRIORITY CAMERA OVERRIDE|FINAL CAMERA CHECK|[A-Z][^\n]{0,80}:)|\Z)",
+    re.I | re.S,
+)
+
+def strip_poster_copy_control_blocks(text: str) -> str:
+    cleaned = POSTER_COPY_CONTROL_BLOCK_RE.sub("\n\n", str(text or ""))
+    return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+
+def style_poster_copy_control_prompt(enabled: bool) -> str:
+    if enabled:
+        return (
+            "Poster copy enabled: readable poster/ad copy in the primary reference is a locked visual element. "
+            "Reproduce the same wording, language, capitalization, line breaks, approximate placement, and hierarchy when visible and compatible with the revised scene. "
+            "Do not invent, translate, or add extra random text. This overrides stale no-readable-text clauses from older prompts."
+        )
+    return (
+        "Poster copy disabled: generate no readable headline, slogan, label, logo text, watermark, price tag, UI text, pseudo typography, or copied reference text unless the user explicitly typed exact text in the latest request."
+    )
+
+PRODUCT_SURFACE_GUARD_BLOCK_RE = re.compile(
+    r"\n*Product surface quality guard:.*?(?=\n\n(?:Reference summary|Shared style anchor|Lighting/material lock|Generation guidance|Variant plan|Negative constraints|Case-library support|Negative prompt|Poster copy|Original reference weight|HIGHEST PRIORITY CAMERA OVERRIDE|FINAL CAMERA CHECK|[A-Z][^\n]{0,80}:)|\Z)",
+    re.I | re.S,
+)
+
+PRODUCT_SURFACE_GUARD_TRIGGER_RE = re.compile(
+    r"\b(?:product|products|e-?commerce|commerce|packaging|package|appliance|device|equipment|gadget|cosmetic|skincare|bottle|box|carton|shoe|footwear|bag|furniture)\b"
+    r"|产品|商品|电商|主图|包装|盒装|瓶装|设备|器材|机器|机身|外壳|踏板|家电|美妆|护肤|鞋|箱包|器械|健身器材",
+    re.I,
+)
+
+PRODUCT_SURFACE_GUARD_INTENTIONAL_TEXTURE_RE = re.compile(
+    r"做旧|旧化|脏污|污渍|污垢|斑驳|斑点设计|锈蚀|铁锈|铜绿|氧化|破损|磨损|风化|故意脏|颗粒斑点"
+    r"|\b(?:dirty|stained|mottled|speckled|distressed|weathered|patina|rust|rusty|damaged|worn[-\s]+out|worn\s+(?:texture|surface|finish)|grunge|deliberately\s+dirty)\b",
+    re.I,
+)
+
+def strip_product_surface_guard_blocks(text: str) -> str:
+    cleaned = PRODUCT_SURFACE_GUARD_BLOCK_RE.sub("\n\n", str(text or ""))
+    return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+
+def style_product_surface_guard_haystack(analysis: Dict[str, Any], cases: List[Dict[str, Any]], positive: str) -> str:
+    parts = [
+        str(positive or ""),
+        compact_style_value(analysis.get("search_query"), 300),
+        compact_style_value(analysis.get("summary"), 500),
+        compact_style_value(analysis.get("reference_summary"), 900),
+        compact_style_value(analysis.get("shared_style_anchor"), 900),
+        compact_style_value(analysis.get("generation_guidance"), 700),
+    ]
+    for case in (cases or [])[:6]:
+        if not isinstance(case, dict):
+            continue
+        parts.extend([
+            str(case.get("title") or ""),
+            str(case.get("category") or ""),
+            " ".join(str(item) for item in (case.get("style_tags") or [])),
+            " ".join(str(item) for item in (case.get("scene_tags") or [])),
+            str(case.get("prompt") or "")[:900],
+        ])
+    return "\n".join(part for part in parts if part)
+
+def style_product_surface_guard_applies(analysis: Dict[str, Any], cases: List[Dict[str, Any]], positive: str) -> bool:
+    haystack = style_product_surface_guard_haystack(analysis, cases, positive)
+    if not PRODUCT_SURFACE_GUARD_TRIGGER_RE.search(haystack):
+        return False
+    return not PRODUCT_SURFACE_GUARD_INTENTIONAL_TEXTURE_RE.search(haystack)
+
+def style_product_surface_quality_guard_prompt() -> str:
+    return (
+        "Product surface quality guard:\n"
+        "For product, packaging, appliance, equipment, cosmetic, footwear, furniture, or e-commerce hero subjects, keep all visible product surfaces clean, color-stable, and material-consistent. "
+        "Do not add random discoloration, blotchy stains, dirty speckles, oil spots, AI-noise mottling, patchy plastic/rubber/paint, muddy gray cast, or unexplained highlight spots. "
+        "Black plastic or rubber should stay even, deep, and fine-textured; colored shells, painted panels, labels, and packaging should stay smooth, saturated, and uniform. "
+        "Preserve intentional design details and true reference textures such as anti-slip raised dots, holes, seams, printed labels, leather grain, fabric fibers, wood grain, stone grain, brushed metal, and any explicitly requested aged/weathered/distressed texture."
+    )
+
 def style_prompt_from_analysis(analysis: Dict[str, Any], cases: List[Dict[str, Any]]) -> str:
     positive = str(analysis.get("positive_prompt") or analysis.get("prompt") or "").strip()
     if not positive and cases:
@@ -12967,12 +13095,20 @@ def style_prompt_from_analysis(analysis: Dict[str, Any], cases: List[Dict[str, A
         or analysis.get("reference_lock_prompt")
         or ""
     ).strip()
-    prompt_parts = [
-        "Reference priority: the attached user reference image is the primary reference. Any matched case-library image or case prompt is secondary and may only supplement finish, texture, lighting polish, and commercial advertising quality. Do not let case matches replace the reference lighting, background tone, material finish, skin treatment, or product surface quality.",
-        style_reference_lock_prompt(analysis),
-        style_lighting_material_lock_prompt(analysis),
-    ]
-    if lock_prompt:
+    visual_override = bool(analysis.get("_latest_changes_background_palette"))
+    camera_control = str(analysis.get("_camera_control") or "").strip()
+    if visual_override:
+        prompt_parts = [
+            "Reference priority: the attached user reference remains the primary subject/product/style reference, while the latest user request has explicit control over the new background and color palette. Matched case-library material is secondary and may only improve commercial polish, texture, lighting quality, and finish.",
+            "LATEST BACKGROUND/PALETTE OVERRIDE: Do not preserve or restore the reference image's old background color, backdrop gradient, palette, wardrobe color coordination, or prop colors when they conflict with the latest user request. Keep only non-conflicting subject relationship, product truth, beauty-lighting quality, skin/material finish, and commercial polish.",
+        ]
+    else:
+        prompt_parts = [
+            "Reference priority: the attached user reference image is the primary reference. Any matched case-library image or case prompt is secondary and may only supplement finish, texture, lighting polish, and commercial advertising quality. Do not let case matches replace the reference lighting, background tone, material finish, skin treatment, or product surface quality.",
+            style_reference_lock_prompt(analysis),
+            style_lighting_material_lock_prompt(analysis),
+        ]
+    if lock_prompt and not camera_control:
         prompt_parts.append(f"Composition lock:\n{lock_prompt}")
     structured_sections = [
         style_analysis_section("Reference summary", analysis.get("reference_summary"), 700),
@@ -12988,6 +13124,12 @@ def style_prompt_from_analysis(analysis: Dict[str, Any], cases: List[Dict[str, A
         prompt_parts.append(case_section)
     prompt_parts.append(positive)
     positive = "\n\n".join(part for part in prompt_parts if part)
+    positive = strip_poster_copy_control_blocks(positive)
+    positive = strip_product_surface_guard_blocks(positive)
+    if style_product_surface_guard_applies(analysis, cases, positive):
+        positive = "\n\n".join(part for part in [positive, style_product_surface_quality_guard_prompt()] if part)
+    if "_poster_copy_enabled" in analysis:
+        positive = "\n\n".join(part for part in [positive, style_poster_copy_control_prompt(bool(analysis.get("_poster_copy_enabled")))] if part)
     negative = str(analysis.get("negative_prompt") or "").strip()
     if negative and "negative prompt" not in positive.lower():
         return f"{positive}\n\nNegative prompt:\n{negative}"
@@ -13007,19 +13149,48 @@ Schema:
 }
 Rules:
 - The latest user modification request is highest priority.
+- UI camera control is an immutable downstream control. If a camera-control block is supplied, preserve its focal length, horizontal view, camera height/elevation, perspective and crop family. Requests for different actions/poses must vary the model gesture or product interaction without changing the selected camera.
 - If the latest request asks for people, model, face, hands, holding, use scenario, or lifestyle usage, remove or override older product-only / no-human constraints from the revised positive prompt.
+- If the latest request changes the background or color palette, remove older background/palette locks and do not restore the reference image's old background color.
 - Preserve the reference image/product/person/composition structure unless the latest request explicitly changes it.
 - Keep exact product identity and material truth when product references are present.
+- For product/e-commerce subjects, keep product surfaces clean, color-stable, and material-consistent; avoid random discoloration, blotchy stains, dirty speckles, AI-noise mottling, patchy plastic/rubber/paint, or unexplained highlight spots unless the user explicitly requests aged, damaged, weathered, or distressed texture.
 - The case library is secondary: use it to improve commercial polish, lighting, texture, styling, and finish, not to replace the reference structure.
+- Poster copy switch is an immutable UI control. If Poster copy is enabled, preserve or restore readable poster/ad copy from the primary reference when compatible with the latest request. If Poster copy is disabled, remove copied readable text and forbid invented visible typography unless the latest request explicitly typed exact text.
 - The search_query must target the revised scene/style after the modification.
 """.strip()
 
-def merge_style_rematch_analysis(base: Dict[str, Any], revised: Dict[str, Any], current_prompt: str, user_request: str) -> Dict[str, Any]:
-    analysis = dict(base or {})
+STYLE_REMATCH_BACKGROUND_PALETTE_PATTERN = re.compile(
+    r"(?:背景|底色|配色|色调|颜色).{0,16}(?:改|换|变|调整|重新|不要|不再|去掉)"
+    r"|(?:改|换|变|调整|重新).{0,12}(?:背景|底色|配色|色调|颜色)"
+    r"|(?:background|backdrop|palette|color\s*scheme|colour\s*scheme).{0,24}(?:change|replace|switch|different|new)"
+    r"|(?:change|replace|switch).{0,24}(?:background|backdrop|palette|color\s*scheme|colour\s*scheme)",
+    re.I,
+)
+
+def style_rematch_changes_background_palette(user_request: str) -> bool:
+    return bool(STYLE_REMATCH_BACKGROUND_PALETTE_PATTERN.search(str(user_request or "")))
+
+def merge_style_rematch_analysis(
+    base: Dict[str, Any],
+    revised: Dict[str, Any],
+    current_prompt: str,
+    user_request: str,
+    camera_control: str = "",
+    poster_copy_enabled: bool = False,
+) -> Dict[str, Any]:
+    # A rematch is a full replacement pass. Do not silently re-append stale
+    # reference-summary, palette, lighting-lock or composition fields from the
+    # previous match after GPT has revised the prompt for the latest request.
+    analysis: Dict[str, Any] = {}
     for key in ("search_query", "summary", "positive_prompt", "negative_prompt", "generation_guidance", "variant_plan"):
         value = revised.get(key) if isinstance(revised, dict) else None
         if isinstance(value, str) and value.strip():
             analysis[key] = value.strip()
+    analysis["_rematched"] = True
+    analysis["_camera_control"] = str(camera_control or "").strip()
+    analysis["_latest_changes_background_palette"] = style_rematch_changes_background_palette(user_request)
+    analysis["_poster_copy_enabled"] = bool(poster_copy_enabled)
     if not str(analysis.get("positive_prompt") or "").strip():
         seed = str(current_prompt or "").strip() or str(analysis.get("summary") or "").strip()
         analysis["positive_prompt"] = "\n\n".join(part for part in [
@@ -13039,8 +13210,10 @@ async def rematch_style_prompt_with_llm(payload: StyleLibraryRematchPromptReques
     provider_cfg = get_api_provider(payload.provider) if payload.provider not in ("modelscope",) else {}
     is_apimart = is_apimart_provider(provider_cfg)
     analysis_text = json.dumps(base_analysis or {}, ensure_ascii=False)[:9000]
-    current_prompt = str(payload.current_prompt or "").strip()[:9000]
+    current_prompt = strip_poster_copy_control_blocks(str(payload.current_prompt or "").strip())[:9000]
     user_request = str(payload.user_request or "").strip()
+    camera_control = str(payload.camera_control or "").strip()[:6000]
+    poster_copy_state = "enabled" if bool(payload.poster_copy_enabled) else "disabled"
     message = "\n\n".join([
         "Existing reference style analysis JSON:",
         analysis_text or "{}",
@@ -13048,6 +13221,12 @@ async def rematch_style_prompt_with_llm(payload: StyleLibraryRematchPromptReques
         current_prompt or "(empty)",
         "Latest user modification request:",
         user_request,
+        "Immutable UI camera control (empty means disabled):",
+        camera_control or "(disabled)",
+        "When camera control is enabled, different actions/poses must keep this exact lens, horizontal view, camera elevation, perspective, and crop family.",
+        "Immutable UI Poster copy switch:",
+        poster_copy_state,
+        "If Poster copy is enabled, readable poster/ad copy in the primary reference is allowed and should be preserved when compatible. If disabled, visible readable text must be removed unless the latest user request explicitly typed exact text.",
         f"Reference similarity weight: {max(0, min(100, int(payload.reference_weight or 65)))}/100",
         "Revise the prompt and create a fresh search_query for re-matching the style/case library."
     ])
@@ -13072,7 +13251,7 @@ async def rematch_style_prompt_with_llm(payload: StyleLibraryRematchPromptReques
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"Style rematch model request failed: {exc}") from exc
     parsed = parse_style_json(text_from_chat_response(raw).strip())
-    return merge_style_rematch_analysis(base_analysis, parsed, current_prompt, user_request), model
+    return merge_style_rematch_analysis(base_analysis, parsed, current_prompt, user_request, camera_control, bool(payload.poster_copy_enabled)), model
 
 async def analyze_image_for_style(payload: StyleLibraryMatchImageRequest) -> Tuple[Dict[str, Any], str]:
     image_value = str(payload.image or "").strip()
@@ -13187,7 +13366,7 @@ async def check_canvas_assets(payload: CanvasAssetCheckRequest):
         if not text:
             continue
         if text.startswith("/output/") or text.startswith("/assets/"):
-            result[text] = bool(output_file_from_url(text))
+            result[text] = canvas_asset_record_is_usable(text)
         else:
             result[text] = True
     return {"exists": result}

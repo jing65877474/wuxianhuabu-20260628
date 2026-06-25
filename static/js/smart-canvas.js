@@ -13,6 +13,7 @@ const mentionPreview = document.getElementById('mentionPreview');
 const engineSelect = document.getElementById('engineSelect');
 const dynamicParams = document.getElementById('dynamicParams');
 const runBtn = document.getElementById('runBtn');
+const generatedPromptComposer = document.getElementById('generatedPromptComposer');
 const cascadeRunBtn = document.getElementById('cascadeRunBtn');
 const fileInput = document.getElementById('fileInput');
 const apiKindToggle = document.getElementById('apiKindToggle');
@@ -1741,6 +1742,16 @@ function promptNodeReferenceWeight(node){
     if(!Number.isFinite(raw)) return 65;
     return Math.max(0, Math.min(100, Math.round(raw)));
 }
+function generatedEditBaseReferenceWeight(node){
+    const raw = Number(node?.generatedEditBaseReferenceWeight ?? node?.referenceWeight ?? node?.styleMatch?.referenceWeight ?? 100);
+    if(!Number.isFinite(raw)) return 100;
+    return Math.max(0, Math.min(100, Math.round(raw)));
+}
+function generatedEditBaseSimilarityIntent(weight){
+    if(weight >= 85) return 'strict_edit_base_structure';
+    if(weight >= 60) return 'balanced_edit_base_structure';
+    return 'loose_edit_base_reference';
+}
 const PROMPT_CAMERA_FOCAL_MIN = 14;
 const PROMPT_CAMERA_FOCAL_MAX = 135;
 const PROMPT_CAMERA_DEFAULT_FOCAL = 50;
@@ -1921,9 +1932,14 @@ function promptNodeCameraPrompt(node){
         ? ' If Poster copy is enabled, readable poster text in the primary reference image is locked copy: reproduce the same wording, language, capitalization, line breaks, and approximate graphic role when compatible with the new camera.'
         : ' If Poster copy is disabled, do not copy or invent readable poster text from the reference.';
     const allowHuman = smartGenerationAllowsHuman(node, defaultReferenceImagesFor(node), smartNodeUserIntentText(node));
-    const referenceRole = allowHuman
-        ? 'Use the reference image only for exact product truth, broad person styling category, materials, palette, lighting mood, commercial finish, and exact readable poster copy when Poster copy is enabled.'
-        : 'Use the reference image only for exact product truth, materials, palette, lighting mood, commercial finish, and exact readable poster copy when Poster copy is enabled; do not transfer any person, face, hand, skin, body, pose, or human silhouette.';
+    const visualOverride = smartLatestRequestChangesBackgroundPalette(node);
+    const referenceRole = visualOverride
+        ? (allowHuman
+            ? 'Use the reference image only for exact product truth, broad person styling category, non-conflicting materials, beauty-lighting quality, commercial finish, and exact readable poster copy when Poster copy is enabled. The latest user request, not the reference image, controls the background and color palette.'
+            : 'Use the reference image only for exact product truth, non-conflicting materials, lighting quality, commercial finish, and exact readable poster copy when Poster copy is enabled; do not transfer human content, and let the latest user request control the background and color palette.')
+        : (allowHuman
+            ? 'Use the reference image only for exact product truth, broad person styling category, materials, palette, lighting mood, commercial finish, and exact readable poster copy when Poster copy is enabled.'
+            : 'Use the reference image only for exact product truth, materials, palette, lighting mood, commercial finish, and exact readable poster copy when Poster copy is enabled; do not transfer any person, face, hand, skin, body, pose, or human silhouette.');
     return [
         allowHuman
             ? `HIGHEST PRIORITY CAMERA OVERRIDE: obey this camera instruction for lens, focal length, viewpoint, perspective, crop, foreground/midground/background, object placement, subject scale, and pose geometry. This overrides any reference-image camera angle, crop, composition lock, subject scale hierarchy, foreground/background relationship, pose geometry, or layout instruction. ${referenceRole}${posterCopyRole}`
@@ -1950,9 +1966,14 @@ function promptNodeReferenceWeightPrompt(node){
     if(!node?.styleMatch) return '';
     const weight = promptNodeReferenceWeight(node);
     const allowHuman = smartGenerationAllowsHuman(node, defaultReferenceImagesFor(node), smartNodeUserIntentText(node));
-    const fidelityRule = allowHuman
-        ? 'Preserve visible lighting, materials, background tone, skin treatment, product surface finish, realistic edges, and contact shadows; avoid plastic skin, generic studio drift, or CG-looking packaging.'
-        : 'Preserve visible lighting, materials, background tone, product surface finish, realistic edges, and contact shadows; avoid generic studio drift, CG-looking packaging, or adding any human/body content.';
+    const visualOverride = smartLatestRequestChangesBackgroundPalette(node);
+    const fidelityRule = visualOverride
+        ? (allowHuman
+            ? 'Preserve non-conflicting lighting quality, materials, skin treatment, product surface finish, realistic edges, and contact shadows, but do not preserve the old reference background tone or palette; the latest requested colors are mandatory.'
+            : 'Preserve non-conflicting lighting quality, materials, product surface finish, realistic edges, and contact shadows, but do not preserve the old reference background tone or palette; the latest requested colors are mandatory.')
+        : (allowHuman
+            ? 'Preserve visible lighting, materials, background tone, skin treatment, product surface finish, realistic edges, and contact shadows; avoid plastic skin, generic studio drift, or CG-looking packaging.'
+            : 'Preserve visible lighting, materials, background tone, product surface finish, realistic edges, and contact shadows; avoid generic studio drift, CG-looking packaging, or adding any human/body content.');
     const productRule = 'Attached product-detail images are strict SKU identity references: preserve category, silhouette, proportions, structural parts, material, colors, label-block placement, finish, and scale; never substitute a generic same-category product.';
     const caseRule = 'Case-library references are secondary and may influence polish only, never product identity, pose, background, or layout.';
     const antiCloneRule = allowHuman
@@ -1962,7 +1983,10 @@ function promptNodeReferenceWeightPrompt(node){
         ? smartPersonSimilarityInstruction(weight)
         : 'Human/body content disabled: do not generate people, faces, hands, fingers, arms, skin, bodies, silhouettes, mannequins, or human poses unless the user explicitly asks for them.';
     if(promptNodeCameraEnabled(node)){
-        return `Original reference similarity: ${weight}/100. Camera control overrides the reference viewpoint, crop, lens, composition, scale hierarchy, pose, and layout. Keep only exact product identity, palette, lighting/material quality, and commercial finish. ${personRule} ${antiCloneRule} ${fidelityRule} ${productRule} ${caseRule}`;
+        const retainedStyle = visualOverride
+            ? 'Keep only exact product identity, non-conflicting lighting/material quality, and commercial finish. Do not inherit the old reference background or palette.'
+            : 'Keep only exact product identity, palette, lighting/material quality, and commercial finish.';
+        return `Original reference similarity: ${weight}/100. Camera control overrides the reference viewpoint, crop, lens, composition, scale hierarchy, pose, and layout. ${retainedStyle} ${personRule} ${antiCloneRule} ${fidelityRule} ${productRule} ${caseRule}`;
     }
     if(weight >= 85){
         return allowHuman
@@ -1986,7 +2010,7 @@ function promptNodeReferenceWeightPrompt(node){
 function promptNodePosterCopyPrompt(node){
     if(!node || node.type !== 'smart-prompt') return '';
     if(node.posterCopyEnabled){
-        return 'Poster copy enabled: reproduce readable text from the primary reference with the same wording, language, capitalization, line breaks, and hierarchy. Never invent or translate text; leave unreadable areas clean or non-readable.';
+        return 'Poster copy enabled: reproduce readable text from the uploaded primary poster/reference image with the same wording, language, capitalization, line breaks, approximate placement, typography hierarchy, and badge/headline role. Product-detail references control SKU appearance only; they must not remove, suppress, replace, translate, or invent poster text. Leave genuinely unreadable areas clean or non-readable.';
     }
     return 'Poster copy disabled: generate no readable headline, slogan, label, logo text, watermark, price tag, UI text, or pseudo typography unless the user explicitly supplied exact text.';
 }
@@ -2005,14 +2029,15 @@ function promptNodePromptItems(node){
     if(!text && !guidanceText) return [];
     const withPromptControls = items => {
         const additionalGuidancePrompt = promptNodeAdditionalGuidancePrompt(node);
+        const latestVisualOverridePrompt = promptNodeLatestVisualOverridePrompt(node);
         const weightPrompt = promptNodeReferenceWeightPrompt(node);
         const posterCopyPrompt = promptNodePosterCopyPrompt(node);
         const cameraPrompt = promptNodeCameraPrompt(node);
         if(cameraPrompt){
-            const trailingControls = [additionalGuidancePrompt, weightPrompt, posterCopyPrompt].filter(Boolean).join('\n');
+            const trailingControls = [additionalGuidancePrompt, latestVisualOverridePrompt, weightPrompt, posterCopyPrompt].filter(Boolean).join('\n');
             return items.map(item => smartRelaxPromptForCameraControl(`${cameraPrompt}\n\n${item}\n\n${trailingControls}`));
         }
-        const controls = [additionalGuidancePrompt, weightPrompt, posterCopyPrompt].filter(Boolean).join('\n');
+        const controls = [additionalGuidancePrompt, latestVisualOverridePrompt, weightPrompt, posterCopyPrompt].filter(Boolean).join('\n');
         return controls ? items.map(item => [item, controls].filter(Boolean).join('\n\n')) : items;
     };
     if(!text) return withPromptControls(['']);
@@ -7408,6 +7433,13 @@ function promptNodeBodyHtml(node){
         <div class="prompt-node-section-title">上游输入</div>
         <div class="prompt-node-upstream-list">${upstreamPromptItems.map((item, index) => `<div class="prompt-node-segment"><span>${index + 1}</span><p>${escapeHtml(item)}</p></div>`).join('')}</div>
     </div>` : '';
+    const showLlmSystemControls = !node.styleMatch;
+    const llmSystemToggleHtml = showLlmSystemControls
+        ? `<button class="prompt-node-pill prompt-node-control prompt-system-toggle ${node.llmSystemEnabled ? 'active' : ''}" type="button"><i data-lucide="${node.llmSystemEnabled ? 'toggle-right' : 'toggle-left'}"></i><span>${escapeHtml(node.llmSystemEnabled ? tr('smart.promptLlmDisableSystem') : tr('smart.promptLlmEnableSystem'))}</span></button>`
+        : '';
+    const llmSystemPromptHtml = showLlmSystemControls && node.llmSystemEnabled
+        ? `<textarea class="prompt-node-control prompt-llm-system" placeholder="${escapeHtml(tr('smart.promptLlmSystemPlaceholder'))}">${escapeHtml(systemPrompt || 'You are a helpful prompt assistant.')}</textarea>`
+        : '';
     const llmParams = node.llmEnabled ? `
         <div class="prompt-node-llm">
             <select class="prompt-node-control prompt-llm-provider">${chatProviderOptions(node.llmProvider)}</select>
@@ -7419,9 +7451,9 @@ function promptNodeBodyHtml(node){
             ${upstreamPromptHtml}
             <div class="prompt-node-llm-actions">
                 <button class="prompt-node-run prompt-node-control" type="button" ${node.running ? 'disabled' : ''}><i data-lucide="${node.running ? 'loader-2' : 'play'}"></i><span>${node.running ? escapeHtml(tr('common.running')) : escapeHtml(tr('common.run'))}</span></button>
-                <button class="prompt-node-pill prompt-node-control prompt-system-toggle ${node.llmSystemEnabled ? 'active' : ''}" type="button"><i data-lucide="${node.llmSystemEnabled ? 'toggle-right' : 'toggle-left'}"></i><span>${escapeHtml(node.llmSystemEnabled ? tr('smart.promptLlmDisableSystem') : tr('smart.promptLlmEnableSystem'))}</span></button>
+                ${llmSystemToggleHtml}
             </div>
-            ${node.llmSystemEnabled ? `<textarea class="prompt-node-control prompt-llm-system" placeholder="${escapeHtml(tr('smart.promptLlmSystemPlaceholder'))}">${escapeHtml(systemPrompt || 'You are a helpful prompt assistant.')}</textarea>` : ''}
+            ${llmSystemPromptHtml}
         </div>` : '';
     return `<div class="prompt-node-card">
         <textarea class="prompt-node-text prompt-node-control" placeholder="${escapeHtml(tr('smart.promptPlaceholderNode'))}">${escapeHtml(node.text || '')}</textarea>
@@ -11611,6 +11643,12 @@ function savePromptDraftForCurrent(){
     if(promptInput?.dataset?.promptLocked === '1') return;
     const subject = activeComposerNode();
     if(!subject) return;
+    if(composer?.classList?.contains('generated-prompt-mode') && isGeneratedImagePromptComposerNode(subject)){
+        subject.promptDraftText = String(subject.text || '');
+        subject.promptDraftHtml = escapeHtml(subject.promptDraftText);
+        subject.runSettings = cloneSmartSettings(settings);
+        return;
+    }
     if(promptInput?.dataset?.preserveDraftOnce === '1' && subject.promptDraftHtml){
         delete promptInput.dataset.preserveDraftOnce;
         return;
@@ -11644,11 +11682,198 @@ function loadPromptDraft(subject){
         setPromptText('');
     }
 }
+function generatedImagePromptComposerHtml(node){
+    ensureGeneratedImagePromptComposerState(node);
+    node.llmEnabled = node.llmEnabled !== false;
+    node.llmSystemEnabled = node.llmSystemEnabled === true;
+    node.promptSplitEnabled = node.promptSplitEnabled === true;
+    node.cameraEnabled = node.cameraEnabled === true;
+    node.promptSeparator = promptNodeSeparator(node);
+    const refs = generatedImagePromptReferences(node);
+    const promptItems = promptNodePromptItems(node);
+    const systemPrompt = String(node.llmSystemPrompt || '').trim();
+    const cameraControlHtml = promptNodeCameraControlHtml(node);
+    const refThumbs = smartNodeInputThumbsHtml(refs, {labelPrefix:'图'});
+    const running = node.promptRematching === true;
+    const editBaseWeight = generatedEditBaseReferenceWeight(node);
+    const showGeneratedLlmSystemControls = false;
+    const generatedLlmSystemToggleHtml = showGeneratedLlmSystemControls
+        ? `<button class="prompt-node-pill prompt-node-control prompt-system-toggle ${node.llmSystemEnabled ? 'active' : ''}" type="button"><i data-lucide="${node.llmSystemEnabled ? 'toggle-right' : 'toggle-left'}"></i><span>${node.llmSystemEnabled ? '关闭系统提示词' : '启用系统提示词'}</span></button>`
+        : '';
+    const generatedLlmSystemPromptHtml = showGeneratedLlmSystemControls && node.llmSystemEnabled
+        ? `<textarea class="prompt-node-control prompt-llm-system" placeholder="系统提示词">${escapeHtml(systemPrompt || 'You revise image-edit prompts while preserving the current generated image according to the current reference weight.')}</textarea>`
+        : '';
+    const llmPanel = node.llmEnabled ? `
+        <div class="prompt-node-llm generated-image-llm">
+            <select class="prompt-node-control prompt-llm-provider">${chatProviderOptions(node.llmProvider)}</select>
+            <select class="prompt-node-control prompt-llm-model">${chatModelOptions(node.llmModel, node.llmProvider)}</select>
+            <div class="prompt-llm-instruction-wrap">
+                <textarea class="prompt-node-control prompt-llm-instruction" placeholder="输入这次要修改的需求，运行后会用 GPT-5.5 替换上方提示词">${escapeHtml(node.llmInstruction || '')}</textarea>
+            </div>
+            <div class="prompt-node-llm-actions">
+                <button class="prompt-node-run prompt-node-control generated-image-rematch-run" type="button" ${running ? 'disabled' : ''}><i data-lucide="${running ? 'loader-2' : 'play'}"></i><span>${running ? '匹配中' : '运行'}</span></button>
+                ${generatedLlmSystemToggleHtml}
+                <span class="generated-rematch-note">只更新提示词，不自动生图</span>
+            </div>
+            ${generatedLlmSystemPromptHtml}
+        </div>` : '';
+    return `
+        <div class="prompt-node-card generated-image-prompt-card">
+            <div class="generated-edit-base-banner"><i data-lucide="scan"></i><span>当前生成图 = 编辑基准；默认 100%，可手动调整参考权重；运行只用 GPT-5.5 重匹配并替换提示词</span></div>
+            <textarea class="prompt-node-text generated-image-prompt-text" placeholder="当前图片的可编辑提示词">${escapeHtml(node.text || '')}</textarea>
+            <div class="prompt-node-tools">
+                <button class="prompt-node-pill prompt-node-control prompt-preset-edit" type="button"><i data-lucide="library"></i><span>模板库</span></button>
+                <button class="prompt-node-pill prompt-node-control prompt-split-toggle ${node.promptSplitEnabled ? 'active' : ''}" type="button"><i data-lucide="split"></i><span>分隔符</span></button>
+                <button class="prompt-node-pill prompt-node-control prompt-poster-copy-toggle ${node.posterCopyEnabled ? 'active' : ''}" type="button"><i data-lucide="type"></i><span>海报文案</span></button>
+                <button class="prompt-node-pill prompt-node-control prompt-camera-toggle ${node.cameraEnabled ? 'active' : ''}" type="button"><i data-lucide="camera"></i><span>相机</span></button>
+                <button class="prompt-node-pill prompt-node-control prompt-llm-toggle ${node.llmEnabled ? 'active' : ''}" type="button"><i data-lucide="sparkles"></i><span>LLM</span></button>
+            </div>
+            <label class="prompt-style-weight prompt-node-control generated-edit-base-weight" title="默认 100%，可手动调整当前生成图作为后续参考的结构权重">
+                <span><i data-lucide="sliders-horizontal"></i>当前生成图结构权重</span>
+                <input class="generated-edit-base-weight-range" type="range" min="0" max="100" step="5" value="${editBaseWeight}">
+                <strong class="generated-edit-base-weight-value">${editBaseWeight}%</strong>
+            </label>
+            ${cameraControlHtml}
+            ${node.promptSplitEnabled ? `
+                <div class="prompt-node-split-row">
+                    <label class="prompt-node-split-control prompt-node-control"><span>分隔符</span><input class="prompt-node-separator" type="text" value="${escapeHtml(node.promptSeparator)}" maxlength="8"></label>
+                    <span class="prompt-node-split-count">${promptItems.length || 0} 段</span>
+                </div>
+                <div class="prompt-node-segments generated-image-prompt-segments">${promptItems.map((item, index) => `<div class="prompt-node-segment"><span>${index + 1}</span><p>${escapeHtml(item)}</p></div>`).join('')}</div>
+            ` : ''}
+            ${refThumbs}
+            ${llmPanel}
+        </div>`;
+}
+function renderGeneratedImagePromptComposer(node){
+    if(!generatedPromptComposer) return;
+    if(!isGeneratedImagePromptComposerNode(node)){
+        generatedPromptComposer.innerHTML = '';
+        return;
+    }
+    generatedPromptComposer.innerHTML = generatedImagePromptComposerHtml(node);
+    const panel = generatedPromptComposer;
+    panel.querySelectorAll('.prompt-node-control, .prompt-node-pill').forEach(control => {
+        control.addEventListener('mousedown', event => event.stopPropagation());
+        control.addEventListener('click', event => event.stopPropagation());
+        control.addEventListener('dblclick', event => event.stopPropagation());
+    });
+    const textEl = panel.querySelector('.generated-image-prompt-text');
+    if(textEl){
+        bindScrollableText(textEl);
+        textEl.oninput = event => {
+            node.text = event.target.value;
+            node.promptDraftText = node.text;
+            node.promptDraftHtml = escapeHtml(node.text);
+            scheduleSave();
+        };
+    }
+    const presetEdit = panel.querySelector('.prompt-preset-edit');
+    if(presetEdit) presetEdit.onclick = event => {
+        event.preventDefault();
+        editPromptPresetForNode(node);
+    };
+    const splitToggle = panel.querySelector('.prompt-split-toggle');
+    if(splitToggle) splitToggle.onclick = event => {
+        event.preventDefault();
+        node.promptSplitEnabled = node.promptSplitEnabled !== true;
+        renderGeneratedImagePromptComposer(node);
+        scheduleSave();
+    };
+    const separatorEl = panel.querySelector('.prompt-node-separator');
+    if(separatorEl) separatorEl.oninput = event => {
+        node.promptSeparator = event.target.value || ';';
+        renderGeneratedImagePromptComposer(node);
+        scheduleSave();
+    };
+    const posterToggle = panel.querySelector('.prompt-poster-copy-toggle');
+    if(posterToggle) posterToggle.onclick = event => {
+        event.preventDefault();
+        node.posterCopyEnabled = !node.posterCopyEnabled;
+        renderGeneratedImagePromptComposer(node);
+        scheduleSave();
+    };
+    const cameraToggle = panel.querySelector('.prompt-camera-toggle');
+    if(cameraToggle) cameraToggle.onclick = event => {
+        event.preventDefault();
+        node.cameraEnabled = node.cameraEnabled !== true;
+        if(node.cameraEnabled) ensurePromptNodeCameraDefaults(node);
+        renderGeneratedImagePromptComposer(node);
+        scheduleSave();
+    };
+    const cameraFocal = panel.querySelector('.prompt-camera-focal');
+    if(cameraFocal) cameraFocal.oninput = event => {
+        node.cameraFocalLength = promptNodeCameraFocalLength({cameraFocalLength:event.target.value});
+        refreshPromptCameraControlUi(panel, node);
+        scheduleSave();
+    };
+    bindPromptCameraRig(panel, node);
+    const editBaseWeightEl = panel.querySelector('.generated-edit-base-weight-range');
+    if(editBaseWeightEl) editBaseWeightEl.oninput = event => {
+        const value = Math.max(0, Math.min(100, Math.round(Number(event.target.value) || 0)));
+        node.referenceWeight = value;
+        node.generatedEditBaseReferenceWeight = value;
+        node.styleMatch = {...(node.styleMatch || {}), referenceWeight:value};
+        node.imageEditRefs = generatedImagePromptReferences(node);
+        const valueEl = panel.querySelector('.generated-edit-base-weight-value');
+        if(valueEl) valueEl.textContent = `${value}%`;
+        scheduleSave();
+    };
+    const llmToggle = panel.querySelector('.prompt-llm-toggle');
+    if(llmToggle) llmToggle.onclick = event => {
+        event.preventDefault();
+        node.llmEnabled = node.llmEnabled === false;
+        renderGeneratedImagePromptComposer(node);
+        scheduleSave();
+    };
+    const providerEl = panel.querySelector('.prompt-llm-provider');
+    if(providerEl) providerEl.onchange = event => {
+        node.llmProvider = resolveChatProviderId(event.target.value);
+        node.llmModel = preferredPromptRematchModel(node.llmProvider);
+        renderGeneratedImagePromptComposer(node);
+        scheduleSave();
+    };
+    const modelEl = panel.querySelector('.prompt-llm-model');
+    if(modelEl) modelEl.onchange = event => {
+        node.llmModel = event.target.value;
+        scheduleSave();
+    };
+    const instructionEl = panel.querySelector('.prompt-llm-instruction');
+    if(instructionEl){
+        bindScrollableText(instructionEl);
+        instructionEl.oninput = event => {
+            node.llmInstruction = event.target.value;
+            scheduleSave();
+        };
+    }
+    const systemToggle = panel.querySelector('.prompt-system-toggle');
+    if(systemToggle) systemToggle.onclick = event => {
+        event.preventDefault();
+        node.llmSystemEnabled = !node.llmSystemEnabled;
+        renderGeneratedImagePromptComposer(node);
+        scheduleSave();
+    };
+    const systemEl = panel.querySelector('.prompt-llm-system');
+    if(systemEl){
+        bindScrollableText(systemEl);
+        systemEl.oninput = event => {
+            node.llmSystemPrompt = event.target.value;
+            scheduleSave();
+        };
+    }
+    const runEl = panel.querySelector('.generated-image-rematch-run');
+    if(runEl) runEl.onclick = event => {
+        event.preventDefault();
+        runGeneratedImagePromptRematch(node.id);
+    };
+    bindSmartPreviewImageFallbacks(panel);
+    refreshIcons();
+}
 function positionComposerForNode(node){
     if(!node) return;
     const rect = nodeRect(node);
     const gap = 14;
-    const cardW = 540;
+    const cardW = isGeneratedImagePromptComposerNode(node) ? 390 : 540;
     composer.style.width = `${cardW}px`;
     composer.style.left = `${rect.x + rect.width / 2 - cardW / 2}px`;
     composer.style.top = `${rect.y + rect.height + gap}px`;
@@ -11658,6 +11883,7 @@ function updateComposer(){
     syncRunButtonState(node);
     if(smartCascadeSilentSelection && !activeComposerSubject){
         composer.classList.remove('open');
+        composer.classList.remove('generated-prompt-mode');
         if(cascadeRunBtn) cascadeRunBtn.style.display = 'none';
         activeComposerSubject = null;
         lastComposerNodeId = '';
@@ -11668,12 +11894,29 @@ function updateComposer(){
         if(cascadeRunBtn) cascadeRunBtn.style.display = 'none';
         savePromptDraftForCurrent();
         composer.classList.remove('open');
+        composer.classList.remove('generated-prompt-mode');
+        if(generatedPromptComposer) generatedPromptComposer.innerHTML = '';
         activeComposerSubject = null;
         lastComposerNodeId = '';
         setPromptInputLocked(false);
         if(!node) setPromptText('');
         return;
     }
+    const generatedPromptMode = isGeneratedImagePromptComposerNode(node);
+    composer.classList.toggle('generated-prompt-mode', generatedPromptMode);
+    if(generatedPromptMode){
+        const subject = ensureGeneratedImagePromptComposerState(node);
+        const composerKey = `${node.id}:generated-prompt`;
+        if(lastComposerNodeId !== composerKey) savePromptDraftForCurrent();
+        lastComposerNodeId = composerKey;
+        activeComposerSubject = subject;
+        setPromptInputLocked(false);
+        if(cascadeRunBtn) cascadeRunBtn.style.display = 'none';
+        positionComposerForNode(node);
+        renderGeneratedImagePromptComposer(node);
+        return;
+    }
+    if(generatedPromptComposer) generatedPromptComposer.innerHTML = '';
     // composer 只绑定节点本身：图片只是素材/结果，不携带提示词或参数状态。
     const subject = node;
     const composerKey = `${node.id}:node`;
@@ -12772,6 +13015,9 @@ function outputImagesForNode(node, consume=false, ctx=smartLoopContext){
     if(node?.type === 'smart-group') return imagesForNode(node).filter(img => img?.url);
     if(node?.type === 'smart-loop') return smartLoopInputImages(node, ctx);
     if(node?.type === 'smart-prompt') return smartPromptPassthroughImages(node, consume, ctx);
+    if(isGeneratedImagePromptComposerNode(node) && node?.generatedPromptInitialized){
+        return generatedImagePromptReferences(node).filter(img => img?.url);
+    }
     const roundOutputs = ctx?.roundOutputs;
     if(node?.id && roundOutputs && typeof roundOutputs.get === 'function' && roundOutputs.has(node.id)){
         return (roundOutputs.get(node.id) || []).filter(img => img?.url);
@@ -12784,12 +13030,18 @@ function selfReferenceImagesForNode(node, consume=false, ctx=smartLoopContext){
 function textForNode(node, ctx=smartLoopContext){
     if(!node) return '';
     if(node.type === 'smart-prompt') return promptNodePromptItems(node).join('\n\n');
+    if(isGeneratedImagePromptComposerNode(node) && node?.generatedPromptInitialized) return promptNodePromptItems(node).join('\n\n');
     if(node.type === 'smart-loop') return smartLoopPrompt(node, ctx);
     if(node.type === 'smart-group') return smartGroupMembers(node).map(member => textForNode(member, ctx)).filter(Boolean).join('\n\n');
     return '';
 }
 function promptInputNodesFor(node){
-    return inputNodesFor(node).filter(input => input?.type === 'smart-prompt' || input?.type === 'smart-loop' || input?.type === 'smart-group');
+    return inputNodesFor(node).filter(input =>
+        input?.type === 'smart-prompt'
+        || input?.type === 'smart-loop'
+        || input?.type === 'smart-group'
+        || (isGeneratedImagePromptComposerNode(input) && input?.generatedPromptInitialized)
+    );
 }
 function smartPromptNodeIsProductTruthOnly(node){
     if(!node || node.type !== 'smart-prompt' || !smartNodeRequestsProductTruth(node)) return false;
@@ -13140,6 +13392,20 @@ function smartLatestUserRequestText(node, prompt='', seen=new Set()){
     });
     return parts.filter(Boolean).join('\n\n');
 }
+function smartLatestRequestChangesBackgroundPalette(node, prompt=''){
+    const text = smartLatestUserRequestText(node, prompt);
+    if(!text) return false;
+    return /(?:背景|底色|配色|色调|颜色).{0,16}(?:改|换|变|调整|重新|不要|不再|去掉)|(?:改|换|变|调整|重新).{0,12}(?:背景|底色|配色|色调|颜色)|(?:background|backdrop|palette|colou?r\s*scheme).{0,24}(?:change|replace|switch|different|new)|(?:change|replace|switch).{0,24}(?:background|backdrop|palette|colou?r\s*scheme)/i.test(text);
+}
+function promptNodeLatestVisualOverridePrompt(node){
+    if(!smartLatestRequestChangesBackgroundPalette(node)) return '';
+    return [
+        'LATEST BACKGROUND/PALETTE OVERRIDE:',
+        'The latest user request explicitly changes the background and/or color palette.',
+        'Do not preserve, restore, or visually inherit the reference image’s old background color, backdrop gradient, palette, wardrobe color coordination, or prop colors when they conflict with the latest request.',
+        'Use the reference only for non-conflicting subject relationship, product-use logic, beauty-lighting quality, skin/material finish, and commercial polish. The newly requested background and palette are mandatory.'
+    ].join(' ');
+}
 function smartNodeUserIntentText(node, seen=new Set()){
     if(!node?.id || seen.has(node.id)) return '';
     seen.add(node.id);
@@ -13225,6 +13491,7 @@ function smartStyleReferenceShouldUpload(node, ref, weight){
     if(smartReferenceRoleIsCase(ref)) return false;
     const role = ref?.role || '';
     if(!['composition_reference','primary_style_reference','primary_reference'].includes(role)) return true;
+    if(node?.posterCopyEnabled === true) return true;
     const value = Math.max(0, Math.min(100, Math.round(Number(weight) || 0)));
     if(smartReferenceLikelyContainsPerson(node, ref)){
         return value >= 85;
@@ -13287,6 +13554,7 @@ function smartReferenceRoleWeight(ref){
 }
 function smartDecorateReferenceWeights(node, refs=[]){
     const styleWeight = promptNodeReferenceWeight(node);
+    const latestChangesBackgroundPalette = smartLatestRequestChangesBackgroundPalette(node);
     return (refs || []).map(ref => {
         if(!ref?.url) return ref;
         const role = ref.role || '';
@@ -13300,25 +13568,37 @@ function smartDecorateReferenceWeights(node, refs=[]){
         }
         if(role === 'composition_reference' || role === 'primary_style_reference' || role === 'primary_reference'){
             if(ref?.generatedEditBase || ref?.structureLock){
+                const editBaseWeight = smartReferenceRoleWeight(ref);
+                const strictEditBase = editBaseWeight >= 85;
                 return {
                     ...ref,
-                    referenceWeight:100,
-                    similarityIntent:'strict_edit_base_structure',
+                    referenceWeight:editBaseWeight,
+                    similarityIntent:generatedEditBaseSimilarityIntent(editBaseWeight),
                     inputFidelity:'high',
                     uploadReference:true,
                     textOnlyReference:false,
-                    referenceLock:true,
-                    structureLock:true
+                    referenceLock:strictEditBase,
+                    structureLock:strictEditBase
                 };
             }
-            const upload = smartStyleReferenceShouldUpload(node, ref, styleWeight);
+            const posterCopyLock = node?.posterCopyEnabled === true;
+            const upload = latestChangesBackgroundPalette
+                && styleWeight < 85
+                && !ref?.styleLock
+                && !ref?.referenceLock
+                && !posterCopyLock
+                ? false
+                : smartStyleReferenceShouldUpload(node, ref, styleWeight);
             return {
                 ...ref,
                 referenceWeight:styleWeight,
                 similarityIntent:styleWeight >= 85 ? 'strong_style_not_clone' : styleWeight >= 60 ? 'balanced_style' : 'loose_style',
-                inputFidelity:'low',
+                inputFidelity:posterCopyLock ? 'high' : 'low',
                 uploadReference:upload,
-                textOnlyReference:!upload
+                textOnlyReference:!upload,
+                latestVisualOverride:latestChangesBackgroundPalette,
+                posterCopyReference:posterCopyLock,
+                copyTextLock:posterCopyLock
             };
         }
         if(role === 'case_style_reference'){
@@ -13455,7 +13735,17 @@ function smartReferenceSimilarityRolePrompt(refs=[], allowHuman=false){
     const styleWeight = styleRefs.length ? Math.max(...styleRefs.map(ref => smartReferenceRoleWeight(ref))) : 0;
     const parts = [];
     if(editBaseRefs.length){
-        parts.push('Edit-base structure reference strength: 100/100. Treat the generated source image as the locked edit canvas for composition, crop family, subject scale, pose geometry, product placement, lighting direction, background color world, and negative-space rhythm; vary only what the latest user request asks to change.');
+        const editBaseWeight = Math.max(...editBaseRefs.map(ref => smartReferenceRoleWeight(ref)));
+        const editBaseMode = editBaseWeight >= 85
+            ? 'strict edit-base structure lock'
+            : editBaseWeight >= 60
+                ? 'balanced edit-base guidance'
+                : 'loose edit-base inspiration';
+        parts.push(`Edit-base reference strength: ${editBaseWeight}/100 (${editBaseMode}). ${editBaseWeight >= 85
+            ? 'Treat the generated source image as the locked edit canvas for composition, crop family, subject scale, pose geometry, product placement, lighting direction, background color world, and negative-space rhythm; vary only what the latest user request asks to change.'
+            : editBaseWeight >= 60
+                ? 'Use the generated source image as the primary reference for the broad composition family, subject/product relationship, lighting direction, and commercial finish, while allowing the latest user request to change pose, crop, background, placement, or styling more freely.'
+                : 'Use the generated source image as a loose visual starting point only; prioritize the latest user request and keep only non-conflicting product identity, broad mood, and useful material/lighting cues.'}`);
     }
     if(styleRefs.length){
         const mode = styleWeight >= 85
@@ -13482,6 +13772,23 @@ function smartEditBaseStructureLockPrompt(refs=[], userPrompt=''){
     if(!bases.length) return '';
     const labels = bases.map((ref, index) => `${smartReferenceDisplayLabel(index)} (${ref.name || 'generated edit base'})`).join(', ');
     const request = String(userPrompt || '').trim();
+    const weight = Math.max(...bases.map(ref => smartReferenceRoleWeight(ref)));
+    if(weight < 60){
+        return [
+            'LOOSE EDIT-BASE REFERENCE:',
+            `Use ${labels} as a loose visual starting point, not as a locked canvas.`,
+            'Prioritize the latest user modification request. Keep only non-conflicting product identity, broad commercial mood, useful lighting/material cues, and any elements the user explicitly asks to preserve.',
+            request ? `Latest edit request: ${request}` : ''
+        ].filter(Boolean).join('\n');
+    }
+    if(weight < 85){
+        return [
+            'BALANCED EDIT-BASE REFERENCE:',
+            `Use ${labels} as the primary source reference for broad structure, but not as a pixel-locked canvas.`,
+            'Preserve the general subject/product relationship, commercial finish, and non-conflicting lighting/material cues, while allowing the latest user request to change pose, crop, camera distance, background layout, placement, or styling.',
+            request ? `Latest edit request: ${request}` : ''
+        ].filter(Boolean).join('\n');
+    }
     return [
         'STRICT EDIT-BASE STRUCTURE LOCK:',
         `Use ${labels} as the actual source canvas for this edit, not just as loose inspiration.`,
@@ -13508,7 +13815,9 @@ function smartUploadedReferenceMapPrompt(refs=[], allowHuman=false){
     const lines = uploaded.map((ref, index) => {
         const role = ref?.role || 'reference';
         const label = ref?.generatedEditBase || ref?.structureLock
-            ? 'STRICT EDIT-BASE structure reference'
+            ? (smartReferenceRoleWeight(ref) >= 85 ? 'STRICT EDIT-BASE structure reference' : 'WEIGHTED EDIT-BASE reference')
+            : ref?.posterCopyReference || ref?.copyTextLock
+            ? 'PRIMARY POSTER COPY reference'
             : role === 'product_truth_reference' || role === 'product_detail_reference'
             ? 'STRICT PRODUCT SKU reference'
             : role === 'composition_reference' || role === 'primary_style_reference' || role === 'primary_reference'
@@ -13523,6 +13832,19 @@ function smartUploadedReferenceMapPrompt(refs=[], allowHuman=false){
             ? 'Only uploaded images in this map should be treated as visual inputs. Any earlier dropped/text-only style image is prompt guidance only and must not define the same person face.'
             : 'Only uploaded images in this map should be treated as visual inputs. Any earlier dropped/text-only style image is prompt guidance only and must not introduce a person, face, hand, body, or human pose.'
     ].join('\n');
+}
+function smartPosterCopyLockPrompt(node, refs=[]){
+    if(node?.posterCopyEnabled !== true) return '';
+    const uploaded = imageRefsOnly(refs).filter(ref => (ref?.posterCopyReference || ref?.copyTextLock) && smartReferenceUploadAllowed(ref));
+    if(!uploaded.length) return '';
+    const labels = uploaded.map((ref, index) => `${smartReferenceDisplayLabel(index)} (${ref.name || 'primary poster reference'})`).join(', ');
+    return [
+        'POSTER COPY LOCK:',
+        `Use ${labels} as the authoritative source for readable poster/ad copy.`,
+        'Reproduce visible headline, slogan, badge copy, language, capitalization, line breaks, approximate placement, and typography hierarchy from the primary poster reference when compatible with the latest request.',
+        'Product-detail references control only SKU/product appearance and must not suppress, remove, replace, translate, or invent the poster copy.',
+        'If exact tiny text is unreadable, preserve the same text-block location and hierarchy with clean non-random marks; do not hallucinate new marketing words.'
+    ].join(' ');
 }
 function smartProductHandInteractionPrompt(refs=[], allowHuman=false){
     const hasProduct = imageRefsOnly(refs).some(ref => ref?.role === 'product_truth_reference' || ref?.role === 'product_detail_reference');
@@ -14082,7 +14404,9 @@ function smartReferenceRequestPayload(img, index){
         uploadReference:img.uploadReference !== false,
         generatedEditBase:Boolean(img.generatedEditBase),
         structureLock:Boolean(img.structureLock),
-        productTruthExplicit:Boolean(img.productTruthExplicit)
+        productTruthExplicit:Boolean(img.productTruthExplicit),
+        posterCopyReference:Boolean(img.posterCopyReference),
+        copyTextLock:Boolean(img.copyTextLock)
     };
 }
 function buildPromptRequest(node, overrideDefaultImages=null, consumeDefault=false, ctx=smartLoopContext){
@@ -14158,18 +14482,23 @@ buildPromptRequest = function(node, overrideDefaultImages=null, consumeDefault=f
     const replacementPrompt = smartProductReplacementRolePrompt(refs, allowHuman);
     const replacementMode = Boolean(replacementPrompt);
     const productOnlyReplacementMode = replacementMode && !allowHuman;
-    const cleanRequestPrompt = productOnlyReplacementMode
+    const rawCleanRequestPrompt = productOnlyReplacementMode
         ? smartSanitizeProductReplacementPrompt(request.prompt || '')
         : (request.prompt || '');
+    const cleanRequestPrompt = smartLatestRequestChangesBackgroundPalette(node, rawCleanRequestPrompt)
+        ? smartStripStaleBackgroundPaletteLocks(rawCleanRequestPrompt)
+        : rawCleanRequestPrompt;
     const similarityPrompt = smartReferenceSimilarityRolePrompt(refs, allowHuman);
     const personOverridePrompt = smartPersonIdentityOverridePrompt(refs, allowHuman);
     const uploadedMapPrompt = smartUploadedReferenceMapPrompt(refs, allowHuman);
+    const posterCopyLockPrompt = smartPosterCopyLockPrompt(node, refs);
     const handInteractionPrompt = smartProductHandInteractionPrompt(refs, allowHuman);
     const mechanicalStructurePrompt = allowHuman ? '' : smartMechanicalStructurePrompt(node, refs, cleanRequestPrompt || request.displayPrompt || '');
     const styleBridgePrompt = productOnlyReplacementMode ? smartProductReplacementStyleBridgePrompt(false) : '';
     const roleParts = [
         noHumanPrompt,
         uploadedMapPrompt,
+        posterCopyLockPrompt,
         editBasePrompt,
         replacementPrompt,
         styleBridgePrompt,
@@ -14524,8 +14853,11 @@ function stylePromptOutputNodeForRun(promptNode, targetNode){
     return targetNode;
 }
 function primaryGeneratedImageRefForNode(node){
-    const img = nonPreviewOutputImages(node?.images || [])[0];
+    const outputs = nonPreviewOutputImages(node?.images || []);
+    const img = outputs.find(item => item?.generatedResult) || outputs[0];
     if(!img?.url) return null;
+    const weight = generatedEditBaseReferenceWeight(node);
+    const strictEditBase = weight >= 85;
     return {
         ...img,
         url:smartOriginalMediaUrl(img),
@@ -14535,43 +14867,119 @@ function primaryGeneratedImageRefForNode(node){
         sourceNodeId:node.id,
         sourceImageIndex:0,
         generatedEditBase:true,
-        structureLock:true,
-        referenceLock:true,
-        referenceWeight:100,
-        similarityIntent:'strict_edit_base_structure',
+        structureLock:strictEditBase,
+        referenceLock:strictEditBase,
+        referenceWeight:weight,
+        similarityIntent:generatedEditBaseSimilarityIntent(weight),
         inputFidelity:'high',
         uploadReference:true,
         textOnlyReference:false
     };
 }
+function isGeneratedImagePromptComposerNode(node){
+    if(!isSmartImageNode(node) || isHistoryGroupNode(node) || !smartNodeHasDisplayResult(node)) return false;
+    const outputs = nonPreviewOutputImages(node?.images || []);
+    return outputs.some(img => img?.generatedResult) || Boolean(node?.runPrompt || node?.runModelPrompt || node?.generatedPromptInitialized);
+}
+function generatedImageProductRefs(node){
+    const editBaseUrl = smartReferenceUrlKey(primaryGeneratedImageRefForNode(node)?.url || '');
+    const stored = imageRefsOnly(node?.imageEditRefs || []).filter(ref => smartReferenceUrlKey(ref.url) !== editBaseUrl);
+    if(stored.length) return stored.map(ref => ({
+        ...ref,
+        role:'product_detail_reference',
+        productTruthExplicit:true,
+        referenceWeight:100,
+        inputFidelity:'high',
+        uploadReference:true,
+        textOnlyReference:false
+    }));
+    const runRefs = imageRefsOnly(node?.runInputRefs || []);
+    const candidates = runRefs.length > 1 ? runRefs.slice(1) : [];
+    return candidates.map((ref, index) => ({
+        ...ref,
+        name:ref.name || `Product reference ${index + 1}`,
+        role:'product_detail_reference',
+        productTruthExplicit:true,
+        referenceWeight:100,
+        inputFidelity:'high',
+        uploadReference:true,
+        textOnlyReference:false
+    }));
+}
+function generatedImagePromptReferences(node){
+    const editBase = primaryGeneratedImageRefForNode(node);
+    return uniqueReferenceImages([
+        editBase,
+        ...generatedImageProductRefs(node)
+    ].filter(Boolean)).slice(0, SMART_REFERENCE_IMAGE_MAX);
+}
+function ensureGeneratedImagePromptComposerState(node){
+    if(!isGeneratedImagePromptComposerNode(node)) return node;
+    const editBase = primaryGeneratedImageRefForNode(node);
+    const initialWeight = generatedEditBaseReferenceWeight(node);
+    if(node.generatedPromptInitialized !== true){
+        const initialPrompt = String(node.text || node.runModelPrompt || node.runPrompt || node.promptDraftText || '').trim();
+        node.text = initialPrompt;
+        node.promptDraftText = initialPrompt;
+        node.promptDraftHtml = escapeHtml(initialPrompt);
+        node.llmEnabled = true;
+        node.llmProvider = resolveChatProviderId(node.llmProvider || '');
+        node.llmModel = preferredPromptRematchModel(node.llmProvider);
+        node.referenceWeight = initialWeight;
+        node.generatedEditBaseReferenceWeight = initialWeight;
+        node.styleMatch = {
+            ...(node.styleMatch || {}),
+            image:editBase?.url || node.styleMatch?.image || '',
+            referenceWeight:initialWeight,
+            analysis:node.styleMatch?.analysis || {},
+            cases:Array.isArray(node.styleMatch?.cases) ? node.styleMatch.cases : []
+        };
+        node.imageEditRefs = generatedImagePromptReferences(node);
+        node.generatedPromptInitialized = true;
+    }
+    const weight = generatedEditBaseReferenceWeight(node);
+    node.text = String(node.text || node.promptDraftText || node.runModelPrompt || node.runPrompt || '').trim();
+    node.llmProvider = resolveChatProviderId(node.llmProvider || '');
+    node.llmModel = preferredPromptRematchModel(node.llmProvider);
+    node.styleMatch = {
+        ...(node.styleMatch || {}),
+        image:editBase?.url || node.styleMatch?.image || '',
+        referenceWeight:weight
+    };
+    node.referenceWeight = weight;
+    node.generatedEditBaseReferenceWeight = weight;
+    return node;
+}
 function imageNodeSmartRematchRequest(node){
-    const draft = String(node?.promptDraftText || '').trim();
-    const runPrompt = String(node?.runPrompt || '').trim();
-    if(!draft || !runPrompt) return '';
-    if(draft === runPrompt) return '';
-    return draft;
+    return String(node?.llmInstruction || '').trim();
 }
 async function smartRematchImageNodeRun(node, runSettings=settings){
     if(!isSmartImageNode(node) || isHistoryGroupNode(node)) return null;
+    ensureGeneratedImagePromptComposerState(node);
     const userRequest = imageNodeSmartRematchRequest(node);
-    if(!userRequest) return null;
+    if(!userRequest) throw new Error('请先在 LLM 修改框里写这次要改的内容');
     const editBase = primaryGeneratedImageRefForNode(node);
     if(!editBase?.url) return null;
-    const provider = resolveChatProviderId(runSettings?.provider_id || '');
+    const provider = resolveChatProviderId(node.llmProvider || '');
     const model = preferredPromptRematchModel(provider);
+    const currentPrompt = String(node.text || node.promptDraftText || node.runModelPrompt || node.runPrompt || '').trim();
+    const cameraControl = promptNodeCameraPrompt(node);
+    const editBaseWeight = generatedEditBaseReferenceWeight(node);
     const response = await fetch('/api/style-library/rematch-prompt', {
         method:'POST',
         headers:{'Content-Type':'application/json'},
         body:JSON.stringify({
             image:editBase.url,
-            analysis:{},
-            current_prompt:node.runModelPrompt || node.runPrompt || '',
+            analysis:node.styleMatch?.analysis || {},
+            current_prompt:currentPrompt,
             user_request:userRequest,
+            camera_control:cameraControl,
+            poster_copy_enabled:node.posterCopyEnabled === true,
             provider,
             model,
             ms_model: provider === 'modelscope' ? model : '',
             limit:4,
-            reference_weight:100
+            reference_weight:editBaseWeight
         })
     });
     const data = await response.json().catch(() => ({}));
@@ -14581,26 +14989,50 @@ async function smartRematchImageNodeRun(node, runSettings=settings){
     const promptBudget = smartCompressPromptToBudget(rawPrompt, SMART_MATCHED_PROMPT_BUDGET);
     const prompt = promptBudget.prompt;
     smartNotifyPromptCompression(promptBudget);
-    return {
-        prompt,
-        displayPrompt:userRequest,
-        refs:uniqueReferenceImages([
-            editBase,
-            ...imageRefsOnly(node.runInputRefs || []).filter(ref => smartReferenceUrlKey(ref.url) !== smartReferenceUrlKey(editBase.url))
-        ]),
-        promptHtml:escapeHtml(userRequest),
-        promptText:userRequest,
-        styleMatch:{
-            query:data.query || '',
-            cases:Array.isArray(data.cases) ? data.cases : [],
-            analysis:data.analysis || {},
-            model:data.model || model,
-            rematchModel:model,
-            source:data.source || '',
-            referenceWeight:100,
-            rematched_at:Date.now()
-        }
+    node.text = prompt;
+    node.promptDraftText = prompt;
+    node.promptDraftHtml = escapeHtml(prompt);
+    node.imageEditRefs = uniqueReferenceImages([
+        editBase,
+        ...generatedImageProductRefs(node)
+    ]);
+    node.llmProvider = provider;
+    node.llmModel = model;
+    node.generatedPromptRematched = true;
+    node.styleMatch = {
+        ...(node.styleMatch || {}),
+        query:data.query || '',
+        cases:Array.isArray(data.cases) ? data.cases : [],
+        analysis:data.analysis || {},
+        model:data.model || model,
+        rematchModel:model,
+        image:editBase.url,
+        source:data.source || '',
+        referenceWeight:editBaseWeight,
+        rematched_at:Date.now()
     };
+    return data;
+}
+async function runGeneratedImagePromptRematch(nodeId){
+    const node = nodes.find(item => item.id === nodeId);
+    if(!isGeneratedImagePromptComposerNode(node) || node.promptRematching) return;
+    pushUndo();
+    node.promptRematching = true;
+    renderGeneratedImagePromptComposer(node);
+    try {
+        toast('正在用 GPT-5.5 以当前生成图为基准重新匹配提示词...');
+        const data = await smartRematchImageNodeRun(node, smartSettingsForNode(node));
+        scheduleSave();
+        render();
+        toast(`已重新匹配 ${Array.isArray(data?.cases) ? data.cases.length : 0} 个素材库案例，并替换当前提示词`);
+    } catch(error) {
+        toast((error.message || '重新匹配当前图片提示词失败').slice(0, 180));
+    } finally {
+        const latest = nodes.find(item => item.id === nodeId);
+        if(latest) latest.promptRematching = false;
+        scheduleSave();
+        render();
+    }
 }
 async function rematchStylePromptForPromptNode(node){
     const userRequest = promptNodeStyleRematchRequest(node).trim();
@@ -14609,6 +15041,7 @@ async function rematchStylePromptForPromptNode(node){
     const model = preferredPromptRematchModel(provider);
     const rematchImage = promptNodeStyleRematchImage(node);
     const currentReferenceBrief = promptNodeCurrentReferenceRoleBrief(node);
+    const cameraControl = promptNodeCameraPrompt(node);
     const currentPrompt = [
         currentReferenceBrief,
         promptNodePromptItems({...node, llmInstruction:''}).join('\n\n').trim() || String(node.text || '').trim()
@@ -14621,6 +15054,8 @@ async function rematchStylePromptForPromptNode(node){
             analysis:node.styleMatch?.analysis || {},
             current_prompt:currentPrompt,
             user_request:userRequest,
+            camera_control:cameraControl,
+            poster_copy_enabled:node.posterCopyEnabled === true,
             provider,
             model,
             ms_model: provider === 'modelscope' ? model : '',
@@ -15598,7 +16033,7 @@ async function runSmartCascade(targetNode=null){
     syncSmartCascadeLegacyState(runKey);
     smartCascadeSilentSelection = true;
     runBtn.disabled = true;
-    cascadeRunBtn.disabled = false;
+    if(cascadeRunBtn) cascadeRunBtn.disabled = false;
     pushUndo();
     const totalRounds = loop?.count || 1;
     const startIndex = Math.max(1, Number(loop?.node?.loopStart) || 1);
@@ -15781,7 +16216,7 @@ async function runSmartCascade(targetNode=null){
         syncSmartCascadeLegacyState();
         smartCascadeSilentSelection = false;
         syncRunButtonState();
-        cascadeRunBtn.disabled = false;
+        if(cascadeRunBtn) cascadeRunBtn.disabled = false;
         if(directLoopTargetRun) finishLoopTargetPreviewState(tail);
         scheduleSave();
         render();
@@ -16093,9 +16528,25 @@ function smartReplaceCameraConflictSection(text, headingPattern, replacement, ne
     const pattern = new RegExp(`(?:${headingPattern}):\\s*[\\s\\S]*?(?=\\n\\s*\\n\\s*(?:${next})\\b|$)`, 'gi');
     return String(text || '').replace(pattern, replacement);
 }
+function smartStripStaleBackgroundPaletteLocks(prompt){
+    return String(prompt || '')
+        .split(/\n{2,}/)
+        .map(section => section.trim())
+        .filter(section => {
+            if(!section) return false;
+            if(/LATEST BACKGROUND\/PALETTE OVERRIDE|Active additional generation guidance|Highest priority user modification request|Latest user modification request|Negative prompt/i.test(section)) return true;
+            const mentionsVisual = /background|backdrop|palette|color world|colour world|background tone|背景|底色|配色|色调|颜色/i.test(section);
+            if(!mentionsVisual) return true;
+            const isOldReferenceLock = /^(?:Reference priority:|Use the attached reference image|Lighting\/material lock:|Lighting and material fidelity lock:|Preserve\b|Keep the same\b|Match\b|Reference anchors:)/i.test(section);
+            const explicitlyNew = /latest|newly requested|new background|user request|change|replace|switch|different|改为|改变|更换|换成|调整|重新|不再|不要保留|最新需求/i.test(section);
+            return !(isOldReferenceLock && !explicitlyNew);
+        })
+        .join('\n\n');
+}
 function smartRelaxPromptForCameraControl(prompt){
     let text = String(prompt || '');
     if(!smartCameraControlRequested(text)) return text;
+    const latestVisualOverride = /LATEST BACKGROUND\/PALETTE OVERRIDE/i.test(text);
     const cameraBlockPattern = /HIGHEST PRIORITY CAMERA OVERRIDE:[\s\S]*?(?:technical text inside the image\.|$)/gi;
     const legacyCameraBlockPattern = /Camera control enabled:[\s\S]*?(?:technical text inside the image\.|$)/gi;
     let cameraBlocks = text.match(cameraBlockPattern) || text.match(legacyCameraBlockPattern) || [];
@@ -16112,7 +16563,9 @@ function smartRelaxPromptForCameraControl(prompt){
     );
     text = text.replace(
         /Preserve its aspect ratio, poster\/campaign layout, camera angle, lens proximity, subject scale hierarchy, foreground\/background relationship, object placement, pose and interaction geometry, negative-space distribution, lighting direction, color palette, and commercial finish\./gi,
-        'Preserve compatible product identity, broad model styling category, material truth, lighting direction, background tone, shadow softness, skin retouching level, product surface quality, color palette, exact readable poster copy when Poster copy is enabled, and commercial finish. Do not preserve exact model/person face identity, reference aspect ratio, poster layout, camera angle, lens proximity, crop, subject scale hierarchy, foreground/background relationship, object placement, pose geometry, or negative-space distribution when camera control changes them.'
+        latestVisualOverride
+            ? 'Preserve compatible product identity, broad model styling category, material truth, shadow softness, skin retouching level, product surface quality, exact readable poster copy when Poster copy is enabled, and commercial finish. Do not preserve the old reference background tone, backdrop gradient, color palette, camera angle, crop, layout, pose geometry, or negative-space distribution; the latest user request controls background and palette while Camera control controls viewpoint and perspective.'
+            : 'Preserve compatible product identity, broad model styling category, material truth, lighting direction, background tone, shadow softness, skin retouching level, product surface quality, color palette, exact readable poster copy when Poster copy is enabled, and commercial finish. Do not preserve exact model/person face identity, reference aspect ratio, poster layout, camera angle, lens proximity, crop, subject scale hierarchy, foreground/background relationship, object placement, pose geometry, or negative-space distribution when camera control changes them.'
     );
     text = text.replace(/Composition lock:/gi, 'Camera-overridden loose composition guidance:');
     text = text.replace(
@@ -16130,19 +16583,25 @@ function smartRelaxPromptForCameraControl(prompt){
     text = smartReplaceCameraConflictSection(
         text,
         'Reference anchors',
-        'Reference anchors (camera override): keep only exact product truth, broad person styling category, material surface, palette, lighting mood, background tone, shadow softness, skin/product finish, exact readable poster copy when Poster copy is enabled, and commercial polish. Do not keep exact same-person face identity. Ignore any camera, framing, crop, layout, pose, product scale, foreground/background, reflection layout, or composition anchors from reference images.',
+        latestVisualOverride
+            ? 'Reference anchors (camera + latest visual override): keep only exact product truth, broad person styling category, non-conflicting material surface, lighting quality, shadow softness, skin/product finish, exact readable poster copy when Poster copy is enabled, and commercial polish. Do not keep the old reference background tone, palette, wardrobe/prop colors, camera, framing, crop, layout, pose, product scale, reflection layout, or composition anchors.'
+            : 'Reference anchors (camera override): keep only exact product truth, broad person styling category, material surface, palette, lighting mood, background tone, shadow softness, skin/product finish, exact readable poster copy when Poster copy is enabled, and commercial polish. Do not keep exact same-person face identity. Ignore any camera, framing, crop, layout, pose, product scale, foreground/background, reflection layout, or composition anchors from reference images.',
         'Composition lock|Reference summary|Shared style anchor|Generation guidance|Variant plan|Negative constraints|Case-library support|Fresh |Negative prompt|LLM additional guidance|Poster copy enabled|Original reference weight|HIGHEST PRIORITY CAMERA OVERRIDE|FINAL CAMERA CHECK'
     );
     text = smartReplaceCameraConflictSection(
         text,
         'Camera-overridden loose composition guidance|Composition lock|Loose reference guidance',
-        'Camera override composition rule: do not copy the reference composition skeleton, poster layout, crop, pose geometry, reflection layout, object placement, foreground/background map, subject scale hierarchy, negative-space distribution, or exact same-person face identity. Recompose the whole image around the explicit camera control while keeping exact product truth, broad person styling category, exact readable poster copy when Poster copy is enabled, palette, material quality, background tone, shadow softness, skin treatment, product surface finish, lighting mood, and commercial finish.',
+        latestVisualOverride
+            ? 'Camera override composition rule: do not copy the reference camera, composition skeleton, poster layout, crop, pose geometry, reflection layout, object placement, foreground/background map, subject scale hierarchy, old background tone, old palette, wardrobe/prop colors, or exact same-person face identity. Recompose around the explicit Camera control and the latest requested background/palette while keeping exact product truth, broad person styling category, material quality, shadow softness, skin treatment, product surface finish, lighting quality, and commercial finish.'
+            : 'Camera override composition rule: do not copy the reference composition skeleton, poster layout, crop, pose geometry, reflection layout, object placement, foreground/background map, subject scale hierarchy, negative-space distribution, or exact same-person face identity. Recompose the whole image around the explicit camera control while keeping exact product truth, broad person styling category, exact readable poster copy when Poster copy is enabled, palette, material quality, background tone, shadow softness, skin treatment, product surface finish, lighting mood, and commercial finish.',
         'Reference summary|Shared style anchor|Generation guidance|Variant plan|Negative constraints|Case-library support|Fresh |Negative prompt|LLM additional guidance|Poster copy enabled|Original reference weight|HIGHEST PRIORITY CAMERA OVERRIDE|FINAL CAMERA CHECK'
     );
     text = smartReplaceCameraConflictSection(
         text,
         'Generation guidance',
-        'Generation guidance: camera control is the primary composition driver. First satisfy lens, viewpoint, foreground/midground/background, visible perspective evidence, and subject scale. Then restore exact product truth, broad person styling category, exact readable poster copy when Poster copy is enabled, materials, palette, background tone, lighting mood, shadow softness, skin/product retouching level, and commercial polish. Do not restore exact same-person face identity unless reference weight is extremely high and explicitly requested.',
+        latestVisualOverride
+            ? 'Generation guidance: Camera control is the primary viewpoint driver and the latest user request is the primary background/palette driver. First satisfy the exact lens, horizontal view, elevation, foreground/midground/background perspective evidence, and subject scale. Then apply the newly requested background and colors. Restore only exact product truth, broad person styling category, non-conflicting materials, lighting quality, shadow softness, skin/product retouching level, and commercial polish; never restore the old reference background or palette.'
+            : 'Generation guidance: camera control is the primary composition driver. First satisfy lens, viewpoint, foreground/midground/background, visible perspective evidence, and subject scale. Then restore exact product truth, broad person styling category, exact readable poster copy when Poster copy is enabled, materials, palette, background tone, lighting mood, shadow softness, skin/product retouching level, and commercial polish. Do not restore exact same-person face identity unless reference weight is extremely high and explicitly requested.',
         'Variant plan|Negative constraints|Case-library support|Fresh |Negative prompt|LLM additional guidance|Poster copy enabled|Original reference weight|HIGHEST PRIORITY CAMERA OVERRIDE|FINAL CAMERA CHECK'
     );
     text = smartReplaceCameraConflictSection(
@@ -16159,6 +16618,7 @@ function smartRelaxPromptForCameraControl(prompt){
         /same product-to-model scale hierarchy/gi,
         'product-to-model scale hierarchy rebuilt for the explicit Camera control'
     );
+    if(latestVisualOverride) text = smartStripStaleBackgroundPaletteLocks(text);
     cameraBlocks = text.match(cameraBlockPattern) || text.match(legacyCameraBlockPattern) || [];
     const cameraBlock = cameraBlocks[cameraBlocks.length - 1] || '';
     if(cameraBlock && !/FINAL CAMERA CHECK/i.test(text)){
@@ -16194,7 +16654,7 @@ function smartPromptDedupeKey(value){
 }
 function smartPromptSectionProfile(value){
     const head = String(value || '').slice(0, 260);
-    if(/highest priority|active additional generation guidance|llm additional guidance|product truth references|product recognition summary|product replacement|output canvas lock|camera override|final product check|最高优先级|追加生成指导|产品事实|产品识别|产品替换|输出画布/i.test(head)){
+    if(/highest priority|active additional generation guidance|llm additional guidance|product truth references|product recognition summary|product replacement|output canvas lock|camera override|camera-locked variant|latest background\/palette override|final product check|最高优先级|追加生成指导|产品事实|产品识别|产品替换|输出画布/i.test(head)){
         return {priority:110, cap:2400, min:750};
     }
     if(/negative prompt|poster copy|must not|avoid:|负面提示|海报文字/i.test(head)){
@@ -16339,6 +16799,29 @@ function smartValidateReferenceRequest(node, prompt, refs=[]){
 function smartVariantPrompt(prompt, index, total, refs=[]){
     const count = Math.max(1, Number(total) || 1);
     if(count <= 1) return prompt;
+    const cameraControlled = smartCameraControlRequested(prompt);
+    if(cameraControlled){
+        const text = smartRelaxPromptForCameraControl(String(prompt || ''));
+        const allowHuman = !String(text || '').includes('NO HUMAN SUBJECT LOCK:');
+        const humanPlans = [
+            'Keep the exact selected camera. Vary only the model’s hand gesture, facial expression, and the precise product-contact point on the nose or cheek; keep lens, horizontal view, camera elevation, perspective, crop family, and subject scale unchanged.',
+            'Keep the exact selected camera. Use a clearly different arm/hand pose and product-use gesture while maintaining the same lens, front/side direction, camera height, perspective, crop family, and background layout.',
+            'Keep the exact selected camera. Change only expression, shoulder/hand gesture, and product interaction timing; do not rotate or raise/lower the camera.',
+            'Keep the exact selected camera. Create a distinct action through hand placement and product position within the frame, never through a different viewpoint or focal length.'
+        ];
+        const productPlans = [
+            'Keep the exact selected camera. Vary only product rotation within the support surface, prop spacing, and lighting sweep; keep lens, horizontal view, camera elevation, perspective, and crop family unchanged.',
+            'Keep the exact selected camera. Create a distinct product arrangement without changing viewpoint, focal length, camera height, or background geometry.',
+            'Keep the exact selected camera. Vary only product-contact shadows, supporting props, and product placement within the same fixed frame.',
+            'Keep the exact selected camera. Use a different product presentation gesture or support arrangement while preserving the fixed optical viewpoint.'
+        ];
+        const plan = (allowHuman ? humanPlans : productPlans)[index % humanPlans.length];
+        const lock = 'CAMERA-LOCKED VARIANT: Camera control overrides every request for different angle, viewpoint, perspective, camera direction, or camera height. Interpret “different actions/angles” as different pose, gesture, expression, product contact, or in-frame placement only. Do not change the selected focal length, azimuth, elevation, optical perspective, crop family, or subject scale.';
+        const quality = allowHuman
+            ? 'Premium commercial advertising finish. Keep the product clearly used against the face with realistic hand contact, natural anatomy, refined skin texture, and clean color grading.'
+            : 'Premium commercial advertising finish. Keep exact product identity, realistic edges, controlled contact shadows, refined materials, and clean color grading.';
+        return [text, `Variant ${index + 1} of ${count}: ${plan}`, lock, quality].filter(Boolean).join('\n\n');
+    }
     const creative = smartCreativeVariantRequested(prompt);
     const editBaseLocked = (refs || []).some(ref => ref?.generatedEditBase || ref?.structureLock);
     if(editBaseLocked && !creative){
@@ -18164,15 +18647,17 @@ if(promptResize){
     });
 }
 runBtn.onclick = runGeneration;
-cascadeRunBtn.onclick = () => {
-    const node = selectedNode();
-    const loopId = resolveSmartCascadeLoop(node?.id)?.node?.id || '';
-    if(loopId && smartCascadeIsLoopRunning(loopId)) {
-        requestSmartCascadeStop(loopId);
-        return;
-    }
-    runSmartCascade();
-};
+if(cascadeRunBtn){
+    cascadeRunBtn.onclick = () => {
+        const node = selectedNode();
+        const loopId = resolveSmartCascadeLoop(node?.id)?.node?.id || '';
+        if(loopId && smartCascadeIsLoopRunning(loopId)) {
+            requestSmartCascadeStop(loopId);
+            return;
+        }
+        runSmartCascade();
+    };
+}
 fileInput.onchange = () => {
     const groupPoint = pendingGroupUploadPoint;
     if(!fileInput.files?.length){

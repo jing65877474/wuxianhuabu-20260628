@@ -8,6 +8,7 @@ history.json
 server.log
 server.err.log
 _self_restart.bat
+backups/
 backups/generation-logic/
 
 # Local bundled Python install artifacts generated after dependency install
