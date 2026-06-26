@@ -615,5 +615,22 @@ check(
         source.includes("request_upload_ms:null"),
     "Retry diagnostics must show reused generation artifacts and unavailable timing splits must not be faked as zero."
 );
+check(
+    backendSource.includes("ALLOWED_LOCAL_ORIGINS") &&
+        backendSource.includes('allow_origins=ALLOWED_LOCAL_ORIGINS') &&
+        !backendSource.includes('allow_origins=["*"]') &&
+        backendSource.includes('uvicorn.run(app, host="127.0.0.1"'),
+    "Final regression: local app must not restore wildcard CORS or public default binding."
+);
+check(
+    backendSource.includes('tempfile.mkstemp(prefix=".canvas-"') &&
+        backendSource.includes("os.fsync(f.fileno())") &&
+        backendSource.includes("shutil.copy2(path, backup_path)") &&
+        backendSource.includes("os.replace(tmp_path, path)") &&
+        backendSource.includes('backup_path = f"{path}.bak"') &&
+        backendSource.includes("def load_canvas_json_with_backup") &&
+        backendSource.includes("restore_canvas_file_from_backup(path, backup_path)"),
+    "Final regression: canvas saves must use temp file flush/fsync, .bak backup, atomic replace, and .bak recovery."
+);
 
 console.log("generation-logic verification: OK");

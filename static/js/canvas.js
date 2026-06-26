@@ -11252,7 +11252,8 @@ window.onload = async () => {
     initOutputPreviewZoomEvents();
     applyViewport();
     await loadConfig();
-    // 缂栬緫鍣ㄩ〉鍙礋璐ｆ墦寮€鍗曚釜鐢诲竷锛氬繀椤诲甫 ?id锛涙病鏈?id 灏卞洖鍒扮嫭绔嬬殑閫夌敾甯冮〉闈€?    const openId = new URLSearchParams(window.location.search).get('id');
+    // 缂栬緫鍣ㄩ〉鍙礋璐ｆ墦寮€鍗曚釜鐢诲竷锛氬繀椤诲甫 ?id锛涙病鏈?id 灏卞洖鍒扮嫭绔嬬殑閫夌敾甯冮〉闈€?
+    const openId = new URLSearchParams(window.location.search).get('id');
     if(openId){
         await openCanvas(openId);
     } else {

@@ -67,9 +67,14 @@ logging.getLogger("uvicorn.access").addFilter(QuietAccessLogFilter())
 
 app = FastAPI()
 
+ALLOWED_LOCAL_ORIGINS = [
+    "http://127.0.0.1:3000",
+    "http://localhost:3000",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_LOCAL_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -2364,11 +2369,64 @@ def canvas_path(canvas_id):
         raise HTTPException(status_code=400, detail="无效的画布 ID")
     return os.path.join(CANVAS_DIR, f"{cleaned}.json")
 
+def restore_canvas_file_from_backup(path: str, backup_path: str):
+    fd, tmp_path = tempfile.mkstemp(prefix=".canvas-restore-", suffix=".json.tmp", dir=os.path.dirname(path))
+    try:
+        with open(backup_path, "rb") as src, os.fdopen(fd, "wb") as dst:
+            shutil.copyfileobj(src, dst)
+            dst.flush()
+            os.fsync(dst.fileno())
+        if os.path.exists(path):
+            corrupt_path = f"{path}.corrupt-{int(time.time())}"
+            shutil.copy2(path, corrupt_path)
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+        raise
+
+def load_canvas_json_with_backup(path: str):
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError) as exc:
+        backup_path = f"{path}.bak"
+        if not os.path.exists(backup_path):
+            raise
+        try:
+            with open(backup_path, 'r', encoding='utf-8') as f:
+                canvas = json.load(f)
+            restore_canvas_file_from_backup(path, backup_path)
+            print(f"Canvas JSON recovered from .bak: {os.path.basename(path)} ({type(exc).__name__})")
+            return canvas
+        except Exception:
+            raise exc
+
 def save_canvas(canvas):
     canvas["updated_at"] = now_ms()
     with CANVAS_LOCK:
-        with open(canvas_path(canvas["id"]), 'w', encoding='utf-8') as f:
-            json.dump(canvas, f, ensure_ascii=False, indent=2)
+        path = canvas_path(canvas["id"])
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        backup_path = f"{path}.bak"
+        fd, tmp_path = tempfile.mkstemp(prefix=".canvas-", suffix=".json.tmp", dir=os.path.dirname(path))
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                json.dump(canvas, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            if os.path.exists(path):
+                shutil.copy2(path, backup_path)
+            os.replace(tmp_path, path)
+        except Exception:
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+            raise
 
 def normalize_canvas_kind(kind="classic"):
     return "smart" if str(kind or "").strip().lower() == "smart" else "classic"
@@ -2467,8 +2525,7 @@ def load_canvas(canvas_id):
     path = canvas_path(canvas_id)
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="画布不存在")
-    with open(path, 'r', encoding='utf-8') as f:
-        canvas = json.load(f)
+    canvas = load_canvas_json_with_backup(path)
     canvas["title"] = clean_canvas_title(canvas.get("title"), "未命名画布")
     if canvas.get("deleted_at"):
         raise HTTPException(status_code=404, detail="画布已在回收站")
@@ -2478,8 +2535,7 @@ def load_canvas_any(canvas_id):
     path = canvas_path(canvas_id)
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="画布不存在")
-    with open(path, 'r', encoding='utf-8') as f:
-        canvas = json.load(f)
+    canvas = load_canvas_json_with_backup(path)
     canvas["title"] = clean_canvas_title(canvas.get("title"), "未命名画布")
     return canvas
 
@@ -13280,5 +13336,5 @@ if __name__ == "__main__":
     # 关闭服务端协议级 WebSocket ping：部分客户端（如 PS UXP 面板）不会自动回 pong，
     # 默认 20s ping/20s 超时会把这些连接每隔一会儿就踢掉造成"频繁断连"。
     # 客户端有自己的应用层心跳 + 断线重连兜底，这里禁用协议 ping 更稳。
-    uvicorn.run(app, host="0.0.0.0", port=3000,
+    uvicorn.run(app, host="127.0.0.1", port=3000,
                 ws_ping_interval=None, ws_ping_timeout=None)
