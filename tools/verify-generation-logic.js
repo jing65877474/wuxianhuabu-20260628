@@ -542,11 +542,11 @@ check(
     "Reference preflight must expose upload decisions, roles, limits, and not-uploaded reasons."
 );
 check(
-    source.includes("SMART_PRODUCT_RECOGNITION_PROMPT_VERSION") &&
+        source.includes("SMART_PRODUCT_RECOGNITION_PROMPT_VERSION") &&
         source.includes('"category":""') &&
         source.includes("normalizeSmartProductFacts") &&
         source.includes("parseSmartProductFacts") &&
-        source.includes("smartProductRecognitionCacheKey(refs=[], model='')"),
+        source.includes("async function smartProductRecognitionCacheKey(refs=[], model='')"),
     "Product recognition must use structured JSON facts with versioned cache keys."
 );
 check(
@@ -562,6 +562,58 @@ check(
         source.includes("promptBeforeGuard") &&
         source.includes("promptAfterGuard"),
     "Prompt compression must dedupe repeated rules and retain before/after prompt diagnostics."
+);
+check(
+    source.includes("async function smartReferenceContentSha256") &&
+        source.includes("crypto.subtle.digest('SHA-256'") &&
+        source.includes("smartDataUrlArrayBuffer") &&
+        source.includes("response.arrayBuffer()"),
+    "Product recognition cache keys must use real image bytes hashed with SHA-256."
+);
+check(
+    source.includes("async function smartProductRecognitionCacheKey") &&
+        source.includes("if(!contentKey) return ''") &&
+        !source.includes("ref.sha256 || ref.contentSha256 || ref.asset_sha256 || smartHashText(`${ref.url"),
+    "Product recognition cache must skip unreliable keys instead of falling back to URL/name/mtime metadata."
+);
+check(
+    source.includes("function smartSelectGenerationReferenceUploads") &&
+        source.includes("smartReferenceManualRole") &&
+        source.includes("smartReferenceIsPinnedUpload") &&
+        source.includes("reference_preflight_matches_request") &&
+        source.includes("pinned_reference_overflow_count"),
+    "Manual reference roles, pinned uploads, analysis-only flags, and preflight/request parity must affect actual image requests."
+);
+check(
+    source.includes("const SMART_PROVIDER_PROMPT_BUDGETS") &&
+        source.includes("function smartProviderPromptBudget") &&
+        source.includes("function smartAssertPromptWithinHardBudget") &&
+        source.includes("smartAssertPromptWithinHardBudget(finalPrompt"),
+    "Provider prompt budgets must have centralized soft/hard limits and block over-hard-limit submissions."
+);
+check(
+    source.includes("function smartPromptRuleType") &&
+        source.includes("mergedRuleCounts") &&
+        source.includes("deduplicated_rule_types") &&
+        source.includes("merged_rule_counts"),
+    "Prompt semantic dedupe must record merged rule types and counts."
+);
+check(
+    source.includes("function smartProductFactsPanelHtml") &&
+        source.includes("function bindProductFactsPanelControls") &&
+        source.includes("function applyRecognizedProductFactsToNode") &&
+        source.includes("if(node.productFactsLocked || node.productFactsUserEdited) return") &&
+        source.includes("lockedProductFacts"),
+    "Product facts must be editable/lockable and automatic recognition must not overwrite locked or user-edited facts."
+);
+check(
+    source.includes("retry_reuse") &&
+        source.includes("runContext:true") &&
+        source.includes("generationSpec:true") &&
+        source.includes("finalPrompt:true") &&
+        source.includes("reference_compress_ms:null") &&
+        source.includes("request_upload_ms:null"),
+    "Retry diagnostics must show reused generation artifacts and unavailable timing splits must not be faked as zero."
 );
 
 console.log("generation-logic verification: OK");

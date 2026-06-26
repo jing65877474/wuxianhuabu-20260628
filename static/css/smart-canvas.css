@@ -367,6 +367,19 @@ body.smart-prompt-split-resize .prompt-node-llm select { pointer-events:none !im
 body.smart-node-drag .smart-node-floating-menu,
 body.smart-node-resize .smart-node-floating-menu,
 .image-node.dragging .smart-node-floating-menu { opacity:0 !important; pointer-events:none !important; }
+.smart-product-facts-panel { position:absolute; left:0; top:calc(100% + 8px); z-index:20; width:min(320px, max(240px, 100%)); display:none; flex-direction:column; gap:7px; padding:9px; border:1px solid var(--line); border-radius:12px; background:color-mix(in srgb, var(--panel) 94%, transparent); box-shadow:0 18px 42px var(--shadow); backdrop-filter:blur(18px); cursor:default; }
+.image-node.selected .smart-product-facts-panel { display:flex; }
+.smart-product-facts-head { display:flex; align-items:center; justify-content:space-between; gap:8px; min-width:0; color:var(--text); font-size:10.5px; font-weight:850; }
+.smart-product-facts-head span { display:inline-flex; align-items:center; gap:5px; min-width:0; }
+.smart-product-facts-head i,.smart-product-facts-head svg { width:12px; height:12px; }
+.smart-product-facts-head small { min-width:0; color:var(--faint); font-size:9px; font-weight:700; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.smart-product-facts-panel textarea { width:100%; min-height:96px; max-height:170px; resize:vertical; padding:7px; box-sizing:border-box; border:1px solid var(--line); border-radius:9px; background:var(--card); color:var(--text); font:10px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; outline:0; }
+.smart-product-facts-panel textarea:focus { border-color:var(--strong); }
+.smart-product-facts-actions { display:flex; align-items:center; gap:6px; }
+.smart-product-facts-actions button { height:24px; padding:0 8px; border:1px solid var(--line); border-radius:8px; background:var(--card); color:var(--text); font-size:9.5px; font-weight:800; cursor:pointer; }
+.smart-product-facts-actions button:hover { border-color:var(--strong); }
+.smart-product-facts-actions button:disabled { opacity:.45; cursor:not-allowed; }
+.theme-dark .smart-product-facts-panel { background:color-mix(in srgb, var(--panel) 90%, transparent); border-color:rgba(148,163,184,.28); box-shadow:0 18px 42px rgba(0,0,0,.36); }
 @media (max-width: 760px){
     .smart-node-floating-menu { top:-40px; overflow-x:auto; scrollbar-width:none; }
     .smart-node-floating-menu::-webkit-scrollbar { display:none; }
