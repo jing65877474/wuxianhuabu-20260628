@@ -148,6 +148,7 @@ let runBtnCooldownToken = 0;
 let composerPromptMatching = false;
 let smartRunStateToken = 0;
 const activeSmartTaskPolls = new Map();
+const activeSmartNodeSubmissions = new Set();
 const cancelledSmartTaskIds = new Set();
 const SMART_TASK_RETRY_STATUSES = new Set([429, 502, 503, 504]);
 const SMART_TASK_RETRY_DELAYS = [2000, 5000, 10000];
@@ -4653,6 +4654,9 @@ function smartNodeInFlight(node){
     if(smartNodeHasCompletedResult(node)) return false;
     return Boolean(node && (node.running || node.pending || node.queued || node.jimengPending || smartPendingTasks(node).length));
 }
+function smartNodeSubmitting(node){
+    return Boolean(node?.id && activeSmartNodeSubmissions.has(node.id));
+}
 function smartNodeHasDisplayResult(node){
     return Boolean((node?.images || []).some(img => img?.url && !img.loopInputPreview));
 }
@@ -4870,7 +4874,7 @@ function syncRunButtonState(node=selectedNode()){
     if(!runBtn) return;
     // 只在“当前选中节点自己”忙时禁用运行：节点正在生成/排队，或它本身是正在跑的循环。
     // 不再因为“画布上有任意循环/级联在跑”就全局禁用——跑循环时仍可对其他节点点生成。
-    runBtn.disabled = smartGenerationPreflightOpen || smartGenerationSubmitting || !isSmartRunnableNode(node) || smartNodeInFlight(node) || smartCascadeIsLoopRunning(node?.id);
+    runBtn.disabled = smartGenerationPreflightOpen || smartGenerationSubmitting || smartNodeSubmitting(node) || !isSmartRunnableNode(node) || smartNodeInFlight(node) || smartCascadeIsLoopRunning(node?.id);
 }
 function mergeSmartNode(local, remote){
     if(local?.clearedAt && Number(local.clearedAt || 0) >= Number(remote?.runFinishedAt || remote?.runAt || remote?.created_at || 0)){
@@ -16278,7 +16282,8 @@ function runSmartCascadeFromLoop(loopId){
 async function runGeneration(){
     const node = selectedNode();
     if(!node) return;
-    if(smartNodeInFlight(node)) return;
+    if(smartNodeInFlight(node) || smartNodeSubmitting(node)) return;
+    const submittingNodeId = node.id;
     const previousSettings = cloneSmartSettings(settings);
     const runSettings = smartSettingsForNode(node);
     settings = {...settings, ...cloneSmartSettings(runSettings || {})};
@@ -16318,6 +16323,7 @@ async function runGeneration(){
         return;
     }
     smartGenerationSubmitting = true;
+    activeSmartNodeSubmissions.add(submittingNodeId);
     syncRunButtonState();
     request = buildPromptRequest(node, null, true, smartLoopContext);
     prompt = request.prompt.trim();
@@ -16425,23 +16431,6 @@ async function runGeneration(){
             pendingNode.running = false;
             render();
             scheduleSave();
-            await saveCanvas();
-            await resumeSmartPendingNode(pendingNode);
-            if(taskIds.some(isSmartTaskCancelled) || !nodes.some(n => n.id === pendingNode.id)){
-                if(sourceVisualState) restoreSourceVisualState(node, sourceVisualState);
-                settings = previousSettings;
-                scheduleSave();
-                return;
-            }
-            if(pendingNode.jimengPending || smartRecoverableImageTask(pendingNode) || smartSubmitFailedImageTask(pendingNode)){
-                if(sourceVisualState) restoreSourceVisualState(node, sourceVisualState);
-                clearPromptInput({preserveDraft:true});
-                settings = previousSettings;
-                scheduleSave();
-                return;
-            }
-            if(!(pendingNode.images || []).length) throw new Error(tr('smart.errNoOutImages'));
-            if(outpaintSize) delete node.outpaintSize;
             if(sourceVisualState) restoreSourceVisualState(node, sourceVisualState);
             runLog.diagnostics = outImages.diagnostics || null;
             runLog.generationSpec = outImages.generationSpec || null;
@@ -16449,9 +16438,14 @@ async function runGeneration(){
             runLog.referencePreflight = outImages.referencePreflight || null;
             runLog.promptBeforeGuard = outImages.promptBeforeGuard || '';
             runLog.promptAfterGuard = outImages.promptAfterGuard || '';
-            addSmartGenerationLog({run:runLog, outputs:(pendingNode.images || []).map(img => img.url).filter(Boolean), runMs:nowMs() - runLogStart});
             clearPromptInput({preserveDraft:true});
             settings = previousSettings;
+            if(outpaintSize) delete node.outpaintSize;
+            await saveCanvas();
+            smartGenerationSubmitting = false;
+            activeSmartNodeSubmissions.delete(submittingNodeId);
+            syncRunButtonState();
+            resumeSubmittedSmartRunInBackground(pendingNode, runLog, runLogStart);
             scheduleSave();
             return;
         }
@@ -16469,6 +16463,9 @@ async function runGeneration(){
             if(sourceVisualState) restoreSourceVisualState(node, sourceVisualState);
             delete pendingNode._runMetaTargetId;
             clearPromptInput({preserveDraft:true});
+            smartGenerationSubmitting = false;
+            activeSmartNodeSubmissions.delete(submittingNodeId);
+            syncRunButtonState();
             return;
         }
         pendingNode.pending = 0;
@@ -16493,6 +16490,7 @@ async function runGeneration(){
             syncRunButtonState();
         }
         smartGenerationSubmitting = false;
+        activeSmartNodeSubmissions.delete(submittingNodeId);
         syncRunButtonState();
         render();
     }
@@ -17851,6 +17849,25 @@ async function resumeSmartPendingNode(node){
     if(failures.length && !(node.images || []).length){
         throw failures[0];
     }
+}
+function resumeSubmittedSmartRunInBackground(node, runLog=null, runLogStart=nowMs()){
+    if(!node || !smartPendingTasks(node).length) return;
+    const pendingNodeId = node.id;
+    resumeSmartPendingNode(node).then(() => {
+        const current = nodes.find(item => item.id === pendingNodeId);
+        if(runLog && current && (current.images || []).some(img => img?.url)){
+            addSmartGenerationLog({
+                run:runLog,
+                outputs:(current.images || []).map(img => img.url).filter(Boolean),
+                runMs:nowMs() - runLogStart
+            });
+        }
+        render();
+        scheduleSave();
+    }).catch(() => {
+        render();
+        scheduleSave();
+    });
 }
 function resumeSmartPendingTasks(){
     nodes.filter(node => smartPendingTasks(node).length).forEach(node => {
