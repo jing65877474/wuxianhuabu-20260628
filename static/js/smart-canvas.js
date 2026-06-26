@@ -935,22 +935,202 @@ function smartRunEngineLabel(sourceSettings=settings, kind='image'){
     if(kind === 'video') return videoProviderById(sourceSettings.videoProvider || '')?.name || sourceSettings.videoProvider || 'Video';
     return apiProviderById(sourceSettings.provider_id || '')?.name || sourceSettings.provider_id || sourceSettings.engine || 'API';
 }
+function smartStableJson(value){
+    if(value == null || typeof value !== 'object') return JSON.stringify(value);
+    if(Array.isArray(value)) return `[${value.map(smartStableJson).join(',')}]`;
+    return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${smartStableJson(value[key])}`).join(',')}}`;
+}
+function smartHashText(value){
+    const text = String(value || '');
+    let hash = 2166136261;
+    for(let i = 0; i < text.length; i++){
+        hash ^= text.charCodeAt(i);
+        hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(16).padStart(8, '0');
+}
+function smartEstimateTokens(text){
+    const value = String(text || '');
+    const asciiWords = (value.match(/[A-Za-z0-9_]+/g) || []).length;
+    const nonAscii = (value.match(/[^\x00-\x7F]/g) || []).length;
+    return Math.max(1, Math.ceil(asciiWords * 1.35 + nonAscii * 0.75));
+}
+function smartByteLength(value){
+    try { return new Blob([typeof value === 'string' ? value : JSON.stringify(value || {})]).size; }
+    catch(_) { return String(value || '').length; }
+}
+function createSmartGenerationDiagnostics(requestId=''){
+    const startedAt = nowMs();
+    const marks = new Map();
+    return {
+        request_id:requestId,
+        started_at:startedAt,
+        fields:{
+            prompt_build_ms:0,
+            product_recognition_ms:0,
+            reference_resolve_ms:0,
+            reference_compress_ms:0,
+            request_prepare_ms:0,
+            request_upload_ms:0,
+            provider_submit_ms:0,
+            queue_wait_ms:0,
+            generation_ms:0,
+            result_download_ms:0,
+            total_ms:0
+        },
+        meta:{},
+        mark(name){ marks.set(name, nowMs()); },
+        measure(field, name){
+            const start = marks.get(name);
+            if(start != null) this.fields[field] = Math.max(0, Math.round(nowMs() - start));
+        },
+        add(field, value){ this.fields[field] = Math.max(0, Math.round(Number(this.fields[field] || 0) + Number(value || 0))); },
+        finish(extra={}){
+            this.fields.total_ms = Math.max(0, Math.round(nowMs() - startedAt));
+            this.meta = {...this.meta, ...extra};
+            return smartGenerationDiagnosticsSnapshot(this);
+        }
+    };
+}
+function smartGenerationDiagnosticsSnapshot(diag){
+    return {
+        ...(diag?.fields || {}),
+        ...(diag?.meta || {}),
+        request_id:diag?.request_id || diag?.meta?.request_id || ''
+    };
+}
+function createSmartRunContext({node, prompt='', displayPrompt='', refs=[], runSettings=settings, kind='image'}={}){
+    const settingsSnapshot = cloneSmartSettings(runSettings || settings);
+    const requestId = uid('smart_run');
+    const refSnapshot = (refs || []).map(ref => ({...ref}));
+    const promptText = String(prompt || '');
+    const context = {
+        requestId,
+        canvasId:canvas?.id || '',
+        nodeId:node?.id || '',
+        kind,
+        provider:kind === 'video' ? (settingsSnapshot.videoProvider || '') : (settingsSnapshot.provider_id || settingsSnapshot.engine || ''),
+        model:kind === 'video' ? (settingsSnapshot.videoModel || '') : (settingsSnapshot.model || settingsSnapshot.msgenModel || ''),
+        settings:settingsSnapshot,
+        userPrompt:promptText,
+        displayPrompt:displayPrompt || promptText,
+        references:refSnapshot,
+        createdAt:Date.now(),
+        promptHash:smartHashText(promptText),
+        referenceSetHash:smartHashText(smartStableJson(refSnapshot.map(ref => ({url:ref.url || '', role:ref.role || '', weight:smartReferenceRoleWeight(ref), upload:ref.uploadReference !== false})))),
+        compilerVersion:'phase4-smart-v1'
+    };
+    context.diagnostics = createSmartGenerationDiagnostics(requestId);
+    return context;
+}
+function smartReferenceLimitForRun(prompt, refs=[], runSettings=settings, kind='image'){
+    if(kind === 'image' && isApiLikeEngine(runSettings.engine)) return smartGenerationReferenceLimit(prompt, refs);
+    return imageRefsOnly(refs).length;
+}
+function smartAnalyzeReferencePreflight({node, prompt='', refs=[], runSettings=settings, kind='image'}={}){
+    const imageRefs = imageRefsOnly(refs);
+    const apiImageRun = kind === 'image' && isApiLikeEngine(runSettings.engine);
+    const tracePrompt = apiImageRun
+        ? [outputCanvasLockPrompt(runSettings), smartRelaxPromptForReferenceSimilarity(smartRelaxPromptForCameraControl(prompt))].filter(Boolean).join('\n\n')
+        : String(prompt || '');
+    const creative = apiImageRun && smartCreativeVariantRequested(tracePrompt);
+    const cameraControlled = apiImageRun && smartCameraControlRequested(tracePrompt);
+    const pool = apiImageRun ? (creative || cameraControlled ? smartCreativeReferenceImages(refs) : imageRefs) : imageRefs;
+    const limit = smartReferenceLimitForRun(tracePrompt, pool, runSettings, kind);
+    const selected = pool.filter(smartReferenceUploadAllowed).slice(0, limit);
+    const uploadKeys = new Set(selected.map(ref => smartReferenceUrlKey(ref?.url || ref?.sourceUrl || '')));
+    const roleCount = role => imageRefs.filter(ref => ref?.role === role).length;
+    const productRefs = imageRefs.filter(ref => ref?.role === 'product_truth_reference' || ref?.role === 'product_detail_reference');
+    const styleRefs = imageRefs.filter(ref => ['composition_reference','primary_style_reference','primary_reference'].includes(ref?.role));
+    const textRefs = imageRefs.filter(ref => ref?.posterCopyReference || ref?.copyTextLock || smartReferenceRoleIsCase(ref));
+    const personRefs = imageRefs.filter(ref => ref?.containsPerson === true || ref?.hasPerson === true || ref?.personReference === true || ref?.humanReference === true);
+    const conflictHints = productRefs.length > 1 && new Set(productRefs.map(ref => String(ref.name || ref.url || '').replace(/\d+/g, '').slice(0, 24))).size > 1;
+    const references = imageRefs.map((ref, index) => {
+        const key = smartReferenceUrlKey(ref.url || ref.sourceUrl || '');
+        const uploadAllowed = smartReferenceUploadAllowed(ref);
+        const upload = uploadKeys.has(key);
+        const userRole = ref.userRole || ref.manualRole || '';
+        const autoRole = ref.autoRole || (!userRole ? (ref.role || '') : '');
+        let reason = '';
+        if(mediaKindForItem(ref) !== 'image') reason = mediaKindForItem(ref);
+        else if(ref.textOnlyReference || ref.uploadReference === false) reason = 'analysis_only';
+        else if(!uploadAllowed) reason = 'not_upload_allowed';
+        else if(!upload) reason = 'over_reference_limit';
+        return {
+            index:index + 1,
+            name:ref.name || `Image ${index + 1}`,
+            role:ref.role || '',
+            autoRole,
+            userRole,
+            roleLabel:smartReferenceRoleLabel(ref),
+            enabled:ref.enabled !== false,
+            upload,
+            uploadAllowed,
+            analysisOnly:Boolean(ref.textOnlyReference || ref.uploadReference === false),
+            pinned:Boolean(ref.mustUpload || ref.pinnedUpload || ref.forceUpload),
+            uploadLabel:upload ? '上传' : (reason === 'over_reference_limit' ? '超限未传' : '不上传'),
+            notUploadedReason:reason,
+            weight:smartReferenceRoleWeight(ref),
+            similarityIntent:ref.similarityIntent || '',
+            fidelity:ref.inputFidelity || '',
+            order:index + 1,
+            kind:mediaKindForItem(ref),
+            generatedEditBase:Boolean(ref.generatedEditBase || ref.structureLock),
+            containsPerson:personRefs.includes(ref),
+            url:ref.url || ''
+        };
+    });
+    return {
+        maxReferenceImages:limit,
+        collectedReferenceCount:imageRefs.length,
+        uploadReferenceCount:selected.length,
+        analysisOnlyCount:references.filter(ref => ref.analysisOnly).length,
+        overLimitCount:references.filter(ref => ref.notUploadedReason === 'over_reference_limit').length,
+        hasProductTruth:Boolean(productRefs.length),
+        hasProductDetail:Boolean(roleCount('product_detail_reference')),
+        hasProductConflict:Boolean(conflictHints),
+        hasPersonIdentity:Boolean(personRefs.length),
+        hasCompositionReference:Boolean(styleRefs.length),
+        hasStyleReference:Boolean(styleRefs.length),
+        hasTextReference:Boolean(textRefs.length),
+        hasCompositionStyleRisk:Boolean(styleRefs.length && productRefs.length && imageRefs.length > selected.length),
+        references,
+        uploadReferences:selected,
+        notUploadedReasons:references.filter(ref => !ref.upload).map(ref => ({index:ref.index, reason:ref.notUploadedReason || 'not_uploaded', role:ref.role || ''}))
+    };
+}
+function smartGenerationSpecFromContext(ctx, preflight=null, productFacts=null){
+    const runSettings = ctx?.settings || settings;
+    const prompt = ctx?.userPrompt || '';
+    return {
+        task:{type:ctx?.kind || 'image', count:Math.max(1, Math.min(8, Number(runSettings.count || 1))), variant_mode:runSettings.variantMode || 'auto'},
+        product:{
+            enabled:Boolean(preflight?.hasProductTruth || productFacts),
+            facts:productFacts || {},
+            identity_lock:preflight?.hasProductTruth ? 100 : 0,
+            structure_lock:preflight?.hasProductTruth ? 100 : 0,
+            color_lock:/allow change product color|允许改变产品颜色|颜色可变/i.test(prompt) ? 40 : (preflight?.hasProductTruth ? 90 : 0),
+            allowed_changes:smartLatestRequestChangesBackgroundPalette(null, prompt) ? ['background_palette'] : [],
+            forbidden_changes:preflight?.hasProductTruth ? ['generic_product_substitution'] : []
+        },
+        composition:{camera:smartCameraControlRequested(prompt) ? 'camera_controlled' : '', angle:'', framing:'', aspect_ratio:sizeForRun(runSettings), reference_strength:preflight?.hasCompositionReference ? 65 : 0},
+        character:{enabled:smartGenerationAllowsHuman(null, ctx?.references || [], prompt), identity_lock:/same person|人物身份|identity/i.test(prompt), pose:'', hand_interaction:smartHumanInteractionPositivePattern().test(prompt) ? 'requested' : ''},
+        style:{description:'', reference_strength:preflight?.hasStyleReference ? 65 : 0},
+        text:{preserve_source_text:Boolean(preflight?.hasTextReference), required_text:[], forbidden_text:[]},
+        lighting:{description:''},
+        references:(preflight?.references || []).map(ref => ({index:ref.index, role:ref.role, upload:ref.upload, reason:ref.notUploadedReason || ''})),
+        negative:[],
+        user_instruction:ctx?.displayPrompt || prompt
+    };
+}
 function smartBuildGenerationTrace({node, prompt='', refs=[], runSettings=settings, kind='image'}={}){
     const basePrompt = String(prompt || '');
     const apiImageRun = kind === 'image' && isApiLikeEngine(runSettings.engine);
     const tracePrompt = apiImageRun
         ? [outputCanvasLockPrompt(runSettings), smartRelaxPromptForReferenceSimilarity(smartRelaxPromptForCameraControl(basePrompt))].filter(Boolean).join('\n\n')
         : basePrompt;
-    const creative = apiImageRun && smartCreativeVariantRequested(tracePrompt);
-    const cameraControlled = apiImageRun && smartCameraControlRequested(tracePrompt);
-    const referencePool = apiImageRun
-        ? (creative || cameraControlled ? smartCreativeReferenceImages(refs) : imageRefsOnly(refs))
-        : imageRefsOnly(refs);
+    const preflight = smartAnalyzeReferencePreflight({node, prompt:basePrompt, refs, runSettings, kind});
     const imageRefs = imageRefsOnly(refs);
-    const uploadRefs = apiImageRun
-        ? referencePool.filter(smartReferenceUploadAllowed).slice(0, smartGenerationReferenceLimit(tracePrompt, referencePool))
-        : imageRefs.filter(smartReferenceUploadAllowed);
-    const uploadKeys = new Set(uploadRefs.map(ref => smartReferenceUrlKey(ref?.url || ref?.sourceUrl || '')));
     const allowHuman = smartGenerationAllowsHuman(node, refs, prompt);
     const productRefs = imageRefs.filter(ref => ref?.role === 'product_truth_reference' || ref?.role === 'product_detail_reference');
     const primaryRefs = imageRefs.filter(ref => ['composition_reference','primary_style_reference','primary_reference'].includes(ref?.role));
@@ -967,30 +1147,23 @@ function smartBuildGenerationTrace({node, prompt='', refs=[], runSettings=settin
         quality:runSettings.quality || '',
         count:kind === 'image' ? Math.max(1, Math.min(8, Number(runSettings.count || 1))) : 1,
         promptLength:tracePrompt.length,
+        estimatedPromptTokens:smartEstimateTokens(tracePrompt),
         promptPreview:tracePrompt.slice(0, 2200),
         referenceCount:imageRefs.length,
-        uploadReferenceCount:uploadRefs.length,
+        uploadReferenceCount:preflight.uploadReferenceCount,
+        maxReferenceImages:preflight.maxReferenceImages,
+        analysisOnlyReferenceCount:preflight.analysisOnlyCount,
+        overLimitReferenceCount:preflight.overLimitCount,
         productReferenceCount:productRefs.length,
         primaryReferenceCount:primaryRefs.length,
         editBaseReferenceCount:editBaseRefs.length,
+        referencePreflight:preflight,
         allowHuman,
         noHumanLock:!allowHuman,
         productLock:Boolean(productRefs.length),
+        productConflict:preflight.hasProductConflict,
         posterCopy:smartPosterCopyEnabledInRequest(prompt, refs),
-        references:imageRefs.map((ref, index) => ({
-            index:index + 1,
-            name:ref.name || `Image ${index + 1}`,
-            role:ref.role || '',
-            roleLabel:smartReferenceRoleLabel(ref),
-            upload:uploadKeys.has(smartReferenceUrlKey(ref.url || ref.sourceUrl || '')),
-            uploadLabel:uploadKeys.has(smartReferenceUrlKey(ref.url || ref.sourceUrl || '')) ? '\u4e0a\u4f20' : (smartReferenceUploadAllowed(ref) ? '\u8d85\u9650\u672a\u4f20' : '\u4e0d\u4e0a\u4f20'),
-            weight:smartReferenceRoleWeight(ref),
-            fidelity:ref.inputFidelity || '',
-            kind:mediaKindForItem(ref),
-            generatedEditBase:Boolean(ref.generatedEditBase || ref.structureLock),
-            containsPerson:ref.containsPerson === true || ref.hasPerson === true || ref.personReference === true || ref.humanReference === true,
-            url:ref.url || ''
-        }))
+        references:preflight.references
     };
 }
 function smartTraceSummary(trace){
@@ -1011,7 +1184,7 @@ function smartPreflightReferenceRows(trace){
             <span class="generation-preflight-ref-name" title="${escapeAttr(ref.name || '')}">${escapeHtml(ref.name || `Image ${ref.index}`)}</span>
             <span class="generation-preflight-ref-role">${escapeHtml(ref.roleLabel || '')}</span>
             <span class="generation-preflight-ref-state">${escapeHtml(ref.uploadLabel || '')}</span>
-            <span class="generation-preflight-ref-weight">${Number(ref.weight || 0)}%</span>
+            <span class="generation-preflight-ref-weight" title="${escapeAttr([ref.userRole ? `user:${ref.userRole}` : '', ref.autoRole ? `auto:${ref.autoRole}` : '', ref.notUploadedReason ? `reason:${ref.notUploadedReason}` : ''].filter(Boolean).join(' / '))}">${Number(ref.weight || 0)}%</span>
         </div>
     `).join('');
 }
@@ -1020,6 +1193,8 @@ function smartPreflightLockHtml(trace){
         {label:'\u4eba\u7269', value:trace?.allowHuman ? '\u5141\u8bb8' : '\u4e0d\u5141\u8bb8', strong:!trace?.allowHuman},
         {label:'\u4ea7\u54c1', value:trace?.productLock ? `\u5df2\u9501\u5b9a ${trace.productReferenceCount}` : '\u672a\u9501\u5b9a', strong:trace?.productLock},
         {label:'\u53c2\u8003\u56fe', value:`${trace?.uploadReferenceCount || 0}/${trace?.referenceCount || 0} \u4e0a\u4f20`, strong:Boolean(trace?.uploadReferenceCount)},
+        {label:'\u4e0a\u9650', value:String(trace?.maxReferenceImages ?? '-'), strong:Boolean(trace?.overLimitReferenceCount)},
+        {label:'\u672a\u4e0a\u4f20', value:String(trace?.overLimitReferenceCount || 0), strong:Boolean(trace?.overLimitReferenceCount)},
         {label:'\u5c3a\u5bf8', value:trace?.size || '\u9ed8\u8ba4', strong:Boolean(trace?.size)}
     ];
     return items.map(item => `<span class="generation-preflight-chip ${item.strong ? 'strong' : ''}"><small>${escapeHtml(item.label)}</small>${escapeHtml(item.value)}</span>`).join('');
@@ -6447,6 +6622,13 @@ function addSmartGenerationLog({run, outputs=[], runMs=0, error=''}) {
         outputs:outputUrls,
         refs:run?.refs || [],
         trace:run?.trace || null,
+        runContext:run?.runContext || null,
+        diagnostics:run?.diagnostics || run?.trace?.diagnostics || null,
+        generationSpec:run?.generationSpec || null,
+        productFacts:run?.productFacts || null,
+        referencePreflight:run?.referencePreflight || run?.trace?.referencePreflight || null,
+        promptBeforeGuard:run?.promptBeforeGuard || '',
+        promptAfterGuard:run?.promptAfterGuard || '',
         runMs:Number(runMs || 0),
         error:error ? String(error) : ''
     };
@@ -13502,11 +13684,16 @@ function smartProductReplacementStyleBridgePrompt(allowHuman=false){
     ].join(' ');
 }
 const smartProductRecognitionCache = new Map();
+const SMART_PRODUCT_RECOGNITION_PROMPT_VERSION = 'phase4-product-facts-v1';
 function smartProductTruthRefs(refs=[]){
     return imageRefsOnly(refs).filter(ref => ref?.role === 'product_truth_reference' || ref?.role === 'product_detail_reference');
 }
-function smartProductRecognitionCacheKey(refs=[]){
-    return smartProductTruthRefs(refs).map(ref => `${ref.url || ''}|${ref.name || ''}`).join('||');
+function smartProductRecognitionCacheKey(refs=[], model=''){
+    const refKey = smartProductTruthRefs(refs).map(ref => {
+        const contentKey = ref.sha256 || ref.contentSha256 || ref.asset_sha256 || smartHashText(`${ref.url || ''}|${ref.name || ''}|${ref.w || ''}x${ref.h || ''}`);
+        return `${contentKey}:${ref.role || ''}`;
+    }).join('||');
+    return `${SMART_PRODUCT_RECOGNITION_PROMPT_VERSION}|${model || 'auto'}|${refKey}`;
 }
 function smartProductRecognitionMessage(refs=[]){
     const labels = smartProductTruthRefs(refs).map((ref, index) => `Product reference ${index + 1}: ${ref.name || `Image ${index + 1}`}`).join('\n');
@@ -13514,27 +13701,67 @@ function smartProductRecognitionMessage(refs=[]){
         'Analyze the attached product reference images for image generation.',
         labels,
         '',
-        'Return a concise English product identity brief. Focus only on visible product truth:',
-        '- exact product category and packaging format',
-        '- silhouette, proportions, dimensions, front/back/side/top/underside structure',
-        '- cap, nozzle, pump, opening, seal, tabs, folds, handle, box edges, bottle shape, pouch shape, shell seams, upper/lower body split, feet, buttons, display panels, vents, brackets, or other structural parts',
-        '- distinctive features that separate this SKU from similar products in style/poster references',
-        '- for brush, comb, massage, beauty, or handheld devices: exact head/cap shape, teeth/pins/bristle pattern, light/LED placement, circular control or display disk, button/icon layout, handle curves, shell seams, and contact surfaces',
-        '- for devices or mechanical products: motor/coil/gear/wire/PCB locations, internal cavity relationship, shell layering, cutaway/exploded-view constraints, and what components must stay inside the body instead of becoming separate props',
-        '- material and surface finish: paper, plastic, transparent film, glass, metal, matte, satin, glossy, translucent',
-        '- dominant colors, accent colors, label blocks, icon placement, border lines, panel layout, readable text if legible',
-        '- what must NOT change when generating a new scene',
+        'Return JSON only with this shape:',
+        '{"category":"","brand":"","model":"","main_colors":[],"materials":[],"silhouette":[],"controls":[],"ports":[],"logos":[],"must_preserve":[],"uncertain":[],"forbidden_changes":[],"conflicts":[],"confidence":0}',
         '',
-        'Do not guess brand names or exact text that is unreadable. If text is unclear, describe it as unreadable label blocks with the same layout.'
+        'Focus only on visible product truth. Do not guess brand names, hidden/internal structure, accessories, or exact text that is not readable.',
+        'If text/logo/parts are unclear, put them in uncertain. If multiple product views conflict, list conflicts.',
+        'Separate confirmed visible facts from uncertainty. Product facts assist prompting and must not override explicit user instructions.',
+        '',
+        'Include exact product category, packaging/device format, silhouette, proportions, shell/body geometry, controls, ports, material, surface finish, dominant colors, logos/label blocks if legible, and what must not change.'
     ].join('\n');
+}
+function defaultSmartProductFacts(){
+    return {category:'', brand:'', model:'', main_colors:[], materials:[], silhouette:[], controls:[], ports:[], logos:[], must_preserve:[], uncertain:[], forbidden_changes:[], conflicts:[], confidence:0};
+}
+function normalizeSmartProductFacts(value){
+    const raw = value && typeof value === 'object' ? value : {};
+    const facts = defaultSmartProductFacts();
+    Object.keys(facts).forEach(key => {
+        if(Array.isArray(facts[key])) facts[key] = Array.isArray(raw[key]) ? raw[key].map(item => String(item || '').trim()).filter(Boolean).slice(0, 16) : [];
+        else if(key === 'confidence') facts[key] = Math.max(0, Math.min(1, Number(raw[key]) || 0));
+        else facts[key] = String(raw[key] || '').trim().slice(0, 160);
+    });
+    return facts;
+}
+function parseSmartProductFacts(text){
+    const value = String(text || '').trim();
+    const jsonText = (value.match(/\{[\s\S]*\}/) || [value])[0];
+    try { return normalizeSmartProductFacts(JSON.parse(jsonText)); }
+    catch(_) {
+        const facts = defaultSmartProductFacts();
+        facts.must_preserve = value ? [value.slice(0, 700)] : [];
+        facts.uncertain = ['Product recognition returned non-JSON text; using it as a conservative summary.'];
+        facts.confidence = 0.35;
+        return facts;
+    }
+}
+function smartProductFactsSummary(facts){
+    const f = normalizeSmartProductFacts(facts);
+    const parts = [
+        f.category ? `category: ${f.category}` : '',
+        f.brand ? `brand/logo: ${f.brand}` : '',
+        f.model ? `model: ${f.model}` : '',
+        f.main_colors.length ? `colors: ${f.main_colors.join(', ')}` : '',
+        f.materials.length ? `materials: ${f.materials.join(', ')}` : '',
+        f.silhouette.length ? `silhouette: ${f.silhouette.join(', ')}` : '',
+        f.controls.length ? `controls: ${f.controls.join(', ')}` : '',
+        f.ports.length ? `ports: ${f.ports.join(', ')}` : '',
+        f.logos.length ? `logos/text: ${f.logos.join(', ')}` : '',
+        f.must_preserve.length ? `must preserve: ${f.must_preserve.join('; ')}` : '',
+        f.forbidden_changes.length ? `forbidden changes: ${f.forbidden_changes.join('; ')}` : '',
+        f.uncertain.length ? `uncertain: ${f.uncertain.join('; ')}` : '',
+        f.conflicts?.length ? `conflicts: ${f.conflicts.join('; ')}` : ''
+    ].filter(Boolean);
+    return parts.join('\n').slice(0, 1100);
 }
 async function smartAnalyzeProductTruthRefs(refs=[], runSettings=settings){
     const productRefs = smartEvenlySampleReferences(smartProductTruthRefs(refs), 5);
-    if(!productRefs.length) return '';
-    const key = smartProductRecognitionCacheKey(productRefs);
-    if(smartProductRecognitionCache.has(key)) return smartProductRecognitionCache.get(key);
+    if(!productRefs.length) return {summary:'', facts:null, cacheHit:false, cacheKey:''};
     const provider = resolveChatProviderId(runSettings?.provider_id || '');
     const model = resolveChatModel('', provider);
+    const key = smartProductRecognitionCacheKey(productRefs, model);
+    if(smartProductRecognitionCache.has(key)) return {...smartProductRecognitionCache.get(key), cacheHit:true};
     const result = await fetch('/api/canvas-llm', {
         method:'POST',
         headers:{'Content-Type':'application/json'},
@@ -13546,22 +13773,25 @@ async function smartAnalyzeProductTruthRefs(refs=[], runSettings=settings){
             model,
             provider,
             ms_model: provider === 'modelscope' ? model : '',
-            system_prompt:'You are a precise commercial product visual analyst. Describe only visible product facts for image generation. Do not invent unreadable text.'
+            system_prompt:'You are a precise commercial product visual analyst. Return strict JSON only. Describe only visible product facts for image generation. Do not invent unreadable text, hidden structure, or accessories.'
         })
     }).then(async r => {
         if(!r.ok) throw new Error(await r.text());
         return r.json();
     });
-    const summary = String(result?.text || '').replace(/\s+/g, ' ').trim().slice(0, 900);
-    smartProductRecognitionCache.set(key, summary);
-    return summary;
+    const facts = parseSmartProductFacts(result?.text || '');
+    const summary = smartProductFactsSummary(facts);
+    const record = {summary, facts, cacheHit:false, cacheKey:key, model, promptVersion:SMART_PRODUCT_RECOGNITION_PROMPT_VERSION, recognizedAt:Date.now()};
+    smartProductRecognitionCache.set(key, record);
+    return record;
 }
 async function smartPromptWithProductRecognition(prompt, refs=[], runSettings=settings){
     if(!runSettings?.productRecognitionEnabled) return prompt;
     const productRefs = smartProductTruthRefs(refs);
     if(!productRefs.length) return prompt;
     try {
-        const summary = await smartAnalyzeProductTruthRefs(productRefs, runSettings);
+        const recognized = await smartAnalyzeProductTruthRefs(productRefs, runSettings);
+        const summary = recognized?.summary || '';
         if(!summary) return prompt;
         const lock = [
             'Product recognition summary from product reference images:',
@@ -15300,13 +15530,13 @@ function buildPromptRequestForNode(node, defaultImages, ctx=smartLoopContext){
         promptInput.innerHTML = oldHtml;
     }
 }
-async function generateUrlsForCurrentSettings(node, prompt, refs, runSettings=settings){
+async function generateUrlsForCurrentSettings(node, prompt, refs, runSettings=settings, runContext=null){
     const activeSettings = runSettings || settings;
     if(isApiLikeEngine(activeSettings.engine) && activeSettings.apiKind === 'video'){
         return {urls:await runApiVideoGeneration(prompt, refs, activeSettings), kind:'video'};
     }
     if(isApiLikeEngine(activeSettings.engine)){
-        const taskResult = await runApiGeneration(prompt, refs, activeSettings);
+        const taskResult = await runApiGeneration(prompt, refs, activeSettings, runContext || createSmartRunContext({node, prompt, refs, runSettings:activeSettings, kind:'image'}));
         const taskIds = Array.isArray(taskResult?.taskIds) ? taskResult.taskIds : [];
         if(taskIds.length){
             const settled = await Promise.allSettled(taskIds.map(taskId => pollSmartCanvasTask(taskId)));
@@ -15389,7 +15619,8 @@ async function runCascadeStepIntoNode(sourceNode, targetNode, inputRefs, ctx=sma
     render();
     settings = previousSettings;
     try {
-        const result = await generateUrlsForCurrentSettings(outputNode, prompt, request.refs || [], runSettings);
+        const stepContext = createSmartRunContext({node:requestNode, prompt, displayPrompt, refs:request.refs || [], runSettings, kind:logKind});
+        const result = await generateUrlsForCurrentSettings(outputNode, prompt, request.refs || [], runSettings, stepContext);
         if(!result.urls?.length) throw new Error(result.kind === 'video' ? tr('smart.errNoOutVideos') : tr('smart.errNoOutImages'));
         if(outpaintSize) delete requestNode.outpaintSize;
         addSmartGenerationLog({run:{...runLog, kind:result.kind || logKind}, outputs:result.urls, runMs:nowMs() - runLogStart});
@@ -15476,7 +15707,8 @@ async function runLoopRoundIntoSlot(loopNode, rootNode, outputSlot, loopIndex, c
         settings = previousSettings;
         let result;
         if(isApiLikeEngine(runSettings.engine) && runSettings.apiKind !== 'video'){
-            const taskResult = await runApiGeneration(prompt, request.refs || [], runSettings);
+            const stepContext = createSmartRunContext({node:rootNode, prompt, displayPrompt, refs:request.refs || [], runSettings, kind:logKind});
+            const taskResult = await runApiGeneration(prompt, request.refs || [], runSettings, stepContext);
             const taskIds = Array.isArray(taskResult?.taskIds) ? taskResult.taskIds : [];
             if(!taskIds.length) throw new Error(tr('smart.errRunFailed'));
             const existing = cleanHistoryImages(outputSlot.images || []);
@@ -15505,7 +15737,8 @@ async function runLoopRoundIntoSlot(loopNode, rootNode, outputSlot, loopIndex, c
             }
             result = {urls:(outputSlot.images || []).map(img => img?.url ? img : null).filter(Boolean), kind:'image'};
         } else {
-            result = await generateUrlsForCurrentSettings(outputSlot, prompt, request.refs || [], runSettings);
+            const stepContext = createSmartRunContext({node:rootNode, prompt, displayPrompt, refs:request.refs || [], runSettings, kind:logKind});
+            result = await generateUrlsForCurrentSettings(outputSlot, prompt, request.refs || [], runSettings, stepContext);
         }
         if(!result.urls?.length) throw new Error(result.kind === 'video' ? tr('smart.errNoOutVideos') : tr('smart.errNoOutImages'));
         let additions;
@@ -15891,8 +16124,21 @@ async function runGeneration(){
         return;
     }
     trace = smartBuildGenerationTrace({node, prompt, refs, runSettings:settings, kind:logKind});
+    const runContext = createSmartRunContext({node, prompt, displayPrompt:request.displayPrompt, refs, runSettings:settings, kind:logKind});
     const meta = snapshotRunMeta(prompt, node.id, request.displayPrompt, refs, trace);
+    meta.runContext = {
+        requestId:runContext.requestId,
+        canvasId:runContext.canvasId,
+        nodeId:runContext.nodeId,
+        provider:runContext.provider,
+        model:runContext.model,
+        promptHash:runContext.promptHash,
+        referenceSetHash:runContext.referenceSetHash,
+        compilerVersion:runContext.compilerVersion,
+        createdAt:runContext.createdAt
+    };
     const runLog = smartRunSnapshot(node, prompt, refs, logKind);
+    runLog.runContext = meta.runContext;
     rememberRecentSmartSettings(settings, node);
     const runLogStart = nowMs();
     const expectedCount = Math.max(1, Math.min(8, Number(settings.count || 1)));
@@ -15951,7 +16197,7 @@ async function runGeneration(){
         }
         const outImages = settings.engine === 'modelscope'
             ? await runModelscopeGeneration(prompt, refs)
-            : await runApiGeneration(prompt, refs);
+            : await runApiGeneration(prompt, refs, settings, runContext);
         if(isApiLikeEngine(settings.engine)){
             const taskIds = Array.isArray(outImages?.taskIds) ? outImages.taskIds : [];
             if(!taskIds.length) throw new Error(tr('smart.errRunFailed'));
@@ -15960,6 +16206,12 @@ async function runGeneration(){
             const failedTasks = (outImages.failures || []).map(item => smartPendingTaskFromSubmitFailure(item, {providerId:outImages.providerId, model:outImages.model, requestId:outImages.requestId, size:requestedSize}));
             pendingNode.pendingTasks = [...submittedTasks, ...failedTasks];
             pendingNode.pending = Math.max(pendingNode.pendingTasks.length, Number(pendingNode.pending || 0) || pendingNode.pendingTasks.length);
+            pendingNode.runDiagnostics = outImages.diagnostics || null;
+            pendingNode.generationSpec = outImages.generationSpec || null;
+            pendingNode.productFacts = outImages.productFacts || pendingNode.productFacts || null;
+            pendingNode.referencePreflight = outImages.referencePreflight || null;
+            pendingNode.promptBeforeGuard = outImages.promptBeforeGuard || '';
+            pendingNode.promptAfterGuard = outImages.promptAfterGuard || '';
             pendingNode.runStartedAt = nowMs();
             pendingNode.runTimerHidden = false;
             pendingNode.running = false;
@@ -15983,6 +16235,12 @@ async function runGeneration(){
             if(!(pendingNode.images || []).length) throw new Error(tr('smart.errNoOutImages'));
             if(outpaintSize) delete node.outpaintSize;
             if(sourceVisualState) restoreSourceVisualState(node, sourceVisualState);
+            runLog.diagnostics = outImages.diagnostics || null;
+            runLog.generationSpec = outImages.generationSpec || null;
+            runLog.productFacts = outImages.productFacts || null;
+            runLog.referencePreflight = outImages.referencePreflight || null;
+            runLog.promptBeforeGuard = outImages.promptBeforeGuard || '';
+            runLog.promptAfterGuard = outImages.promptAfterGuard || '';
             addSmartGenerationLog({run:runLog, outputs:(pendingNode.images || []).map(img => img.url).filter(Boolean), runMs:nowMs() - runLogStart});
             clearPromptInput({preserveDraft:true});
             settings = previousSettings;
@@ -16374,12 +16632,41 @@ function smartRepairPromptFragments(value){
         })
         .join('\n\n');
 }
+function smartDedupePromptSections(value){
+    const sections = smartPromptSections(value);
+    const seenExact = new Set();
+    const seenRule = new Set();
+    const deduped = [];
+    const keepAlways = /^(?:Highest priority user modification request|Latest user modification request|Active additional generation guidance|Product truth references|Product recognition summary|NO HUMAN SUBJECT LOCK|POSTER COPY LOCK|HIGHEST PRIORITY CAMERA OVERRIDE|FINAL PRODUCT CHECK|Negative prompt)/i;
+    const ruleKey = section => String(section || '')
+        .replace(/\s+/g, ' ')
+        .replace(/\bImage\s+\d+\b/gi, 'Image #')
+        .replace(/\d+%/g, '#%')
+        .trim()
+        .toLowerCase()
+        .slice(0, 260);
+    sections.forEach(section => {
+        const normalized = smartNormalizePromptText(section);
+        if(!normalized) return;
+        const exact = normalized.toLowerCase();
+        if(seenExact.has(exact)) return;
+        seenExact.add(exact);
+        const key = ruleKey(normalized);
+        const duplicateRule = seenRule.has(key);
+        if(duplicateRule && !keepAlways.test(normalized)) return;
+        seenRule.add(key);
+        deduped.push(normalized);
+    });
+    const prompt = deduped.join('\n\n');
+    return {prompt, originalLength:String(value || '').length, dedupedLength:prompt.length, removedCount:Math.max(0, sections.length - deduped.length), changed:prompt.length !== String(value || '').length};
+}
 function smartCompressPromptToBudget(value, budget=SMART_IMAGE_PROMPT_BUDGET, options={}){
     const safeSentenceMode = options?.repairFragments === true;
-    const original = smartNormalizePromptText(safeSentenceMode ? smartRepairPromptFragments(value) : value);
+    const dedupe = smartDedupePromptSections(safeSentenceMode ? smartRepairPromptFragments(value) : value);
+    const original = smartNormalizePromptText(dedupe.prompt);
     const maxLength = Math.max(300, Number(budget) || SMART_IMAGE_PROMPT_BUDGET);
     if(!original || original.length <= maxLength){
-        return {prompt:original, originalLength:original.length, compressedLength:original.length, changed:false};
+        return {prompt:original, originalLength:String(value || '').length, dedupedLength:original.length, compressedLength:original.length, deduplicatedRules:dedupe.removedCount, changed:dedupe.changed};
     }
     const entries = smartPromptSections(original).map((text, index) => {
         const profile = smartPromptSectionProfile(text);
@@ -16398,9 +16685,11 @@ function smartCompressPromptToBudget(value, budget=SMART_IMAGE_PROMPT_BUDGET, op
     prompt = smartNormalizePromptText(prompt).slice(0, maxLength);
     return {
         prompt,
-        originalLength:original.length,
+        originalLength:String(value || '').length,
+        dedupedLength:original.length,
         compressedLength:prompt.length,
-        changed:prompt.length < original.length
+        deduplicatedRules:dedupe.removedCount,
+        changed:prompt.length < String(value || '').length
     };
 }
 function smartNotifyPromptCompression(result, label='提示词'){
@@ -16516,20 +16805,41 @@ function smartVariantPrompt(prompt, index, total, refs=[]){
         : (allowHuman ? posePlans : productOnlyPosePlans)[index % posePlans.length];
     return [text, `Variant ${index + 1} of ${count}: ${plan}`, lock, quality].filter(Boolean).join('\n\n');
 }
-async function runApiGeneration(prompt, refs, runSettings=settings){
+async function runApiGeneration(prompt, refs, runSettings=settings, runContext=null){
     if(!runSettings.provider_id || !runSettings.model) throw new Error(tr('smart.errNoApiModel'));
+    const ctx = runContext || createSmartRunContext({node:null, prompt, refs, runSettings, kind:'image'});
+    const diag = ctx.diagnostics || createSmartGenerationDiagnostics(ctx.requestId);
+    diag.mark('prompt_build');
     const count = Math.max(1, Math.min(8, Number(runSettings.count || 1)));
     const canvasLock = outputCanvasLockPrompt(runSettings);
     const effectivePrompt = [canvasLock, smartRelaxPromptForReferenceSimilarity(smartRelaxPromptForCameraControl(prompt))]
         .filter(Boolean)
         .join('\n\n');
+    diag.measure('prompt_build_ms', 'prompt_build');
+    diag.mark('reference_resolve');
     const creative = smartCreativeVariantRequested(effectivePrompt);
     const cameraControlled = smartCameraControlRequested(effectivePrompt);
     const referencePool = creative || cameraControlled ? smartCreativeReferenceImages(refs) : imageRefsOnly(refs);
     const referenceImages = referencePool
         .filter(smartReferenceUploadAllowed)
         .slice(0, smartGenerationReferenceLimit(effectivePrompt, referencePool));
-    const productPrompt = await smartPromptWithProductRecognition(effectivePrompt, referenceImages, runSettings);
+    const preflight = smartAnalyzeReferencePreflight({node:null, prompt:effectivePrompt, refs, runSettings, kind:'image'});
+    diag.measure('reference_resolve_ms', 'reference_resolve');
+    diag.mark('product_recognition');
+    const recognizedProduct = runSettings?.productRecognitionEnabled ? await smartAnalyzeProductTruthRefs(referenceImages, runSettings).catch(err => {
+        console.warn('Product recognition failed; continuing with product truth lock.', err);
+        return {summary:'', facts:null, cacheHit:false, error:String(err?.message || err || '')};
+    }) : {summary:'', facts:null, cacheHit:false};
+    diag.measure('product_recognition_ms', 'product_recognition');
+    let productPrompt = effectivePrompt;
+    if(recognizedProduct?.summary && !String(productPrompt || '').includes('Product recognition summary from product reference images:')){
+        const lock = [
+            'Product recognition summary from product reference images:',
+            recognizedProduct.summary,
+            'Use this as the strict product identity and structure anchor. Keep the same product, structural relationships, shell/layer geometry, control/display placement, and label-block layout; do not substitute generic packaging, generic appliance geometry, separate loose parts, or invented unreadable text.'
+        ].join('\n');
+        productPrompt = [lock, productPrompt].filter(Boolean).join('\n\n');
+    }
     const productReplacement = Boolean(smartProductReplacementRolePrompt(referenceImages));
     const productOnlyReplacement = productReplacement && String(effectivePrompt || '').includes('NO HUMAN SUBJECT LOCK:');
     const posterCopyEnabledRun = smartPosterCopyEnabledInRequest(productPrompt || effectivePrompt, referenceImages);
@@ -16544,22 +16854,35 @@ async function runApiGeneration(prompt, refs, runSettings=settings){
     const compressionOptions = productOnlyReplacement ? {repairFragments:true} : {};
     const compressedBase = smartCompressPromptToBudget(productPrompt, baseBudget, compressionOptions);
     smartNotifyPromptCompression(compressedBase);
-    const requestId = uid('smart_req');
+    const generationSpec = smartGenerationSpecFromContext(ctx, preflight, recognizedProduct?.facts || null);
+    const specHash = smartHashText(smartStableJson(generationSpec));
+    const requestId = ctx.requestId || uid('smart_req');
     const basePayload = {provider_id:runSettings.provider_id, model:runSettings.model, size:sizeForRun(runSettings), quality:runSettings.quality || 'auto', n:1, reference_images:referenceImages};
+    diag.mark('request_prepare');
     const submitPayloads = Array.from({length:count}, (_, index) => {
         const variantPrompt = smartVariantPrompt(compressedBase.prompt, index, count, referenceImages);
+        const finalPrompt = smartCompressPromptToBudget(variantPrompt, requestBudget, compressionOptions).prompt;
         return {
             ...basePayload,
-            prompt:smartCompressPromptToBudget(variantPrompt, requestBudget, compressionOptions).prompt,
+            prompt:finalPrompt,
             request_id:requestId,
-            batch_index:index
+            batch_index:index,
+            generation_spec:generationSpec,
+            prompt_hash:smartHashText(finalPrompt),
+            reference_set_hash:ctx.referenceSetHash,
+            generation_spec_hash:specHash,
+            variant_index:index,
+            variant_mode:runSettings.variantMode || 'auto'
         };
     });
+    diag.measure('request_prepare_ms', 'request_prepare');
+    diag.mark('provider_submit');
     const settled = await Promise.allSettled(submitPayloads.map(payload => fetchSmartCanvasTaskJson('/api/canvas-image-tasks', {
         method:'POST',
         headers:{'Content-Type':'application/json'},
         body:JSON.stringify(payload)
     })));
+    diag.measure('provider_submit_ms', 'provider_submit');
     const tasks = [];
     const failures = [];
     settled.forEach((item, index) => {
@@ -16572,7 +16895,12 @@ async function runApiGeneration(prompt, refs, runSettings=settings){
                 model:item.value.model || basePayload.model,
                 status:item.value.status || 'submitted',
                 upstreamTaskId:item.value.upstream_task_id || '',
-                size:basePayload.size
+                size:basePayload.size,
+                variantIndex:index,
+                variantMode:runSettings.variantMode || 'auto',
+                promptHash:submitPayloads[index]?.prompt_hash || '',
+                referenceSetHash:ctx.referenceSetHash,
+                generationSpecHash:specHash
             });
         } else {
             failures.push({
@@ -16584,7 +16912,27 @@ async function runApiGeneration(prompt, refs, runSettings=settings){
         }
     });
     if(!tasks.length) throw (failures[0]?.error || new Error(tr('smart.errRunFailed')));
-    return {taskIds:tasks.map(task => task.taskId).filter(Boolean), tasks, failures, requestId, count, providerId:basePayload.provider_id, model:basePayload.model, size:basePayload.size};
+    const finalPromptChars = submitPayloads.reduce((max, payload) => Math.max(max, String(payload.prompt || '').length), 0);
+    const diagnostics = diag.finish({
+        raw_prompt_chars:String(prompt || '').length,
+        final_prompt_chars:finalPromptChars,
+        estimated_prompt_tokens:smartEstimateTokens(submitPayloads[0]?.prompt || compressedBase.prompt),
+        reference_image_count:referenceImages.length,
+        reference_total_bytes:smartByteLength(referenceImages.map(ref => ({url:ref.url || '', role:ref.role || '', name:ref.name || ''}))),
+        request_body_bytes:smartByteLength(submitPayloads[0] || {}),
+        provider:basePayload.provider_id,
+        model:basePayload.model,
+        request_id:requestId,
+        task_id:tasks.map(task => task.taskId).join(','),
+        product_recognition_cache_hit:Boolean(recognizedProduct?.cacheHit),
+        product_recognition_model:recognizedProduct?.model || '',
+        product_recognition_confidence:recognizedProduct?.facts?.confidence ?? '',
+        prompt_before_guard_chars:String(productPrompt || '').length,
+        prompt_after_guard_chars:compressedBase.compressedLength,
+        deduplicated_rules:compressedBase.deduplicatedRules || 0,
+        generation_spec_hash:specHash
+    });
+    return {taskIds:tasks.map(task => task.taskId).filter(Boolean), tasks, failures, requestId, count, providerId:basePayload.provider_id, model:basePayload.model, size:basePayload.size, diagnostics, generationSpec, productFacts:recognizedProduct?.facts || null, referencePreflight:preflight, promptBeforeGuard:productPrompt, promptAfterGuard:compressedBase.prompt};
 }
 async function runApiVideoGeneration(prompt, refs, runSettings=settings){
     if(!runSettings.videoModel) throw new Error(tr('smart.errNoVideoModel'));
@@ -16985,6 +17333,10 @@ function syncSmartPendingTaskSnapshot(taskId, data={}){
         task.upstreamTaskId = data.upstream_task_id;
         task.recoverTaskId = task.recoverTaskId || data.upstream_task_id;
     }
+    if(data.diagnostics) task.diagnostics = data.diagnostics;
+    if(data.prompt_hash) task.promptHash = data.prompt_hash;
+    if(data.reference_set_hash) task.referenceSetHash = data.reference_set_hash;
+    if(data.generation_spec_hash) task.generationSpecHash = data.generation_spec_hash;
 }
 async function querySmartImageTaskNow(nodeId, localTaskId){
     const node = nodes.find(n => n.id === nodeId);

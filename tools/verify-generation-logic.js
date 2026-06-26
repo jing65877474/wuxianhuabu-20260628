@@ -513,5 +513,55 @@ check(
         source.includes("SMART_TASK_RETRY_STATUSES = new Set([429, 502, 503, 504])"),
     "Smart canvas task submission must be itemized, retryable, idempotent, and resumable."
 );
+check(
+    source.includes("function createSmartRunContext") &&
+        source.includes("requestId") &&
+        source.includes("referenceSetHash") &&
+        source.includes("compilerVersion:'phase4-smart-v1'") &&
+        canvasSource.includes("function createCanvasRunContext") &&
+        canvasSource.includes("referenceSetHash"),
+    "Phase 4 must isolate generation parameters in runContext snapshots."
+);
+check(
+    source.includes("prompt_build_ms") &&
+        source.includes("product_recognition_ms") &&
+        source.includes("reference_resolve_ms") &&
+        source.includes("provider_submit_ms") &&
+        source.includes("request_body_bytes") &&
+        canvasSource.includes("estimated_prompt_tokens") &&
+        backendSource.includes('"diagnostics"'),
+    "Generation diagnostics must track prompt, reference, submit, and request-size timing metadata."
+);
+check(
+    source.includes("function smartAnalyzeReferencePreflight") &&
+        source.includes("notUploadedReasons") &&
+        source.includes("maxReferenceImages") &&
+        source.includes("hasProductConflict") &&
+        source.includes("userRole") &&
+        source.includes("autoRole"),
+    "Reference preflight must expose upload decisions, roles, limits, and not-uploaded reasons."
+);
+check(
+    source.includes("SMART_PRODUCT_RECOGNITION_PROMPT_VERSION") &&
+        source.includes('"category":""') &&
+        source.includes("normalizeSmartProductFacts") &&
+        source.includes("parseSmartProductFacts") &&
+        source.includes("smartProductRecognitionCacheKey(refs=[], model='')"),
+    "Product recognition must use structured JSON facts with versioned cache keys."
+);
+check(
+    source.includes("function smartGenerationSpecFromContext") &&
+        source.includes("generation_spec:generationSpec") &&
+        source.includes("generation_spec_hash:specHash") &&
+        backendSource.includes("generation_spec: Optional[Dict[str, Any]]"),
+    "Phase 4 must add a lightweight Generation Spec compatibility layer."
+);
+check(
+    source.includes("function smartDedupePromptSections") &&
+        source.includes("deduplicatedRules") &&
+        source.includes("promptBeforeGuard") &&
+        source.includes("promptAfterGuard"),
+    "Prompt compression must dedupe repeated rules and retain before/after prompt diagnostics."
+);
 
 console.log("generation-logic verification: OK");

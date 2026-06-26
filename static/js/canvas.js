@@ -7872,6 +7872,18 @@ async function runGenerator(genId, opts={}){
     };
     const quality = normalizedImageQuality(gen.quality);
     if(quality) payload.quality = quality;
+    const runContext = createCanvasRunContext({node:gen, prompt:payload.prompt, refs, payload});
+    run.runContext = {
+        requestId:runContext.requestId,
+        canvasId:runContext.canvasId,
+        nodeId:runContext.nodeId,
+        provider:runContext.provider,
+        model:runContext.model,
+        promptHash:runContext.promptHash,
+        referenceSetHash:runContext.referenceSetHash,
+        createdAt:runContext.createdAt
+    };
+    run.diagnostics = runContext.diagnostics;
     let pendingIds = [];
     const startedAt = nowMs();
     if(!opts.cascade){
@@ -7881,13 +7893,17 @@ async function runGenerator(genId, opts={}){
         setTimeout(() => { gen.running = false; refreshRunNodes(gen, out); }, 2000);
     }
     try {
-        const requestId = uid('canvas_req');
+        const requestId = runContext.requestId;
         pendingIds = Array.from({length:count}, () => uid('p'));
         const submitPayloads = Array.from({length:count}, (_, index) => ({
-            ...payload,
+            ...runContext.payload,
             n:1,
             request_id:requestId,
-            batch_index:index
+            batch_index:index,
+            prompt_hash:runContext.promptHash,
+            reference_set_hash:runContext.referenceSetHash,
+            variant_index:index,
+            variant_mode:'auto'
         }));
         const settledSubmits = await Promise.allSettled(submitPayloads.map(item => createCanvasImageTask(item, {cascadeTargetId})));
         const taskInfos = [];
@@ -7909,6 +7925,7 @@ async function runGenerator(genId, opts={}){
                 run.request = requestMetaFromResult(result);
             }
             if(!outputs.length) throw new Error(tr('canvas.generationFailed'));
+            run.diagnostics = {...run.diagnostics, total_ms:nowMs() - startedAt, task_id:taskInfos.map(task => task.task_id).join(',')};
             mergeGeneratedOutputs(gen, outputs, Boolean(opts.cascade));
             addGenerationLog({run, outputs, runMs:nowMs() - startedAt});
             gen.runStatus = 'done';
@@ -7928,6 +7945,10 @@ async function runGenerator(genId, opts={}){
                 requestId:task.requestId || requestId,
                 batchIndex:task.batchIndex,
                 upstreamTaskId:task.upstream_task_id || '',
+                promptHash:runContext.promptHash,
+                referenceSetHash:runContext.referenceSetHash,
+                variantIndex:task.batchIndex,
+                variantMode:'auto',
                 providerId:payload.provider_id,
                 model:payload.model,
                 appendGenerated:Boolean(opts.cascade)
@@ -7938,6 +7959,10 @@ async function runGenerator(genId, opts={}){
                 canvasTaskStatus:'submit_failed',
                 requestId,
                 batchIndex:item.index,
+                promptHash:runContext.promptHash,
+                referenceSetHash:runContext.referenceSetHash,
+                variantIndex:item.index,
+                variantMode:'auto',
                 providerId:payload.provider_id,
                 model:payload.model,
                 appendGenerated:Boolean(opts.cascade),
@@ -7951,7 +7976,9 @@ async function runGenerator(genId, opts={}){
         const statuses = await Promise.all(taskInfos.map(task => pollCanvasImageTask(task.task_id, {cascadeTargetId})));
         if(statuses.includes('aborted')) throw cascadeAbortError(cascadeStopMessage());
         if(statuses.includes('failed') && !statuses.includes('succeeded')) throw new Error(gen.runError || tr('canvas.generationFailed'));
+        run.diagnostics = {...run.diagnostics, total_ms:nowMs() - startedAt, task_id:taskInfos.map(task => task.task_id).join(',')};
     } catch(err) {
+        run.diagnostics = {...run.diagnostics, total_ms:nowMs() - startedAt};
         const remainingPending = pendingIds.map(id => pendingById(out, id)).filter(Boolean);
         const removableIds = remainingPending.filter(p => !(p.failed && (p.recoverTaskId || p.submitFailed))).map(p => p.id);
         if(removableIds.length){
@@ -8876,6 +8903,53 @@ function runSnapshot(node, prompt, refs=[]){
         refs: (refs || []).map(ref => ({url:ref.url, name:ref.name || 'image'})).filter(ref => ref.url),
     };
 }
+function canvasHashText(value){
+    const text = String(value || '');
+    let hash = 2166136261;
+    for(let i = 0; i < text.length; i++){
+        hash ^= text.charCodeAt(i);
+        hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(16).padStart(8, '0');
+}
+function canvasByteLength(value){
+    try { return new Blob([typeof value === 'string' ? value : JSON.stringify(value || {})]).size; }
+    catch(_) { return String(value || '').length; }
+}
+function canvasEstimateTokens(text){
+    const value = String(text || '');
+    return Math.max(1, Math.ceil(((value.match(/[A-Za-z0-9_]+/g) || []).length * 1.35) + ((value.match(/[^\x00-\x7F]/g) || []).length * 0.75)));
+}
+function createCanvasRunContext({node, prompt='', refs=[], payload={}}={}){
+    const requestId = uid('canvas_run');
+    const refSnapshot = (refs || []).map(ref => ({...ref}));
+    return {
+        requestId,
+        canvasId:canvas?.id || '',
+        nodeId:node?.id || '',
+        provider:payload.provider_id || node?.apiProvider || '',
+        model:payload.model || node?.model || '',
+        settings:JSON.parse(JSON.stringify(node || {})),
+        userPrompt:String(prompt || ''),
+        references:refSnapshot,
+        payload:{...payload, reference_images:(payload.reference_images || []).map(ref => ({...ref}))},
+        createdAt:Date.now(),
+        promptHash:canvasHashText(prompt),
+        referenceSetHash:canvasHashText(JSON.stringify(refSnapshot.map(ref => ({url:ref.url || '', role:ref.role || ''})))),
+        diagnostics:{
+            raw_prompt_chars:String(prompt || '').length,
+            final_prompt_chars:String(payload.prompt || prompt || '').length,
+            estimated_prompt_tokens:canvasEstimateTokens(payload.prompt || prompt),
+            reference_image_count:(payload.reference_images || []).length,
+            reference_total_bytes:canvasByteLength(payload.reference_images || []),
+            request_body_bytes:canvasByteLength(payload),
+            provider:payload.provider_id || '',
+            model:payload.model || '',
+            request_id:requestId,
+            total_ms:0
+        }
+    };
+}
 function runTaskLabel(run){
     const node = run?.node || {};
     if(run?.taskLabel) return run.taskLabel;
@@ -8918,6 +8992,8 @@ function addGenerationLog({run, outputs=[], runMs=0, error=''}) {
         prompt:run?.prompt || '',
         outputs:(outputs || []).filter(Boolean),
         refs:run?.refs || [],
+        runContext:run?.runContext || null,
+        diagnostics:run?.diagnostics || null,
         runMs:Number(runMs || 0),
         error:error ? String(error) : '',
     };
@@ -9236,6 +9312,10 @@ function syncCanvasPendingTaskSnapshot(taskId, data={}){
         pending.upstreamTaskId = data.upstream_task_id;
         pending.recoverTaskId = pending.recoverTaskId || data.upstream_task_id;
     }
+    if(data.diagnostics) pending.diagnostics = data.diagnostics;
+    if(data.prompt_hash) pending.promptHash = data.prompt_hash;
+    if(data.reference_set_hash) pending.referenceSetHash = data.reference_set_hash;
+    if(data.generation_spec_hash) pending.generationSpecHash = data.generation_spec_hash;
 }
 async function pollCanvasImageTask(taskId, options={}){
     if(!taskId) return 'failed';

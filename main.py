@@ -1945,6 +1945,12 @@ class OnlineImageRequest(BaseModel):
     reference_images: List[AIReference] = []
     request_id: str = Field(default="", max_length=120)
     batch_index: Optional[int] = None
+    generation_spec: Optional[Dict[str, Any]] = None
+    prompt_hash: str = Field(default="", max_length=80)
+    reference_set_hash: str = Field(default="", max_length=80)
+    generation_spec_hash: str = Field(default="", max_length=80)
+    variant_index: Optional[int] = None
+    variant_mode: str = Field(default="", max_length=80)
 
 class ImageTaskQueryRequest(BaseModel):
     provider_id: str = "comfly"
@@ -9238,6 +9244,7 @@ async def query_image_task(payload: ImageTaskQueryRequest):
     }
 
 async def run_canvas_image_task(task_id: str, payload: OnlineImageRequest):
+    started_at = time.time()
     with CANVAS_TASK_LOCK:
         if task_id in CANVAS_TASKS:
             CANVAS_TASKS[task_id]["status"] = "running"
@@ -9261,11 +9268,20 @@ async def run_canvas_image_task(task_id: str, payload: OnlineImageRequest):
         result = await build_online_image_result(payload, on_upstream_task_id=record_upstream_task_id)
         with CANVAS_TASK_LOCK:
             upstream_task_id = extract_task_id(result) if isinstance(result, dict) else ""
+            diagnostics = dict(CANVAS_TASKS[task_id].get("diagnostics") or {})
+            diagnostics.update({
+                "generation_ms": int((time.time() - started_at) * 1000),
+                "total_ms": int((time.time() - CANVAS_TASKS[task_id].get("created_at", started_at)) * 1000),
+                "result_download_ms": 0,
+                "task_id": task_id,
+                "upstream_task_id": CANVAS_TASKS[task_id].get("upstream_task_id") or upstream_task_id,
+            })
             CANVAS_TASKS[task_id].update({
                 "status": "succeeded",
                 "result": result,
                 "error": "",
                 "upstream_task_id": CANVAS_TASKS[task_id].get("upstream_task_id") or upstream_task_id,
+                "diagnostics": diagnostics,
                 "updated_at": time.time(),
             })
     except JimengPendingError as exc:
@@ -9281,6 +9297,13 @@ async def run_canvas_image_task(task_id: str, payload: OnlineImageRequest):
                 "queue_info": exc.queue_info,
                 "message": info["message"],
                 "error": "",
+                "diagnostics": {
+                    **dict(CANVAS_TASKS[task_id].get("diagnostics") or {}),
+                    "queue_wait_ms": int((time.time() - started_at) * 1000),
+                    "total_ms": int((time.time() - CANVAS_TASKS[task_id].get("created_at", started_at)) * 1000),
+                    "task_id": task_id,
+                    "upstream_task_id": exc.submit_id,
+                },
                 "updated_at": time.time(),
             })
     except Exception as exc:
@@ -9293,6 +9316,12 @@ async def run_canvas_image_task(task_id: str, payload: OnlineImageRequest):
                 "error": str(detail),
                 "status_code": status_code,
                 "upstream_task_id": upstream_task_id,
+                "diagnostics": {
+                    **dict(CANVAS_TASKS[task_id].get("diagnostics") or {}),
+                    "total_ms": int((time.time() - CANVAS_TASKS[task_id].get("created_at", started_at)) * 1000),
+                    "task_id": task_id,
+                    "upstream_task_id": upstream_task_id,
+                },
                 "updated_at": time.time(),
             })
 
@@ -9386,6 +9415,28 @@ async def create_canvas_image_task(payload: OnlineImageRequest):
             "upstream_task_id": "",
             "provider_id": payload.provider_id,
             "model": payload.model,
+            "prompt_hash": payload.prompt_hash,
+            "reference_set_hash": payload.reference_set_hash,
+            "generation_spec_hash": payload.generation_spec_hash,
+            "variant_index": payload.variant_index if payload.variant_index is not None else batch_index,
+            "variant_mode": payload.variant_mode,
+            "diagnostics": {
+                "raw_prompt_chars": len(payload.prompt or ""),
+                "final_prompt_chars": len(payload.prompt or ""),
+                "estimated_prompt_tokens": max(1, int(len(payload.prompt or "") / 3)),
+                "reference_image_count": len(refs),
+                "reference_total_bytes": len(json.dumps([ref.dict() for ref in refs], ensure_ascii=False)),
+                "request_body_bytes": len(payload.model_dump_json() if hasattr(payload, "model_dump_json") else json.dumps(payload.dict(), ensure_ascii=False)),
+                "provider": payload.provider_id,
+                "model": payload.model,
+                "request_id": request_id,
+                "task_id": task_id,
+                "prompt_hash": payload.prompt_hash,
+                "reference_set_hash": payload.reference_set_hash,
+                "generation_spec_hash": payload.generation_spec_hash,
+                "variant_index": payload.variant_index if payload.variant_index is not None else batch_index,
+                "variant_mode": payload.variant_mode,
+            },
             "prompt_length": len(payload.prompt or ""),
             "reference_count": len(refs),
         }
