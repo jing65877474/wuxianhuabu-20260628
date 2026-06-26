@@ -1,4 +1,4 @@
-﻿# GPT-Image2 Style Library Reference
+# GPT-Image2 Style Library Reference
 
 Generated from `data/style-library.json`. Use this file as the detailed index for choosing GPT-Image2 prompt templates, visual styles, categories, and scene tags.
 

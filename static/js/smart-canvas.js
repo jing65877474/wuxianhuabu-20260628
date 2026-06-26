@@ -132,6 +132,7 @@ let createMenuPoint = {x:0, y:0};
 let createMenuGroupId = '';
 let nodeClipboard = null;
 let imageClipboard = null;
+const SMART_CANVAS_NODE_CLIPBOARD_FORMAT = 'infinite-smart-canvas-node-clipboard';
 let imageClickTimer = null;
 let suppressImageClickUntil = 0;
 let lastMouseWorld = null;
@@ -1929,8 +1930,8 @@ function promptNodeCameraPrompt(node){
     const elevation = promptNodeCameraElevation(node);
     const evidence = promptNodeCameraEvidenceList(node, lens, azimuth, elevation);
     const posterCopyRole = node?.posterCopyEnabled
-        ? ' If Poster copy is enabled, readable poster text in the primary reference image is locked copy: reproduce the same wording, language, capitalization, line breaks, and approximate graphic role when compatible with the new camera.'
-        : ' If Poster copy is disabled, do not copy or invent readable poster text from the reference.';
+        ? ' If Poster copy is enabled, use the primary reference as a lightweight poster-text guide: preserve the main visible headline/price/CTA text when practical, but simplify tiny copy and avoid forcing exact line-by-line reconstruction.'
+        : ' If Poster copy is disabled, remove poster/ad overlay text from the reference, but preserve poster brand identity marks/logos/brand names and product-surface brand marks, logos, and printed package labels.';
     const allowHuman = smartGenerationAllowsHuman(node, defaultReferenceImagesFor(node), smartNodeUserIntentText(node));
     const visualOverride = smartLatestRequestChangesBackgroundPalette(node);
     const referenceRole = visualOverride
@@ -1974,7 +1975,7 @@ function promptNodeReferenceWeightPrompt(node){
         : (allowHuman
             ? 'Preserve visible lighting, materials, background tone, skin treatment, product surface finish, realistic edges, and contact shadows; avoid plastic skin, generic studio drift, or CG-looking packaging.'
             : 'Preserve visible lighting, materials, background tone, product surface finish, realistic edges, and contact shadows; avoid generic studio drift, CG-looking packaging, or adding any human/body content.');
-    const productRule = 'Attached product-detail images are strict SKU identity references: preserve category, silhouette, proportions, structural parts, material, colors, label-block placement, finish, and scale; never substitute a generic same-category product.';
+    const productRule = 'Attached product-detail images are strict SKU identity references: preserve category, silhouette, proportions, structural parts, material, colors, product-surface brand marks, logos, printed label text/graphics, label-block placement, finish, and scale; never substitute a generic same-category product.';
     const caseRule = 'Case-library references are secondary and may influence polish only, never product identity, pose, background, or layout.';
     const antiCloneRule = allowHuman
         ? 'Do not recreate the reference as a near-identical copy: change the exact pose, hand placement, crop, framing, micro-expression, and small spatial layout details. The weight controls style/composition affinity, not pixel-level duplication.'
@@ -2010,9 +2011,9 @@ function promptNodeReferenceWeightPrompt(node){
 function promptNodePosterCopyPrompt(node){
     if(!node || node.type !== 'smart-prompt') return '';
     if(node.posterCopyEnabled){
-        return 'Poster copy enabled: reproduce readable text from the uploaded primary poster/reference image with the same wording, language, capitalization, line breaks, approximate placement, typography hierarchy, and badge/headline role. Product-detail references control SKU appearance only; they must not remove, suppress, replace, translate, or invent poster text. Leave genuinely unreadable areas clean or non-readable.';
+        return 'Poster copy enabled: use the uploaded primary poster/reference image as a lightweight text guide. Preserve the main readable headline, key price/offer, CTA, and important badge text when practical, with similar placement and hierarchy. Tiny dense text may become clean non-readable marks or simplified label blocks. Product-detail references control SKU appearance only; they must not remove, suppress, replace, translate, or invent the main poster text.';
     }
-    return 'Poster copy disabled: generate no readable headline, slogan, label, logo text, watermark, price tag, UI text, or pseudo typography unless the user explicitly supplied exact text.';
+    return 'Poster copy disabled: keep the primary reference as the visual poster-layout reference, but remove or avoid readable poster/ad overlay text copied from it, such as large headlines, slogans, price tags, CTA buttons, promotional badges, banners, UI text, external watermarks, and decorative typography outside product surfaces. Preserve poster brand identity elements such as top-corner brand logos, brand names, product-line marks, and store/festival brand tags; do not classify these as removable poster copy. Preserve the reference composition family, subject/product placement, crop, camera family, color palette, lighting, graphic panels, border/strip/badge positions, bottom sale-bar geometry, and commercial hierarchy according to the reference-weight setting. Replace removed poster copy with clean blank space, non-readable short marks, or simple graphic blocks so the poster structure remains close without readable ad copy. Preserve product-surface text as product identity: brand marks, logos, bottle/box/tube labels, SKU names, volume marks, and printed packaging graphics should remain on the product. Do not erase product labels or replace them with random new claims.';
 }
 function promptNodeAdditionalGuidancePrompt(node){
     const instruction = String(node?.llmInstruction || '').trim();
@@ -2148,10 +2149,10 @@ function promptNodeCurrentReferenceRoleBrief(node){
     const lines = refs.slice(0, SMART_REFERENCE_IMAGE_MAX).map((ref, index) => {
         const label = `Image ${index + 1}`;
         if(['composition_reference','primary_style_reference','primary_reference'].includes(ref?.role)){
-            return `${label}: primary scene/style reference. Preserve its visible scene relationship, lighting mood, material/skin/product finish, background tone, and commercial visual structure according to the reference-weight setting.`;
+            return `${label}: primary scene/style reference. Preserve its visible scene relationship, lighting mood, material/skin/product finish, product-surface labels/brand marks, background tone, and commercial visual structure according to the reference-weight setting.`;
         }
         if(ref?.role === 'product_truth_reference' || ref?.role === 'product_detail_reference'){
-            return `${label}: strict product truth reference. Preserve exact SKU identity, silhouette, proportions, component layout, material, color, finish, and real product geometry.`;
+            return `${label}: strict product truth reference. Preserve exact SKU identity, silhouette, proportions, component layout, material, color, finish, product-surface brand marks/logos/printed label text, and real product geometry.`;
         }
         return `${label}: supporting current reference image.`;
     });
@@ -6274,6 +6275,97 @@ function clipboardSelectionNodeIds(){
     rootIds.forEach(visit);
     return {rootIds, copiedIds};
 }
+function smartNodeClipboardEnvelope(clip){
+    return {
+        format:SMART_CANVAS_NODE_CLIPBOARD_FORMAT,
+        version:1,
+        canvas_type:'smart',
+        copied_at:Date.now(),
+        nodes:Array.isArray(clip?.nodes) ? clip.nodes : [],
+        connections:Array.isArray(clip?.connections) ? clip.connections : [],
+        rootIds:Array.isArray(clip?.rootIds) ? clip.rootIds : []
+    };
+}
+function fallbackWriteClipboardText(text){
+    try {
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.setAttribute('readonly', 'readonly');
+        textarea.style.position = 'fixed';
+        textarea.style.left = '-9999px';
+        textarea.style.top = '-9999px';
+        document.body.appendChild(textarea);
+        textarea.focus();
+        textarea.select();
+        const ok = document.execCommand('copy');
+        textarea.remove();
+        return ok;
+    } catch(e) {
+        return false;
+    }
+}
+async function writeSmartNodeClipboardToSystem(clip){
+    const text = JSON.stringify(smartNodeClipboardEnvelope(clip));
+    try {
+        if(navigator.clipboard?.writeText){
+            await navigator.clipboard.writeText(text);
+            return true;
+        }
+    } catch(e) {}
+    return fallbackWriteClipboardText(text);
+}
+function normalizeSmartNodeClipboardPayload(data){
+    if(!data || typeof data !== 'object') return null;
+    const imported = normalizeImportedSmartWorkflow(data);
+    const srcNodes = (imported.nodes || []).filter(Boolean).map(serializableSmartNode).filter(Boolean);
+    if(!srcNodes.length) return null;
+    const idSet = new Set(srcNodes.map(node => node.id).filter(Boolean));
+    const srcConnections = (imported.connections || [])
+        .filter(conn => conn && idSet.has(conn.from) && idSet.has(conn.to))
+        .map(conn => JSON.parse(JSON.stringify(conn)));
+    const requestedRoots = Array.isArray(data.rootIds) ? data.rootIds : [];
+    const rootIds = requestedRoots.filter(id => idSet.has(id));
+    return {
+        nodes:srcNodes,
+        connections:srcConnections,
+        rootIds:rootIds.length ? rootIds : srcNodes.map(node => node.id).filter(Boolean)
+    };
+}
+function parseSmartNodeClipboardText(text){
+    const raw = String(text || '').trim();
+    if(!raw || !raw.startsWith('{')) return null;
+    try {
+        const data = JSON.parse(raw);
+        if(data?.format && ![
+            SMART_CANVAS_NODE_CLIPBOARD_FORMAT,
+            'infinite-smart-canvas-workflow'
+        ].includes(data.format) && !Array.isArray(data?.nodes) && !Array.isArray(data?.workflow?.nodes)){
+            return null;
+        }
+        return normalizeSmartNodeClipboardPayload(data);
+    } catch(e) {
+        return null;
+    }
+}
+async function readSmartNodeClipboardFromSystem(){
+    try {
+        if(!navigator.clipboard?.readText) return null;
+        const text = await navigator.clipboard.readText();
+        return parseSmartNodeClipboardText(text);
+    } catch(e) {
+        return null;
+    }
+}
+function setSmartNodeClipboardPayload(clip){
+    if(!clip?.nodes?.length) return false;
+    nodeClipboard = {
+        nodes:clip.nodes.map(serializableSmartNode),
+        connections:JSON.parse(JSON.stringify(clip.connections || [])),
+        rootIds:Array.isArray(clip.rootIds) ? clip.rootIds.slice() : []
+    };
+    imageClipboard = null;
+    return true;
+}
 function copySelectedNodes(){
     if(!canvas || isEditableTarget(document.activeElement)) return false;
     const {rootIds, copiedIds} = clipboardSelectionNodeIds();
@@ -6287,8 +6379,16 @@ function copySelectedNodes(){
         rootIds:rootIds.filter(id => idSet.has(id))
     };
     imageClipboard = null;
-    toast(`已复制 ${rootIds.length} 个模块`);
+    writeSmartNodeClipboardToSystem(nodeClipboard).then(ok => {
+        toast(ok ? `已复制 ${rootIds.length} 个模块，可跨项目画布粘贴` : `已复制 ${rootIds.length} 个模块（当前页面内可粘贴）`);
+    });
     return true;
+}
+async function pasteSmartNodeClipboardFromSystem(){
+    if(!canvas || isEditableTarget(document.activeElement)) return false;
+    const clip = await readSmartNodeClipboardFromSystem();
+    if(!setSmartNodeClipboardPayload(clip)) return false;
+    return pasteNodes();
 }
 function pasteNodes(){
     if(!canvas || !nodeClipboard?.nodes?.length || isEditableTarget(document.activeElement)) return false;
@@ -13519,6 +13619,9 @@ function smartPosterCopyControlForGeneration(node, seen=new Set()){
 function smartPosterCopyEnabledForGeneration(node){
     return smartPosterCopyControlForGeneration(node) === true;
 }
+function smartPosterCopyDisabledForGeneration(node){
+    return smartPosterCopyControlForGeneration(node) === false;
+}
 function smartReferenceLikelyContainsPerson(node, ref){
     const analysis = node?.styleMatch?.analysis || {};
     const text = smartFlattenTextValues([
@@ -13542,10 +13645,21 @@ function smartStyleReferenceShouldUpload(node, ref, weight){
     if(!['composition_reference','primary_style_reference','primary_reference'].includes(role)) return true;
     if(smartPosterCopyEnabledForGeneration(node)) return true;
     const value = Math.max(0, Math.min(100, Math.round(Number(weight) || 0)));
+    if(smartPosterCopyDisabledForGeneration(node) && value >= 60) return true;
     if(smartReferenceLikelyContainsPerson(node, ref)){
         return value >= 85;
     }
     return value >= 60;
+}
+function smartPosterCopyReferenceFidelity(weight, strictLock=false){
+    const value = Math.max(0, Math.min(100, Math.round(Number(weight) || 0)));
+    return strictLock || value >= 85 ? 'high' : 'low';
+}
+function smartPosterCopySimilarityIntent(weight, fallback){
+    const value = Math.max(0, Math.min(100, Math.round(Number(weight) || 0)));
+    if(value >= 85) return fallback;
+    if(value >= 60) return 'poster_copy_text_lock_balanced_visual';
+    return 'poster_copy_text_lock_loose_visual';
 }
 function smartPersonSimilarityInstruction(weight=65){
     const value = Math.max(0, Math.min(100, Math.round(Number(weight) || 0)));
@@ -13618,6 +13732,7 @@ function smartDecorateReferenceWeights(node, refs=[]){
     const styleWeight = promptNodeReferenceWeight(node);
     const latestChangesBackgroundPalette = smartLatestRequestChangesBackgroundPalette(node);
     const posterCopyLock = smartPosterCopyEnabledForGeneration(node);
+    const posterCopyOff = smartPosterCopyDisabledForGeneration(node);
     return (refs || []).map(ref => {
         if(!ref?.url) return ref;
         const role = ref.role || '';
@@ -13633,17 +13748,24 @@ function smartDecorateReferenceWeights(node, refs=[]){
             if(ref?.generatedEditBase || ref?.structureLock){
                 const editBaseWeight = smartReferenceRoleWeight(ref);
                 const strictEditBase = editBaseWeight >= 85;
+                const editBaseIntent = generatedEditBaseSimilarityIntent(editBaseWeight);
                 return {
                     ...ref,
                     referenceWeight:editBaseWeight,
-                    similarityIntent:generatedEditBaseSimilarityIntent(editBaseWeight),
-                    inputFidelity:'high',
+                    similarityIntent:posterCopyLock
+                        ? smartPosterCopySimilarityIntent(editBaseWeight, editBaseIntent)
+                        : posterCopyOff
+                            ? 'poster_copy_off_layout_reference'
+                            : editBaseIntent,
+                    inputFidelity:posterCopyLock ? smartPosterCopyReferenceFidelity(editBaseWeight, strictEditBase) : 'high',
                     uploadReference:true,
                     textOnlyReference:false,
                     referenceLock:strictEditBase,
                     structureLock:strictEditBase,
                     posterCopyReference:posterCopyLock,
-                    copyTextLock:posterCopyLock
+                    copyTextLock:posterCopyLock && strictEditBase,
+                    posterCopyDisabledReference:posterCopyOff,
+                    copyTextRemovalOnly:posterCopyOff
                 };
             }
             const upload = latestChangesBackgroundPalette
@@ -13653,16 +13775,27 @@ function smartDecorateReferenceWeights(node, refs=[]){
                 && !posterCopyLock
                 ? false
                 : smartStyleReferenceShouldUpload(node, ref, styleWeight);
+            const styleIntent = styleWeight >= 85 ? 'strong_style_not_clone' : styleWeight >= 60 ? 'balanced_style' : 'loose_style';
             return {
                 ...ref,
                 referenceWeight:styleWeight,
-                similarityIntent:styleWeight >= 85 ? 'strong_style_not_clone' : styleWeight >= 60 ? 'balanced_style' : 'loose_style',
-                inputFidelity:posterCopyLock ? 'high' : 'low',
+                similarityIntent:posterCopyLock
+                    ? smartPosterCopySimilarityIntent(styleWeight, styleIntent)
+                    : posterCopyOff && styleWeight >= 60
+                        ? 'poster_copy_off_layout_reference'
+                        : styleIntent,
+                inputFidelity:posterCopyLock
+                    ? smartPosterCopyReferenceFidelity(styleWeight)
+                    : posterCopyOff && styleWeight >= 60
+                        ? 'high'
+                        : 'low',
                 uploadReference:upload,
                 textOnlyReference:!upload,
                 latestVisualOverride:latestChangesBackgroundPalette,
                 posterCopyReference:posterCopyLock,
-                copyTextLock:posterCopyLock
+                copyTextLock:posterCopyLock && styleWeight >= 85,
+                posterCopyDisabledReference:posterCopyOff && upload,
+                copyTextRemovalOnly:posterCopyOff && upload
             };
         }
         if(role === 'case_style_reference'){
@@ -13761,8 +13894,8 @@ function smartProductTruthRolePrompt(refs=[], allowHuman=false){
         `Product truth references: ${labels}.`,
         'These images define strict SKU identity and override conflicting objects in portrait, pose, or style references.',
         allowHuman
-            ? 'Preserve category, silhouette, proportions, structural parts, opening/cap/nozzle geometry, material, colors, label-block placement, edge thickness, finish, and real-world scale.'
-            : 'Preserve category, silhouette, proportions, structural parts, shell seams, layer relationships, opening/cap/nozzle/display/control geometry, material, colors, label-block placement, edge thickness, finish, and real-world scale.',
+            ? 'Preserve category, silhouette, proportions, structural parts, opening/cap/nozzle geometry, material, colors, product-surface brand marks, logos, printed label text/graphics, label-block placement, edge thickness, finish, and real-world scale.'
+            : 'Preserve category, silhouette, proportions, structural parts, shell seams, layer relationships, opening/cap/nozzle/display/control geometry, material, colors, product-surface brand marks, logos, printed label text/graphics, label-block placement, edge thickness, finish, and real-world scale.',
         allowHuman
             ? 'Treat multiple views as one consistent 3D product. Adapt hands, pose, placement, lighting, and composition around this exact product; never substitute a generic same-category object.'
             : 'Treat multiple views as one consistent 3D product. Adapt product placement, lighting, props, surface contact, and composition around this exact product; never substitute a generic same-category object and do not introduce hands or people.',
@@ -13800,6 +13933,8 @@ function smartReferenceSimilarityRolePrompt(refs=[], allowHuman=false){
     const parts = [];
     if(editBaseRefs.length){
         const editBaseWeight = Math.max(...editBaseRefs.map(ref => smartReferenceRoleWeight(ref)));
+        const editBasePosterCopy = editBaseRefs.some(ref => ref?.posterCopyReference || ref?.copyTextLock);
+        const editBasePosterCopyOff = editBaseRefs.some(ref => ref?.posterCopyDisabledReference || ref?.copyTextRemovalOnly);
         const editBaseMode = editBaseWeight >= 85
             ? 'strict edit-base structure lock'
             : editBaseWeight >= 60
@@ -13807,7 +13942,11 @@ function smartReferenceSimilarityRolePrompt(refs=[], allowHuman=false){
                 : 'loose edit-base inspiration';
         parts.push(`Edit-base reference strength: ${editBaseWeight}/100 (${editBaseMode}). ${editBaseWeight >= 85
             ? 'Treat the generated source image as the locked edit canvas for composition, crop family, subject scale, pose geometry, product placement, lighting direction, background color world, and negative-space rhythm; vary only what the latest user request asks to change.'
-            : editBaseWeight >= 60
+            : editBasePosterCopy
+                ? 'Poster-copy is enabled at non-strict weight: use the source image mainly to read poster text and keep compatible product/material cues. Do not preserve its poster layout, camera, crop, product placement, border, badge map, background, or negative-space rhythm; rebuild the image as a fresh shot around the latest request.'
+                : editBasePosterCopyOff
+                    ? 'Poster-copy is disabled but visual similarity still matters: keep the source poster layout, subject/product placement, camera family, crop, palette, lighting, border/strip/badge positions, and commercial hierarchy according to this weight. Remove only readable poster overlay text and keep those areas as blank/non-readable design blocks.'
+                : editBaseWeight >= 60
                 ? 'Use the generated source image as the primary reference for the broad composition family, subject/product relationship, lighting direction, and commercial finish, while allowing the latest user request to change pose, crop, background, placement, or styling more freely.'
                 : 'Use the generated source image as a loose visual starting point only; prioritize the latest user request and keep only non-conflicting product identity, broad mood, and useful material/lighting cues.'}`);
     }
@@ -13820,6 +13959,12 @@ function smartReferenceSimilarityRolePrompt(refs=[], allowHuman=false){
         parts.push(allowHuman
             ? `Style/reference similarity setting: ${styleWeight}/100 (${mode}). Use style references for mood, lighting quality, palette, beauty-ad polish, broad subject relationship, and approximate scale only.`
             : `Style/reference similarity setting: ${styleWeight}/100 (${mode}). Use style references for mood, lighting quality, palette, advertising polish, product/environment relationship, and approximate scale only.`);
+        if(styleWeight < 85 && styleRefs.some(ref => ref?.posterCopyReference || ref?.copyTextLock)){
+            parts.push('Poster-copy text lock does not increase visual similarity: keep readable copy cues, but redesign the surrounding layout, product placement, background, camera, crop, props, and negative-space distribution as a new image.');
+        }
+        if(styleWeight >= 60 && styleRefs.some(ref => ref?.posterCopyDisabledReference || ref?.copyTextRemovalOnly)){
+            parts.push('Poster-copy disabled does not reduce visual similarity: preserve the uploaded poster composition family, subject/product placement, camera family, crop, palette, lighting, graphic panels, border/strip/badge positions, bottom sale-bar geometry, and commercial hierarchy. Remove only readable poster overlay copy; keep product/package labels.');
+        }
         if(allowHuman) parts.push(smartPersonSimilarityInstruction(styleWeight));
         else parts.push('Human/body similarity is disabled: do not transfer any person, face, model, skin, hands, pose, hand placement, or body-part content from the reference or case library.');
         parts.push(allowHuman
@@ -13880,6 +14025,8 @@ function smartUploadedReferenceMapPrompt(refs=[], allowHuman=false){
         const role = ref?.role || 'reference';
         const label = ref?.generatedEditBase || ref?.structureLock
             ? (smartReferenceRoleWeight(ref) >= 85 ? 'STRICT EDIT-BASE structure reference' : 'WEIGHTED EDIT-BASE reference')
+            : ref?.posterCopyDisabledReference || ref?.copyTextRemovalOnly
+            ? 'POSTER-LAYOUT reference with poster copy removed'
             : ref?.posterCopyReference || ref?.copyTextLock
             ? 'PRIMARY POSTER COPY reference'
             : role === 'product_truth_reference' || role === 'product_detail_reference'
@@ -13905,10 +14052,29 @@ function smartPosterCopyLockPrompt(node, refs=[]){
     return [
         'POSTER COPY LOCK:',
         `Use ${labels} as the authoritative source for readable poster/ad copy.`,
-        'Reproduce visible headline, slogan, badge copy, language, capitalization, line breaks, approximate placement, and typography hierarchy from the primary poster reference when compatible with the latest request.',
+        'Use this as a text-reading reference, not as a full-image composition template.',
+        'Preserve only the main readable headline, key price/offer, CTA, and important badge text when practical, with similar text-block placement and visual hierarchy.',
+        'Do not force exact line breaks, every small label, dense fine print, or pixel-level typography reconstruction; tiny text may become clean non-readable marks or simplified label blocks.',
+        'Do not copy the whole poster layout, border treatment, badge positions, arrows, product placement, background, camera, crop, aspect ratio, or negative-space map unless the reference weight is high and the latest request explicitly asks for a close recreation.',
         'Product-detail references control only SKU/product appearance and must not suppress, remove, replace, translate, or invent the poster copy.',
         'This lock overrides earlier no-readable-text, no-brand-text, clean-no-text, or text-removal instructions unless the user explicitly switched Poster copy off. Do not interpret “do not invent random text” as permission to erase readable copy that already exists in the primary poster reference.',
-        'If exact tiny text is unreadable, preserve the same text-block location and hierarchy with clean non-random marks; do not hallucinate new marketing words.'
+        'Prefer a timely completed generation over perfect OCR of every minor text element.'
+    ].join(' ');
+}
+function smartPosterCopyDisabledPrompt(node, refs=[]){
+    if(smartPosterCopyEnabledForGeneration(node)) return '';
+    const uploaded = imageRefsOnly(refs).filter(smartReferenceUploadAllowed);
+    if(!uploaded.length) return '';
+    return [
+        'POSTER COPY OFF / PRODUCT LABELS ON:',
+        'Use the uploaded primary reference as a close poster-layout and campaign-composition reference while removing readable poster/ad overlay text.',
+        'Preserve the reference composition family according to the reference weight: subject/product placement, crop, camera family, color palette, lighting mood, background gradient, graphic panels, border/strip/badge positions, bottom sale-bar geometry, and commercial hierarchy.',
+        'Remove or avoid readable poster/ad overlay text copied from the reference image: large headlines, slogans, price tags, CTA buttons, promotional badges, ranking medallions, banners, UI text, external watermarks, and decorative typography outside product surfaces.',
+        'Preserve poster brand identity elements from the reference, including top-corner brand logos, brand names, product-line marks, and store/festival brand tags. These are identity anchors, not removable poster copy.',
+        'Keep the removed text areas as clean blank space, non-readable short marks, or simple graphic blocks so the poster design remains close instead of collapsing into a lifestyle/product photo.',
+        'Do not remove text printed on the product or package itself. Preserve product-surface brand marks, logos, bottle/box/tube labels, SKU names, volume marks, and printed packaging graphics as part of product identity.',
+        'If tiny product text is not readable, keep clean label-like marks aligned to the real product surface instead of erasing the label area or inventing new marketing claims.',
+        'Disabling Poster copy is only a poster-text removal control; it is not permission to redesign the product, palette, lighting, camera family, composition family, product scale, or commercial finish beyond the selected reference weight.'
     ].join(' ');
 }
 function smartProductHandInteractionPrompt(refs=[], allowHuman=false){
@@ -14557,6 +14723,7 @@ buildPromptRequest = function(node, overrideDefaultImages=null, consumeDefault=f
     const personOverridePrompt = smartPersonIdentityOverridePrompt(refs, allowHuman);
     const uploadedMapPrompt = smartUploadedReferenceMapPrompt(refs, allowHuman);
     const posterCopyLockPrompt = smartPosterCopyLockPrompt(node, refs);
+    const posterCopyDisabledPrompt = smartPosterCopyDisabledPrompt(node, refs);
     const handInteractionPrompt = smartProductHandInteractionPrompt(refs, allowHuman);
     const mechanicalStructurePrompt = allowHuman ? '' : smartMechanicalStructurePrompt(node, refs, cleanRequestPrompt || request.displayPrompt || '');
     const styleBridgePrompt = productOnlyReplacementMode ? smartProductReplacementStyleBridgePrompt(false) : '';
@@ -14564,6 +14731,7 @@ buildPromptRequest = function(node, overrideDefaultImages=null, consumeDefault=f
         noHumanPrompt,
         uploadedMapPrompt,
         posterCopyLockPrompt,
+        posterCopyDisabledPrompt,
         editBasePrompt,
         replacementPrompt,
         styleBridgePrompt,
@@ -16701,6 +16869,7 @@ function smartCreativeReferenceImages(refs=[]){
 }
 const SMART_MATCHED_PROMPT_BUDGET = 7000;
 const SMART_IMAGE_PROMPT_BUDGET = 12000;
+const SMART_POSTER_COPY_PROMPT_BUDGET = 5200;
 const SMART_PRODUCT_REPLACEMENT_PROMPT_BUDGET = 5200;
 const SMART_PRODUCT_ONLY_REPLACEMENT_PROMPT_BUDGET = 1800;
 const SMART_VIDEO_PROMPT_BUDGET = 3600;
@@ -16863,6 +17032,10 @@ function smartValidateReferenceRequest(node, prompt, refs=[]){
     }
     return true;
 }
+function smartPosterCopyEnabledInRequest(prompt='', refs=[]){
+    return /POSTER COPY LOCK:|Poster copy enabled:|lightweight text guide|poster-text guide/i.test(String(prompt || ''))
+        || imageRefsOnly(refs).some(ref => ref?.posterCopyReference || ref?.copyTextLock);
+}
 function smartVariantPrompt(prompt, index, total, refs=[]){
     const count = Math.max(1, Number(total) || 1);
     if(count <= 1) return prompt;
@@ -16962,10 +17135,13 @@ async function runApiGeneration(prompt, refs, runSettings=settings){
     const productPrompt = await smartPromptWithProductRecognition(effectivePrompt, referenceImages, runSettings);
     const productReplacement = Boolean(smartProductReplacementRolePrompt(referenceImages));
     const productOnlyReplacement = productReplacement && String(effectivePrompt || '').includes('NO HUMAN SUBJECT LOCK:');
+    const posterCopyEnabledRun = smartPosterCopyEnabledInRequest(productPrompt || effectivePrompt, referenceImages);
     const requestBudget = productOnlyReplacement
         ? SMART_PRODUCT_ONLY_REPLACEMENT_PROMPT_BUDGET
         : productReplacement
             ? SMART_PRODUCT_REPLACEMENT_PROMPT_BUDGET
+            : posterCopyEnabledRun
+                ? SMART_POSTER_COPY_PROMPT_BUDGET
             : SMART_IMAGE_PROMPT_BUDGET;
     const baseBudget = Math.max(3000, requestBudget - (count > 1 ? 700 : 0));
     const compressionOptions = productOnlyReplacement ? {repairFragments:true} : {};
@@ -17900,7 +18076,7 @@ function openCanvasContextMenu(event){
     const selectedGroups = selected.filter(isSmartGroupNode);
     const canGroup = selected.filter(node => !isSmartGroupNode(node)).length > 1;
     const canUngroup = selectedGroups.length > 0;
-    const canPaste = Boolean(nodeClipboard?.nodes?.length || imageClipboard?.item?.url);
+    const canPaste = Boolean(nodeClipboard?.nodes?.length || imageClipboard?.item?.url || navigator.clipboard?.readText);
     const items = [
         {action:'copy', icon:'copy', label:'复制', disabled:!hasSelection},
         {action:'paste', icon:'clipboard-paste', label:'粘贴', disabled:!canPaste},
@@ -17923,13 +18099,14 @@ function openCanvasContextMenu(event){
     canvasContextMenu.hidden = false;
     refreshIcons();
 }
-function handleCanvasContextAction(action){
+async function handleCanvasContextAction(action){
     closeCanvasContextMenu();
     if(action === 'copy') return copySelectedNodes();
     if(action === 'paste'){
         if(contextMenuPoint) lastMouseWorld = {...contextMenuPoint};
         if(nodeClipboard?.nodes?.length) return pasteNodes();
         if(imageClipboard?.item?.url) return pasteImageClipboard();
+        if(await pasteSmartNodeClipboardFromSystem()) return;
         toast('剪贴板中没有可粘贴的模块');
         return;
     }
@@ -18573,6 +18750,15 @@ window.addEventListener('paste', e => {
     if(!isEditableTarget(e.target) && pasteAssetsFromInbox()){
         e.preventDefault();
         return;
+    }
+    if(!isEditableTarget(e.target)){
+        const text = e.clipboardData?.getData('text/plain') || '';
+        const smartClip = parseSmartNodeClipboardText(text);
+        if(setSmartNodeClipboardPayload(smartClip)){
+            e.preventDefault();
+            pasteNodes();
+            return;
+        }
     }
     if(imageClipboard?.item?.url && !isEditableTarget(e.target)){
         e.preventDefault();

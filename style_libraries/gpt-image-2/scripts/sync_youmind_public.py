@@ -96,17 +96,18 @@ def infer_category(item: dict) -> str:
 
 def request_json(body: dict, timeout: int, attempts: int = 4) -> dict:
     payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": USER_AGENT,
+        "Referer": EXPLORE_URL,
+        "Origin": "https://youmind.com",
+    }
     request = urllib.request.Request(
         API_URL,
         data=payload,
         method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "User-Agent": USER_AGENT,
-            "Referer": EXPLORE_URL,
-            "Origin": "https://youmind.com",
-        },
+        headers=headers,
     )
     last_error: Exception | None = None
     for attempt in range(1, attempts + 1):
@@ -119,7 +120,14 @@ def request_json(body: dict, timeout: int, attempts: int = 4) -> dict:
             last_error = error
             if attempt < attempts:
                 time.sleep(min(attempt * 1.5, 6))
-    raise RuntimeError(str(last_error))
+    try:
+        import requests
+
+        response = requests.post(API_URL, json=body, headers=headers, timeout=timeout)
+        response.raise_for_status()
+        return response.json()
+    except Exception as error:  # noqa: BLE001 - report both transports after retries.
+        raise RuntimeError(f"urllib={last_error}; requests={error}") from error
 
 
 def page_body(page: int, limit: int, locale: str, sort_by: str, sort_order: str) -> dict:

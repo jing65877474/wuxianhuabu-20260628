@@ -26,9 +26,11 @@ AWESOME_IMPORT_SCRIPT = SKILL_DIR / "scripts" / "import_awesome_readme.py"
 YOUMIND_PUBLIC_SYNC_SCRIPT = SKILL_DIR / "scripts" / "sync_youmind_public.py"
 EVOLINK_API_IMPORT_SCRIPT = SKILL_DIR / "scripts" / "import_evolink_api_prompts.py"
 EVOLINK_WEB_SYNC_SCRIPT = SKILL_DIR / "scripts" / "sync_evolink_web_gallery.py"
+AIART_PICS_SYNC_SCRIPT = SKILL_DIR / "scripts" / "sync_aiart_pics_prompts.py"
 YOUMIND_PUBLIC_CASES_FILE = REFERENCES_DIR / "youmind-public-cases.json"
 EVOLINK_API_CASES_FILE = REFERENCES_DIR / "evolink-api-prompts-cases.json"
 EVOLINK_WEB_CASES_FILE = REFERENCES_DIR / "evolink-web-gallery-cases.json"
+AIART_PICS_CASES_FILE = REFERENCES_DIR / "aiart-pics-cases.json"
 AWESOME_README_CASES_FILE = REFERENCES_DIR / "awesome-readme-cases.json"
 YOUMIND_PUBLIC_API_URL = "https://youmind.com/youmarketing-api/prompts"
 YOUMIND_AWESOME_REPO_COMMIT_URL = "https://api.github.com/repos/YouMind-OpenLab/awesome-gpt-image-2/commits/main"
@@ -551,6 +553,52 @@ def local_evolink_web_signature() -> dict:
     }
 
 
+def local_aiart_pics_signature() -> dict:
+    data = read_json(AIART_PICS_CASES_FILE, {})
+    cases = data.get("cases") or []
+    return {
+        "imported": int(data.get("importedCases") or len(cases)),
+        "sourceTotal": int(data.get("sourceTotal") or len(cases)),
+        "detailCases": int(data.get("detailCases") or 0),
+        "metadataOnlyCases": int(data.get("metadataOnlyCases") or 0),
+        "fetchedAt": data.get("fetchedAt") or "",
+        "sourceApi": data.get("sourceApi") or "",
+    }
+
+
+def update_aiart_pics(args: argparse.Namespace, state: dict) -> dict:
+    previous_status = (state.get("aiart_pics") or {}).get("status")
+    completed_today = (
+        state.get("_previous_last_check_date") == today()
+        and previous_status in {"up-to-date", "updated"}
+    )
+    if not args.force and completed_today:
+        return {
+            "status": "up-to-date",
+            "message": "AIArt.Pics prompt library daily check already completed.",
+            "local": local_aiart_pics_signature(),
+        }
+
+    command = [
+        sys.executable,
+        "-X",
+        "utf8",
+        str(AIART_PICS_SYNC_SCRIPT),
+        "--timeout",
+        str(args.timeout),
+    ]
+    if not args.aiart_full_details:
+        command.append("--metadata-only")
+    if args.force:
+        command.append("--force")
+    result = run_command(command)
+    result["local_after"] = local_aiart_pics_signature()
+    result["status"] = "updated" if result["returncode"] == 0 else "failed-using-cache"
+    if "metadata_only=0" in result.get("output", ""):
+        result["status"] = "up-to-date"
+    return result
+
+
 def probe_evolink_repo(timeout: int) -> dict:
     payload = request_get_json(EVOLINK_REPO_COMMIT_URL, timeout)
     return {
@@ -650,6 +698,8 @@ def main() -> int:
     parser.add_argument("--skip-awesome-readme", action="store_true", help="Skip YouMind-OpenLab awesome README refresh")
     parser.add_argument("--skip-evolink-api", action="store_true", help="Skip EvoLink GitHub API/prompts repository refresh")
     parser.add_argument("--skip-evolink-web", action="store_true", help="Skip EvoLink web gallery refresh")
+    parser.add_argument("--skip-aiart-pics", action="store_true", help="Skip AIArt.Pics GitHub prompt-library refresh")
+    parser.add_argument("--aiart-full-details", action="store_true", help="Fetch every AIArt.Pics detail page instead of the daily metadata-only refresh")
     parser.add_argument("--skip-repo-monitors", action="store_true", help="Skip GitHub repository commit monitors")
     parser.add_argument("--youmind-delay", type=float, default=0.15, help="Delay between YouMind public page requests")
     args = parser.parse_args()
@@ -680,6 +730,13 @@ def main() -> int:
             for key in ("message", "output"):
                 if state["youmind_public"].get(key):
                     print(str(state["youmind_public"][key]).strip())
+
+        if not args.skip_aiart_pics:
+            state["aiart_pics"] = update_aiart_pics(args, state)
+            print("AIArt.Pics:", state["aiart_pics"].get("status"))
+            for key in ("message", "output"):
+                if state["aiart_pics"].get(key):
+                    print(str(state["aiart_pics"][key]).strip())
 
         if not args.skip_evolink_api:
             state["evolink_api_prompts"] = update_evolink_api_prompts(args, state)

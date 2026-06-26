@@ -48,9 +48,21 @@ includesAll([
     "generatedEditBaseReferenceWeight",
     "generated-edit-base-weight-range",
     "reference_weight:editBaseWeight",
+    "SMART_POSTER_COPY_PROMPT_BUDGET",
+    "smartPosterCopyEnabledInRequest",
     "poster_copy_enabled:node.posterCopyEnabled === true",
     "posterCopyReference:Boolean(img.posterCopyReference)",
     "POSTER COPY LOCK:",
+    "POSTER COPY OFF / PRODUCT LABELS ON:",
+    "poster_copy_off_layout_reference",
+    "Poster-copy disabled does not reduce visual similarity",
+    "poster_copy_text_lock_balanced_visual",
+    "Use this as a text-reading reference",
+    "lightweight text guide",
+    "Prefer a timely completed generation",
+    "Poster-copy text lock does not increase visual similarity",
+    "product-surface brand marks",
+    "poster brand identity elements",
     "BALANCED EDIT-BASE REFERENCE:",
     "LOOSE EDIT-BASE REFERENCE:",
     "generatedEditBase:true",
@@ -112,17 +124,20 @@ const styleUpload = new Function(
     "smartReferenceRoleIsCase",
     "smartReferenceLikelyContainsPerson",
     "smartPosterCopyEnabledForGeneration",
+    "smartPosterCopyDisabledForGeneration",
     `${functionSource("smartStyleReferenceShouldUpload")}; return smartStyleReferenceShouldUpload;`
 )(
     (ref) => ref?.role === "product_truth_reference" || ref?.role === "product_detail_reference",
     (ref) => ref?.role === "case_style_reference",
     (node, ref) => ref?.containsPerson === true,
-    (node) => node?.posterCopyEnabled === true
+    (node) => node?.posterCopyEnabled === true,
+    (node) => node?.posterCopyDisabled === true
 );
 
 const personReference = { role: "composition_reference", containsPerson: true };
 check(styleUpload({}, personReference, 65) === false, "A normal person reference below 85 must remain text-only.");
 check(styleUpload({ posterCopyEnabled: true }, personReference, 65) === true, "Poster-copy primary references must upload even below 85.");
+check(styleUpload({ posterCopyDisabled: true }, personReference, 65) === true, "Poster-copy disabled primary references must upload at 60+ so layout similarity is preserved.");
 check(styleUpload({}, personReference, 85) === true, "A normal person reference at 85 must upload.");
 check(styleUpload({}, { role: "product_truth_reference" }, 20) === true, "Product truth must upload at every style weight.");
 
@@ -165,8 +180,16 @@ const mediumPersonWithCase = route([primary, caseRef], 65);
 check(mediumPersonWithCase.length === 0, "A 65-weight person reference and its case image must both remain text-only.");
 
 const posterCopyPersonWithProduct = route([primary, product, caseRef], 65, { posterCopyEnabled: true });
-check(posterCopyPersonWithProduct.some((ref) => ref.role === "composition_reference" && ref.posterCopyReference && ref.inputFidelity === "high"), "Poster-copy primary reference must upload with high fidelity alongside product refs.");
+check(posterCopyPersonWithProduct.some((ref) => ref.role === "composition_reference" && ref.posterCopyReference && !ref.copyTextLock && ref.inputFidelity === "low"), "Poster-copy primary reference must upload as a lightweight text guide at medium weight.");
 check(posterCopyPersonWithProduct.some((ref) => ref.role === "product_truth_reference"), "Poster-copy mode must still keep product truth references.");
+const strictPosterCopy = route([primary], 85, { posterCopyEnabled: true });
+check(strictPosterCopy.some((ref) => ref.posterCopyReference && ref.copyTextLock && ref.inputFidelity === "high"), "Poster-copy text hard lock should be reserved for 85+ reference weight.");
+
+const posterCopyOffPersonWithProduct = route([primary, product, caseRef], 65, { type: "smart-prompt", posterCopyEnabled: false });
+check(
+    posterCopyOffPersonWithProduct.some((ref) => ref.role === "composition_reference" && ref.posterCopyDisabledReference && ref.copyTextRemovalOnly && ref.inputFidelity === "high"),
+    "Poster-copy disabled primary reference must upload as a high-fidelity layout reference at medium weight."
+);
 
 const posterPromptUpstream = { id: "poster-prompt-upstream", type: "smart-prompt", posterCopyEnabled: true };
 const posterTargetNode = { id: "poster-target-node", type: "smart-image" };
@@ -182,9 +205,9 @@ const inheritedPosterRefs = smartDecorateReferenceWeights(posterTargetNode, [{
 }]);
 check(
     inheritedPosterRefs[0]?.posterCopyReference === true &&
-        inheritedPosterRefs[0]?.copyTextLock === true &&
-        inheritedPosterRefs[0]?.inputFidelity === "high",
-    "An inherited Poster-copy edit base must remain uploaded at high fidelity with copy-lock metadata."
+        inheritedPosterRefs[0]?.copyTextLock !== true &&
+        inheritedPosterRefs[0]?.inputFidelity === "low",
+    "An inherited medium-weight Poster-copy edit base must stay lightweight instead of forcing OCR-style copy lock."
 );
 const posterOverrideOff = {
     id: "poster-override-off",
@@ -286,8 +309,17 @@ check(
     backendSource.includes('return 1536') &&
         backendSource.includes("poster_copy_lock") &&
         backendSource.includes("posterCopyReference") &&
-        backendSource.includes('role in {"product_truth_reference", "product_detail_reference", "mask"}'),
-    "Product-reference compression must remain at 1536."
+        backendSource.includes("strict_structure_lock") &&
+        backendSource.includes("ai_ref_has_poster_copy_lock") &&
+        backendSource.includes('role in {"product_truth_reference", "product_detail_reference", "mask"}') &&
+        !backendSource.includes('structure_lock or poster_copy_lock or input_fidelity == "high"'),
+    "Product and strict-structure compression must remain high while Poster-copy alone must not force 1536/high fidelity."
+);
+check(
+    backendSource.includes("IMAGE_GENERATION_READ_TIMEOUT") &&
+        backendSource.includes("read=IMAGE_GENERATION_READ_TIMEOUT") &&
+        !backendSource.includes("read=1800.0) if (is_gpt2"),
+    "GPT image generation requests must use a bounded read timeout instead of waiting 1800s by default."
 );
 check(
     backendSource.includes('tempfile.mkstemp(prefix="sized_ref_"') &&
@@ -312,9 +344,22 @@ check(
 check(
     source.includes("if(!smartPosterCopyEnabledForGeneration(node)) return '';") &&
         source.includes("posterCopyReference:posterCopyLock") &&
-        source.includes("copyTextLock:posterCopyLock") &&
+        source.includes("copyTextLock:posterCopyLock &&") &&
+        source.includes("smartPosterCopyReferenceFidelity") &&
         source.includes("This lock overrides earlier no-readable-text"),
     "Poster-copy state must propagate downstream and override stale no-text instructions."
+);
+check(
+    source.includes("function smartPosterCopyDisabledPrompt") &&
+        source.includes("Preserve poster brand identity elements") &&
+        source.includes("Do not remove text printed on the product or package itself") &&
+        source.includes("Disabling Poster copy is only a poster-text removal control") &&
+        backendSource.includes("Preserve product-surface text as product identity") &&
+        backendSource.includes("Preserve poster brand identity elements") &&
+        backendSource.includes("printed packaging graphics as product identity") &&
+        !source.includes("label, logo text, watermark") &&
+        !backendSource.includes("label, logo text, watermark"),
+    "Poster-copy disabled mode must remove poster overlay copy while preserving product/package labels."
 );
 check(
     backendSource.includes("Product surface quality guard:") &&

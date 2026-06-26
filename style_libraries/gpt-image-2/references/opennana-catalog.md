@@ -1,9 +1,54 @@
 # OpenNana Supplemental Case Catalog
 
-Secondary trend-oriented source for `gpt-image-2-style-library`. Total deduplicated cases: **2803**. Use `scripts/search_opennana.py` for focused retrieval.
+Secondary trend-oriented source for `gpt-image-2-style-library`. Total deduplicated cases: **2847**. Use `scripts/search_opennana.py` for focused retrieval.
 
 | ID | Title | Category | Tags | Updated |
 |---|---|---|---|---|
+| opennana-16664 | CCD闪光灯深蓝和服名媛时尚肖像 | Photography & Portraits |  | 2026-06-25 |
+| opennana-16634 | 中国高铁二等座女性疲惫小憩超写实抓拍 | General Visual Inspiration |  | 2026-06-25 |
+| opennana-16644 | 演唱会后台超写实iPhone前置自拍 | Photography & Portraits |  | 2026-06-25 |
+| opennana-16613 | 高清写实自然光东亚女性情绪肖像 | Photography & Portraits |  | 2026-06-25 |
+| opennana-16614 | 高级东方博物馆展陈海报生成提示词 | Posters & Typography |  | 2026-06-25 |
+| opennana-16612 | 创新混合媒介品牌营销海报实物与涂鸦结合 | Posters & Typography |  | 2026-06-25 |
+| opennana-16611 | 极简扁平矢量城市旅行海报 | Posters & Typography |  | 2026-06-25 |
+| opennana-16610 | 清冷纯欲居家画室写真 | Photography & Portraits |  | 2026-06-25 |
+| opennana-16609 | 俯拍卧室灰色露脐装真实感女性自拍 | Photography & Portraits |  | 2026-06-25 |
+| opennana-16608 | 文字框架高端海报设计提示词 | Posters & Typography |  | 2026-06-25 |
+| opennana-16607 | 达美乐超大披萨极简商业广告设计 | Products & Commerce |  | 2026-06-25 |
+| opennana-16606 | 世界美食国家代表超宽连续长卷海报 | Posters & Typography |  | 2026-06-25 |
+| opennana-16604 | 草图转专业徽标设计探索网格 | Brand & Identity |  | 2026-06-25 |
+| opennana-16617 | 2026世界杯极简主义足球海报设计 | Posters & Typography |  | 2026-06-25 |
+| opennana-16618 | 极简2D卡通潮流街头大头比例少年 | Posters & Typography |  | 2026-06-25 |
+| opennana-16619 | 时尚情侣户外咖啡馆3D潮玩 | Photography & Portraits |  | 2026-06-25 |
+| opennana-16622 | 超写实影棚时尚人像红黑撞色穿搭 | Photography & Portraits |  | 2026-06-25 |
+| opennana-16621 | 写实风超近景自拍少女针织衫侧颜 | Photography & Portraits |  | 2026-06-25 |
+| opennana-16624 | 东方复古神话装饰海报 | Posters & Typography |  | 2026-06-25 |
+| opennana-16535 | 奢华护肤品深紫美妆广告大片 | Products & Commerce |  | 2026-06-25 |
+| opennana-16540 | 软萌手工剪纸层叠插画风 | Illustration & Characters |  | 2026-06-25 |
+| opennana-16538 | 品牌高端UGC风格动作捕捉商业广告海报 | Products & Commerce |  | 2026-06-25 |
+| opennana-16534 | 人物特征转可爱大眼Q版玩偶 | Brand & Identity |  | 2026-06-25 |
+| opennana-16536 | 旅游收藏卡创意海报设计 | Posters & Typography |  | 2026-06-25 |
+| opennana-16539 | 抱膝坐姿东方女性清冷风格艺术海报 | Posters & Typography |  | 2026-06-25 |
+| opennana-16537 | 极简时尚杂志封面穆斯林时尚摄影 | Posters & Typography |  | 2026-06-25 |
+| opennana-16542 | 时代广场巨型3D看板美妆广告 | Products & Commerce |  | 2026-06-25 |
+| opennana-16593 | 极简手绘涂鸦插画风格 | Illustration & Characters |  | 2026-06-25 |
+| opennana-16543 | 水彩水墨风格对视侧影插画 | Illustration & Characters |  | 2026-06-25 |
+| opennana-16600 | 葡萄牙国家队女球迷赛场写实自拍 | Photography & Portraits |  | 2026-06-25 |
+| opennana-16594 | 站在发光传送门前的史诗科幻构图 | General Visual Inspiration |  | 2026-06-25 |
+| opennana-16547 | 超宽横版游戏关卡设定图提示词 | Posters & Typography |  | 2026-06-25 |
+| opennana-16541 | 治愈系面包店少女手绘童话插画 | Illustration & Characters |  | 2026-06-25 |
+| opennana-16597 | 黑白人像橙色点缀街头涂鸦风时尚青年海报 | Posters & Typography |  | 2026-06-25 |
+| opennana-16546 | 高端清凉饮品溅射海报模板 | Posters & Typography |  | 2026-06-25 |
+| opennana-16598 | 2026世界杯美食糕点奖杯电影级写实 | Food & Drink |  | 2026-06-25 |
+| opennana-16545 | 现代极简半调网点自然风海报 | Posters & Typography |  | 2026-06-25 |
+| opennana-16549 | 临水水榭古风仙侠美女写真 | Photography & Portraits |  | 2026-06-25 |
+| opennana-16591 | 潮萌轻复古卡通吉祥物品牌Logo设计 | Brand & Identity |  | 2026-06-25 |
+| opennana-16599 | 阿根廷球衣年轻女性手机镜面自拍 | Photography & Portraits |  | 2026-06-25 |
+| opennana-16544 | 简约扁平风格矢量插画海报 | Posters & Typography |  | 2026-06-25 |
+| opennana-16548 | 乐高风黑发挑染足球少女收藏级人偶 | Products & Commerce |  | 2026-06-25 |
+| opennana-16595 | 电影海报转皮克斯3D漫画风格 | Posters & Typography |  | 2026-06-25 |
+| opennana-16596 | 可口可乐巨型罐顶的时尚女性商业摄影 | Photography & Portraits |  | 2026-06-25 |
+| opennana-16601 | 现代都市时尚视觉超现实街拍 | Photography & Portraits |  | 2026-06-25 |
 | opennana-16590 | 超写实高端橙汁广告海报 | Products & Commerce |  | 2026-06-25 |
 | opennana-16589 | 极简水彩少女手绘日系插画 | Illustration & Characters |  | 2026-06-25 |
 | opennana-16580 | 写实户外生活方式东亚女性人像 | Photography & Portraits |  | 2026-06-25 |
@@ -56,7 +101,6 @@ Secondary trend-oriented source for `gpt-image-2-style-library`. Total deduplica
 | opennana-16525 | 复古丝网印刷足球海报风格 | Posters & Typography |  | 2026-06-24 |
 | opennana-16524 | 韩国清新唯美女性写真人像 | Photography & Portraits |  | 2026-06-24 |
 | opennana-16530 | 超写实黑白人像与涂鸦元素背景 | Photography & Portraits |  | 2026-06-24 |
-| opennana-16528 | 极简手绘涂鸦插画风格 | Illustration & Characters |  | 2026-06-24 |
 | opennana-16531 | 日本街头少女红色夹克写真 | Photography & Portraits |  | 2026-06-24 |
 | opennana-16532 | 黑暗卧室丝袜时尚大片垂直构图 | Photography & Portraits |  | 2026-06-24 |
 | opennana-16533 | 现代简约公寓内的酷飒东亚女性 | Photography & Portraits |  | 2026-06-24 |

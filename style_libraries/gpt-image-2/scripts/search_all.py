@@ -33,6 +33,7 @@ DATASET_FILES = {
     "curated": REFERENCES_DIR / "cases.json",
     "youmind_public": REFERENCES_DIR / "youmind-public-cases.json",
     "awesome_readme": REFERENCES_DIR / "awesome-readme-cases.json",
+    "aiart_pics": REFERENCES_DIR / "aiart-pics-cases.json",
     "opennana": REFERENCES_DIR / "opennana-cases.json",
     "evolink_api_prompts": REFERENCES_DIR / "evolink-api-prompts-cases.json",
     "evolink_web_gallery": REFERENCES_DIR / "evolink-web-gallery-cases.json",
@@ -42,9 +43,10 @@ SOURCE_PRIORITY = {
     "curated": 0,
     "youmind_public": 1,
     "awesome_readme": 2,
-    "opennana": 3,
-    "evolink_api_prompts": 4,
-    "evolink_web_gallery": 5,
+    "aiart_pics": 3,
+    "opennana": 4,
+    "evolink_api_prompts": 5,
+    "evolink_web_gallery": 6,
 }
 
 RISK_PATTERNS = [

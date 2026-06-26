@@ -505,6 +505,7 @@ IMAGE_MODEL = os.getenv("IMAGE_MODEL", "gpt-image-2")
 SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", "You are a helpful assistant.")
 MAX_HISTORY_MESSAGES = int(os.getenv("MAX_HISTORY_MESSAGES", "30"))
 AI_REQUEST_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "1800"))
+IMAGE_GENERATION_READ_TIMEOUT = float(os.getenv("IMAGE_GENERATION_READ_TIMEOUT", "600"))
 IMAGE_POLL_INTERVAL = float(os.getenv("IMAGE_POLL_INTERVAL", "2"))
 IMAGE_TASK_TIMEOUT = float(os.getenv("IMAGE_TASK_TIMEOUT", str(AI_REQUEST_TIMEOUT)))
 APIMART_IMAGE_TASK_TIMEOUT = float(os.getenv("APIMART_IMAGE_TASK_TIMEOUT", "1800"))
@@ -5846,20 +5847,25 @@ def image_reference_max_size(ref, default=1024) -> int:
     role = image_reference_role(ref)
     if isinstance(ref, dict):
         input_fidelity = str(ref.get("inputFidelity") or "").strip().lower()
-        structure_lock = bool(ref.get("generatedEditBase") or ref.get("structureLock"))
+        generated_edit_base = bool(ref.get("generatedEditBase"))
+        structure_lock = bool(ref.get("structureLock"))
         poster_copy_lock = bool(ref.get("posterCopyReference") or ref.get("copyTextLock"))
     else:
         input_fidelity = str(getattr(ref, "inputFidelity", "") or "").strip().lower()
-        structure_lock = bool(getattr(ref, "generatedEditBase", False) or getattr(ref, "structureLock", False))
+        generated_edit_base = bool(getattr(ref, "generatedEditBase", False))
+        structure_lock = bool(getattr(ref, "structureLock", False))
         poster_copy_lock = bool(getattr(ref, "posterCopyReference", False) or getattr(ref, "copyTextLock", False))
-    if structure_lock or poster_copy_lock or input_fidelity == "high":
+    weight = ai_ref_weight(ref, 50) if "ai_ref_weight" in globals() else 50
+    strict_structure_lock = structure_lock or (generated_edit_base and weight >= 85)
+    if strict_structure_lock or input_fidelity == "high":
         return 1536
     if role in {"product_truth_reference", "product_detail_reference", "mask"}:
         return 1536
     if role == "case_style_reference":
         return 512
-    weight = ai_ref_weight(ref, 50) if "ai_ref_weight" in globals() else 50
     if role in {"composition_reference", "primary_style_reference", "primary_reference"}:
+        if poster_copy_lock:
+            return 1024 if weight >= 85 else 768
         return 1024 if weight >= 85 else 768
     return default
 
@@ -8685,7 +8691,7 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
     image_refs = [ref for ref in refs if ref not in mask_refs]
     image_request_mode = effective_image_request_mode(provider, model)
     use_yunwu_legacy_fields = should_use_yunwu_legacy_image_fields(provider, prompt)
-    request_timeout = httpx.Timeout(connect=20.0, read=1800.0, write=120.0, pool=20.0) if (is_gpt2 or is_apimart or image_request_mode == "openai-json") else AI_REQUEST_TIMEOUT
+    request_timeout = httpx.Timeout(connect=20.0, read=IMAGE_GENERATION_READ_TIMEOUT, write=120.0, pool=20.0) if (is_gpt2 or is_apimart or image_request_mode == "openai-json") else AI_REQUEST_TIMEOUT
     async with httpx.AsyncClient(timeout=request_timeout) as client:
         response = None
         async def post_openai_edits(edit_files=None):
@@ -8904,6 +8910,14 @@ def ai_ref_weight(ref, default=50) -> int:
         value = default
     return max(0, min(100, value))
 
+def ai_ref_has_poster_copy_lock(ref) -> bool:
+    return bool(ai_ref_get(ref, "posterCopyReference", False) or ai_ref_get(ref, "copyTextLock", False))
+
+def ai_ref_has_strict_structure_lock(ref) -> bool:
+    if ai_ref_get(ref, "structureLock", False):
+        return True
+    return bool(ai_ref_get(ref, "generatedEditBase", False) and ai_ref_weight(ref, 50) >= 85)
+
 def ai_refs_have_product_truth(refs) -> bool:
     return any(ai_ref_role(ref) in {"product_truth_reference", "product_detail_reference"} for ref in (refs or []))
 
@@ -8915,7 +8929,12 @@ def should_use_high_input_fidelity(refs) -> bool:
     image_refs = [ref for ref in (refs or []) if ai_ref_get(ref, "url", "")]
     if not image_refs:
         return False
-    if any(str(ai_ref_get(ref, "inputFidelity", "") or "").strip().lower() == "high" and ai_ref_role(ref) not in {"product_truth_reference", "product_detail_reference"} for ref in image_refs):
+    if any(
+        str(ai_ref_get(ref, "inputFidelity", "") or "").strip().lower() == "high"
+        and ai_ref_role(ref) not in {"product_truth_reference", "product_detail_reference"}
+        and (ai_ref_has_strict_structure_lock(ref) or not ai_ref_has_poster_copy_lock(ref))
+        for ref in image_refs
+    ):
         return True
     has_product = ai_refs_have_product_truth(image_refs)
     has_style = ai_refs_have_style_or_composition(image_refs)
@@ -12409,9 +12428,12 @@ STYLE_LIBRARY_DIR = os.getenv("STYLE_LIBRARY_DIR", "").strip() or (
 )
 STYLE_LIBRARY_AUTO_UPDATE_ENV = "STYLE_LIBRARY_AUTO_UPDATE"
 STYLE_LIBRARY_AUTO_UPDATE_TIMEOUT_ENV = "STYLE_LIBRARY_AUTO_UPDATE_TIMEOUT"
+STYLE_LIBRARY_AUTO_UPDATE_POLL_ENV = "STYLE_LIBRARY_AUTO_UPDATE_POLL_SECONDS"
 STYLE_LIBRARY_UPDATE_SCRIPT = os.path.join(PROJECT_STYLE_LIBRARY_DIR, "scripts", "update_daily_sources.py")
 STYLE_LIBRARY_UPDATE_STATE_FILE = os.path.join(PROJECT_STYLE_LIBRARY_DIR, "references", "daily-update-state.json")
 STYLE_LIBRARY_UPDATE_LOG_FILE = os.path.join(PROJECT_STYLE_LIBRARY_DIR, "references", "daily-update.log")
+STYLE_LIBRARY_SCHEDULER_LOCK = Lock()
+STYLE_LIBRARY_SCHEDULER_STARTED = False
 STYLE_PROMPT_LIBRARY_ID = "gpt_image_2_style_library"
 STYLE_PROMPT_LIBRARY_DEFAULT_QUERY = "commercial product portrait editorial cinematic beauty poster design"
 STYLE_PROMPT_LIBRARY_CATEGORIES = [
@@ -12559,12 +12581,25 @@ def run_project_style_library_daily_update():
     except Exception as exc:
         print(f"项目 GPT-Image2 风格库每日更新失败，继续使用本地缓存: {exc}")
 
+def project_style_library_scheduler_loop():
+    while project_style_library_auto_update_enabled():
+        if project_style_library_update_due():
+            run_project_style_library_daily_update()
+        try:
+            poll_seconds = int(os.getenv(STYLE_LIBRARY_AUTO_UPDATE_POLL_ENV, "1800") or "1800")
+        except (TypeError, ValueError):
+            poll_seconds = 1800
+        time.sleep(max(300, min(21600, poll_seconds)))
+
 def schedule_project_style_library_daily_update():
-    if not project_style_library_update_due():
-        return
+    global STYLE_LIBRARY_SCHEDULER_STARTED
     try:
-        Thread(target=run_project_style_library_daily_update, daemon=True).start()
-        print(f"已在后台触发项目 GPT-Image2 风格库每日更新：{PROJECT_STYLE_LIBRARY_DIR}")
+        with STYLE_LIBRARY_SCHEDULER_LOCK:
+            if STYLE_LIBRARY_SCHEDULER_STARTED or not project_style_library_auto_update_enabled():
+                return
+            STYLE_LIBRARY_SCHEDULER_STARTED = True
+        Thread(target=project_style_library_scheduler_loop, daemon=True).start()
+        print(f"已启动项目 GPT-Image2 风格库每日更新调度：{PROJECT_STYLE_LIBRARY_DIR}")
     except Exception as exc:
         print(f"启动项目 GPT-Image2 风格库每日更新失败: {exc}")
 
@@ -13045,12 +13080,21 @@ def strip_poster_copy_control_blocks(text: str) -> str:
 def style_poster_copy_control_prompt(enabled: bool) -> str:
     if enabled:
         return (
-            "Poster copy enabled: readable poster/ad copy in the primary reference is a locked visual element. "
-            "Reproduce the same wording, language, capitalization, line breaks, approximate placement, and hierarchy when visible and compatible with the revised scene. "
+            "Poster copy enabled: use readable poster/ad copy in the primary reference as a lightweight text guide. "
+            "Preserve the main headline, key price/offer, CTA, and important badge text when practical, with similar placement and hierarchy. "
+            "Do not force exact line breaks, dense fine print, or pixel-level typography reconstruction; tiny text may become clean non-readable marks. "
             "Do not invent, translate, or add extra random text. This overrides stale no-readable-text clauses from older prompts."
         )
     return (
-        "Poster copy disabled: generate no readable headline, slogan, label, logo text, watermark, price tag, UI text, pseudo typography, or copied reference text unless the user explicitly typed exact text in the latest request."
+        "Poster copy disabled: keep the primary reference as the visual poster-layout reference, but remove or avoid readable poster/ad overlay text copied from it, "
+        "such as large headlines, slogans, price tags, CTA buttons, promotional badges, banners, UI text, external watermarks, "
+        "and decorative typography outside product surfaces. Preserve poster brand identity elements such as top-corner brand logos, brand names, "
+        "product-line marks, and store/festival brand tags; do not classify these as removable poster copy. "
+        "Preserve the reference composition family, subject/product placement, crop, camera family, color palette, "
+        "lighting, graphic panels, border/strip/badge positions, bottom sale-bar geometry, and commercial hierarchy according to the reference-weight setting. "
+        "Replace removed poster copy with clean blank space, non-readable short marks, or simple graphic blocks so the poster structure remains close without readable ad copy. "
+        "Preserve product-surface text as product identity: brand marks, logos, bottle/box/tube labels, SKU names, volume marks, and printed packaging graphics "
+        "should remain on the product. Do not erase product labels or replace them with random new claims."
     )
 
 PRODUCT_SURFACE_GUARD_BLOCK_RE = re.compile(
@@ -13185,7 +13229,7 @@ Rules:
 - Keep exact product identity and material truth when product references are present.
 - For product/e-commerce subjects, keep product surfaces clean, color-stable, and material-consistent; avoid random discoloration, blotchy stains, dirty speckles, AI-noise mottling, patchy plastic/rubber/paint, or unexplained highlight spots unless the user explicitly requests aged, damaged, weathered, or distressed texture.
 - The case library is secondary: use it to improve commercial polish, lighting, texture, styling, and finish, not to replace the reference structure.
-- Poster copy switch is an immutable UI control. If Poster copy is enabled, preserve or restore readable poster/ad copy from the primary reference when compatible with the latest request. If Poster copy is disabled, remove copied readable text and forbid invented visible typography unless the latest request explicitly typed exact text.
+- Poster copy switch is an immutable UI control. If Poster copy is enabled, preserve or restore readable poster/ad copy from the primary reference when compatible with the latest request. If Poster copy is disabled, keep the primary reference as a close poster-layout/composition reference while removing copied poster/ad overlay text, price tags, CTA buttons, promotional badges, banners, UI text, external watermarks, and decorative typography outside product surfaces; keep removed text zones as clean blank space, non-readable marks, or simple graphic blocks; preserve poster brand identity elements such as top-corner brand logos, brand names, product-line marks, and store/festival brand tags; and still preserve product-surface brand marks, logos, bottle/box/tube labels, SKU names, volume marks, and printed packaging graphics as product identity.
 - The search_query must target the revised scene/style after the modification.
 """.strip()
 
