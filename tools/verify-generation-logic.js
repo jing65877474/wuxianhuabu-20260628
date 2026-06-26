@@ -6,6 +6,7 @@ const smartCanvasPath = path.join(root, "static", "js", "smart-canvas.js");
 const source = fs.readFileSync(smartCanvasPath, "utf8");
 const backendSource = fs.readFileSync(path.join(root, "main.py"), "utf8");
 const canvasListSource = fs.readFileSync(path.join(root, "static", "js", "canvas-list.js"), "utf8");
+const smartCanvasHtml = fs.readFileSync(path.join(root, "static", "smart-canvas.html"), "utf8");
 
 function check(condition, message) {
     if (!condition) throw new Error(message);
@@ -52,6 +53,10 @@ includesAll([
     "smartPosterCopyEnabledInRequest",
     "poster_copy_enabled:node.posterCopyEnabled === true",
     "posterCopyReference:Boolean(img.posterCopyReference)",
+    "BRAND IDENTITY LOCK:",
+    "smartBrandIdentityPrompt",
+    "gpt_image_reference_limit",
+    "smartGenerationReferenceLimit",
     "POSTER COPY LOCK:",
     "POSTER COPY OFF / PRODUCT LABELS ON:",
     "poster_copy_off_layout_reference",
@@ -80,6 +85,14 @@ check(
         source.includes("poster_copy_enabled:node.posterCopyEnabled === true") &&
         source.includes("node.text = prompt"),
     "Generated-image prompt rematching must use the current image, preserve camera control, and replace the current prompt."
+);
+check(
+    smartCanvasHtml.includes("composerPromptMatchBtn") &&
+        source.includes("matchComposerPromptFromText") &&
+        source.includes("current_prompt:userRequest") &&
+        source.includes("user_request:userRequest") &&
+        backendSource.includes('"search_query": text_seed[:800] or "commercial advertising image"'),
+    "Empty-node text prompt matching must expose a composer button and use the user's text as the style-library seed."
 );
 const filterTransientUploads = new Function(
     "isTransientUploadPlaceholderNode",
@@ -269,6 +282,39 @@ check(
 );
 
 check(
+    !smartGenerationAllowsHuman(
+        {
+            id: "product-only-latest-request",
+            llmInstruction: "This product is a scalp-care massage brush; generate one product poster.",
+            styleMatch: { analysis: { positive_prompt: "beauty model, hand placement, face angle, skin finish" } },
+        },
+        [nonPersonStyle],
+        "Reference summary: preserve broad model styling category, hand placement, and face angle."
+    ),
+    "Style/case analysis text must not introduce people when the latest request and references do not include a human subject."
+);
+check(
+    !smartGenerationAllowsHuman(
+        { id: "system-stale-human-words" },
+        [nonPersonStyle],
+        "Product truth references: Image 2.\nReference summary: preserve broad person styling category, hand placement, and face angle."
+    ),
+    "System-generated prompt text with stale person words must not open human generation by itself."
+);
+check(
+    smartGenerationAllowsHuman({ id: "raw-human-request" }, [], "A woman holding the product in her hand."),
+    "A direct raw user prompt that asks for a person must still allow human content."
+);
+check(
+    smartGenerationAllowsHuman(
+        { id: "person-reference" },
+        [{ url: "portrait.png", kind: "image", role: "composition_reference", containsPerson: true }],
+        "Generate in the same campaign style."
+    ),
+    "A reference explicitly marked as containing a person must still allow human content."
+);
+
+check(
     smartTextExplicitlyRequestsHuman("人物和产品有互动，两只脚踩在产品踏板上"),
     "Foot/leg/product-interaction requests must explicitly allow a human subject."
 );
@@ -348,6 +394,18 @@ check(
         source.includes("smartPosterCopyReferenceFidelity") &&
         source.includes("This lock overrides earlier no-readable-text"),
     "Poster-copy state must propagate downstream and override stale no-text instructions."
+);
+check(
+    source.includes("function smartBrandIdentityPrompt") &&
+        source.includes("BRAND IDENTITY LOCK:") &&
+        source.includes("Treat the logo/brand strip as a fixed header identity area") &&
+        source.includes("brandIdentityPrompt") &&
+        backendSource.includes("def gpt_image_reference_limit") &&
+        (backendSource.includes("gpt_image_reference_limit(prompt, image_refs)") || backendSource.includes("smartGenerationReferenceLimit")) &&
+        backendSource.includes("def style_brand_identity_lock_prompt") &&
+        backendSource.includes("BRAND IDENTITY LOCK:") &&
+        backendSource.includes("Brand identity is separate from poster copy"),
+    "Brand/logo identity must be locked independently from the Poster copy switch."
 );
 check(
     source.includes("function smartPosterCopyDisabledPrompt") &&

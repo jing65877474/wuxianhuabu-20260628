@@ -5879,6 +5879,39 @@ EXCEL_MAX_ROWS_PER_SHEET = 80
 EXCEL_MAX_COLS_PER_ROW = 30
 MAX_ATTACHMENT_TEXT_CHARS = 12000
 
+def gpt_image_reference_limit(prompt: str, refs: list) -> int:
+    image_refs = [ref for ref in (refs or []) if isinstance(ref, dict) and ref.get("url")]
+    count = len(image_refs)
+    if count <= 1:
+        return count
+    text = str(prompt or "")
+    product_count = sum(1 for ref in image_refs if image_reference_role(ref) in {"product_truth_reference", "product_detail_reference"})
+    if product_count >= 3:
+        return min(count, 5)
+    if re.search(r"POSTER COPY LOCK:|Poster copy enabled:|BRAND IDENTITY LOCK:|Product truth references:|HIGHEST PRIORITY PRODUCT REPLACEMENT RULE:", text, re.I):
+        return min(count, 4)
+    return min(count, 3 if count >= 3 else count)
+
+def gpt_image_reference_priority(ref, index=0):
+    role = image_reference_role(ref)
+    if bool(ref.get("generatedEditBase")) or bool(ref.get("structureLock")):
+        return (0, index)
+    if role in {"composition_reference", "primary_style_reference", "primary_reference"}:
+        return (1, index)
+    if role in {"product_truth_reference", "product_detail_reference"}:
+        return (2, index)
+    if role == "supporting_reference":
+        return (3, index)
+    return (4, index)
+
+def gpt_image_reference_subset(prompt: str, refs: list) -> list:
+    items = [ref for ref in (refs or []) if isinstance(ref, dict) and ref.get("url")]
+    limit = gpt_image_reference_limit(prompt, items)
+    if len(items) <= limit:
+        return items
+    ordered = sorted(enumerate(items), key=lambda item: gpt_image_reference_priority(item[1], item[0]))
+    return [ref for _, ref in ordered[:limit]]
+
 def _xml_local_name(tag):
     return str(tag or "").rsplit("}", 1)[-1]
 
@@ -8716,7 +8749,7 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
             # 文生图只传 extra_body.response_format，图生图把参考图放进 extra_body.image。
             extra_body = {"response_format": "url"}
             if image_refs:
-                extra_body["image"] = [reference_to_sized_data_url(ref) for ref in image_refs[:ONLINE_IMAGE_REFERENCE_MAX]]
+                extra_body["image"] = [reference_to_sized_data_url(ref) for ref in gpt_image_reference_subset(prompt, image_refs)]
             body = {"model": model, "prompt": prompt, "size": size, "extra_body": extra_body}
             response = await client.post(gen_url, headers=api_headers(provider=provider, model=model), json=body)
         elif is_apimart:
@@ -8732,7 +8765,7 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
                 "official_fallback": False,
             }
             if image_refs:
-                body["image_urls"] = [reference_to_sized_data_url(ref) for ref in image_refs[:ONLINE_IMAGE_REFERENCE_MAX]]
+                body["image_urls"] = [reference_to_sized_data_url(ref) for ref in gpt_image_reference_subset(prompt, image_refs)]
             response = await client.post(gen_url, headers=api_headers(provider=provider, model=model), json=body)
         elif is_gpt2 and not image_refs and not mask_refs:
             body = {"model": model, "prompt": prompt, "size": size}
@@ -8753,7 +8786,7 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
             edit_failed_status = None
             edit_failed_text = ""
             try:
-                for ref in image_refs[:ONLINE_IMAGE_REFERENCE_MAX]:
+                for ref in image_refs[:gpt_image_reference_limit(prompt, image_refs)]:
                     path = edit_reference_file_from_ref(ref, temp_paths)
                     if not path:
                         continue
@@ -8792,7 +8825,7 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
                         detail=f"GPT-Image-2 编辑接口 /images/edits 调用失败：{edit_failed_text[:300] or edit_failed_status}。已停止自动重试，避免上游可能已扣费后再次请求。"
                     )
                 print(f"/images/edits failed ({edit_failed_status}): {edit_failed_text[:200]} → 回退到 /images/generations + image:[] JSON")
-                image_payload = [reference_to_sized_data_url(ref) for ref in image_refs[:ONLINE_IMAGE_REFERENCE_MAX]]
+                image_payload = [reference_to_sized_data_url(ref) for ref in gpt_image_reference_subset(prompt, image_refs)]
                 body = {
                     "model": model, "prompt": prompt, "size": size,
                     "response_format": "url", "n": 1,
@@ -11188,9 +11221,53 @@ async def run_canvas_image_task(task_id: str, payload: OnlineImageRequest):
                 "updated_at": time.time(),
             })
 
+def canvas_product_truth_prompt_guard(prompt: str, refs: List[AIReference]) -> str:
+    text = str(prompt or "").strip()
+    product_refs = []
+    style_refs = []
+    for index, ref in enumerate(refs or []):
+        data = ref.model_dump() if hasattr(ref, "model_dump") else ref.dict() if hasattr(ref, "dict") else ref
+        if not isinstance(data, dict) or not data.get("url"):
+            continue
+        role = image_reference_role(data)
+        if role in {"product_truth_reference", "product_detail_reference"}:
+            product_refs.append((index, data))
+        elif role in {"composition_reference", "primary_style_reference", "primary_reference"}:
+            style_refs.append((index, data))
+    if not product_refs:
+        return text
+    labels = ", ".join(
+        f"Image {index + 1} / 图{index + 1} ({data.get('name') or 'product reference'})"
+        for index, data in product_refs
+    )
+    guard = "" if "Product truth references:" in text else (
+        f"Product truth references: {labels}. These images are strict SKU/product identity references and override "
+        "conflicting objects, product category, function claims, old hero products, poster-copy product wording, "
+        "style-analysis product descriptions, and case-library matches. Preserve the exact visible product category, "
+        "silhouette, proportions, shell/body geometry, control/display placement, material, colors, surface details, "
+        "and real-world scale. Treat multiple views as one consistent 3D product; never substitute a generic same-category object. "
+        "If any style/composition/poster reference shows an old or similar same-category product, treat that old product as a "
+        "decoy placeholder only. Do not average, merge, or transplant its head/cap/nozzle shape, light/LED area, bristles, "
+        "teeth, pins, circular control/display disk, button icons, handle curve, shell seam, accessory, color accent, or "
+        "functional parts unless the same feature is clearly visible in the product-truth references."
+    )
+    contrast = ""
+    if style_refs and "PRODUCT TRUTH VS STYLE PRODUCT CONTRAST LOCK:" not in text:
+        style_labels = ", ".join(f"Image {index + 1} / 图{index + 1}" for index, _ in style_refs)
+        contrast = (
+            f"PRODUCT TRUTH VS STYLE PRODUCT CONTRAST LOCK: {style_labels} are composition/poster references only; "
+            f"{labels} are strict SKU references. When a composition/poster reference contains an old or similar "
+            "same-category product, treat that old product as a decoy placeholder. Do not average, merge, or transplant "
+            "its head/cap/nozzle shape, light/LED area, bristles, teeth, pins, circular control/display disk, button icons, "
+            "handle curve, shell seam, accessory, color accent, or functional parts unless the same feature is clearly "
+            "visible in the product-truth references."
+        )
+    return "\n\n".join(part for part in [guard, contrast, text] if part)
+
 @app.post("/api/canvas-image-tasks")
 async def create_canvas_image_task(payload: OnlineImageRequest):
     refs = [ref for ref in payload.reference_images if ref.url]
+    payload.prompt = canvas_product_truth_prompt_guard(payload.prompt, refs)
     prompt_requires_refs = bool(
         "Product truth references:" in payload.prompt
         or "HIGHEST PRIORITY PRODUCT REPLACEMENT RULE:" in payload.prompt
@@ -13097,6 +13174,15 @@ def style_poster_copy_control_prompt(enabled: bool) -> str:
         "should remain on the product. Do not erase product labels or replace them with random new claims."
     )
 
+def style_brand_identity_lock_prompt() -> str:
+    return (
+        "BRAND IDENTITY LOCK: Preserve visible brand identity marks from the primary reference as mandatory anchors: "
+        "top-left or top-corner brand logo, brand name/wordmark, product-line mark, and store/festival brand tag when present. "
+        "Do not remove, translate, redraw, or absorb those brand elements into the background when Poster copy is enabled or disabled. "
+        "Treat the logo/brand strip as a fixed header identity area, not as removable ad copy. "
+        "Keep the brand area crisp, recognizable, and in the same relative position; only marketing copy around it may be simplified or removed."
+    )
+
 PRODUCT_SURFACE_GUARD_BLOCK_RE = re.compile(
     r"\n*Product surface quality guard:.*?(?=\n\n(?:Reference summary|Shared style anchor|Lighting/material lock|Generation guidance|Variant plan|Negative constraints|Case-library support|Negative prompt|Poster copy|Original reference weight|HIGHEST PRIORITY CAMERA OVERRIDE|FINAL CAMERA CHECK|[A-Z][^\n]{0,80}:)|\Z)",
     re.I | re.S,
@@ -13200,6 +13286,7 @@ def style_prompt_from_analysis(analysis: Dict[str, Any], cases: List[Dict[str, A
     positive = strip_product_surface_guard_blocks(positive)
     if style_product_surface_guard_applies(analysis, cases, positive):
         positive = "\n\n".join(part for part in [positive, style_product_surface_quality_guard_prompt()] if part)
+    positive = "\n\n".join(part for part in [positive, style_brand_identity_lock_prompt()] if part)
     if "_poster_copy_enabled" in analysis:
         positive = "\n\n".join(part for part in [positive, style_poster_copy_control_prompt(bool(analysis.get("_poster_copy_enabled")))] if part)
     negative = str(analysis.get("negative_prompt") or "").strip()
@@ -13229,7 +13316,7 @@ Rules:
 - Keep exact product identity and material truth when product references are present.
 - For product/e-commerce subjects, keep product surfaces clean, color-stable, and material-consistent; avoid random discoloration, blotchy stains, dirty speckles, AI-noise mottling, patchy plastic/rubber/paint, or unexplained highlight spots unless the user explicitly requests aged, damaged, weathered, or distressed texture.
 - The case library is secondary: use it to improve commercial polish, lighting, texture, styling, and finish, not to replace the reference structure.
-- Poster copy switch is an immutable UI control. If Poster copy is enabled, preserve or restore readable poster/ad copy from the primary reference when compatible with the latest request. If Poster copy is disabled, keep the primary reference as a close poster-layout/composition reference while removing copied poster/ad overlay text, price tags, CTA buttons, promotional badges, banners, UI text, external watermarks, and decorative typography outside product surfaces; keep removed text zones as clean blank space, non-readable marks, or simple graphic blocks; preserve poster brand identity elements such as top-corner brand logos, brand names, product-line marks, and store/festival brand tags; and still preserve product-surface brand marks, logos, bottle/box/tube labels, SKU names, volume marks, and printed packaging graphics as product identity.
+- Poster copy switch is an immutable UI control. Brand identity is separate from poster copy: top-corner logos, brand names/wordmarks, product-line marks, store/festival brand tags, and product-surface logos/labels must remain recognizable whether Poster copy is enabled or disabled. If Poster copy is enabled, preserve or restore readable poster/ad copy from the primary reference when compatible with the latest request. If Poster copy is disabled, keep the primary reference as a close poster-layout/composition reference while removing copied poster/ad overlay text, price tags, CTA buttons, promotional badges, banners, UI text, external watermarks, and decorative typography outside product surfaces; keep removed text zones as clean blank space, non-readable marks, or simple graphic blocks; preserve poster brand identity elements such as top-corner brand logos, brand names, product-line marks, and store/festival brand tags; and still preserve product-surface brand marks, logos, bottle/box/tube labels, SKU names, volume marks, and printed packaging graphics as product identity.
 - The search_query must target the revised scene/style after the modification.
 """.strip()
 
@@ -13266,6 +13353,49 @@ STYLE_REMATCH_PRIOR_REQUEST_SECTION_RE = re.compile(
 
 def style_rematch_requests_variants(user_request: str) -> bool:
     return bool(STYLE_REMATCH_VARIANT_REQUEST_PATTERN.search(str(user_request or "")))
+
+STYLE_REMATCH_PRODUCT_IDENTITY_PATTERNS = [
+    re.compile("(?:\u8fd9|\u8fd9\u4e2a|\u8fd9\u6b3e|\u8be5|\u6b64|this)\\s*(?:\u662f|\u4e3a|\u5c5e\u4e8e|is|as)\\s*(?:\u4e00\\s*(?:\u6b3e|\u4e2a|\u4ef6|\u79cd|\u53ea)\\s*)?([^\\s,，.。;；!！?？、\\n]{2,30})", re.I),
+    re.compile("(?:\u4ea7\u54c1|\u5546\u54c1|sku|SKU|\u54c1\u7c7b|\u7c7b\u76ee|\u4e3b\u4f53|\u4e3b\u89d2\u4ea7\u54c1)\\s*(?:\u662f|\u4e3a|\u53eb|\u5c5e\u4e8e|=|:|：|is|as)\\s*(?:\u4e00\\s*(?:\u6b3e|\u4e2a|\u4ef6|\u79cd|\u53ea)\\s*)?([^\\s,，.。;；!！?？、\\n]{2,30})", re.I),
+    re.compile(r"\b(?:product|item|sku|category)\s*(?:is|as|=|:)\s*([A-Za-z][A-Za-z0-9 -]{1,50})", re.I),
+]
+
+def clean_style_rematch_product_identity_name(value: str) -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"^[\s\"'`“”‘’:=：-]+|[\s\"'`“”‘’.,，。;；!！?？]+$", "", text)
+    text = re.sub("^(?:\u4e00\\s*)?(?:\u6b3e|\u4e2a|\u4ef6|\u79cd|\u53ea)\\s*", "", text, flags=re.I)
+    text = re.sub("\\s*(?:\u53c2\u8003|\u6309|\u6839\u636e|\u751f\u6210|\u51fa\u56fe|\u505a|\u753b|\u4f5c\u4e3a)\\s*.*$", "", text, flags=re.I).strip()
+    text = re.sub(r"\s+", " ", text)
+    if len(text) < 2 or len(text) > 60:
+        return ""
+    if re.fullmatch("(?:\u4ea7\u54c1|\u5546\u54c1|\u56fe\u7247|\u53c2\u8003\u56fe|\u4e00\u5f20\u56fe|image|product|item)", text, re.I):
+        return ""
+    return text
+
+def style_rematch_latest_product_identity(user_request: str) -> str:
+    text = str(user_request or "").strip()
+    if not text:
+        return ""
+    for pattern in STYLE_REMATCH_PRODUCT_IDENTITY_PATTERNS:
+        match = pattern.search(text)
+        if not match:
+            continue
+        name = clean_style_rematch_product_identity_name(match.group(1))
+        if name:
+            return name
+    return ""
+
+def style_rematch_product_identity_override_prompt(identity: str) -> str:
+    name = str(identity or "").strip()
+    if not name:
+        return ""
+    return (
+        f'LATEST PRODUCT IDENTITY OVERRIDE: The latest user request names the product/category as "{name}". '
+        "Treat this as the authoritative product identity. It overrides conflicting product category, body-area, "
+        "function claim, or old object wording from the primary poster/reference image, readable poster copy, "
+        "previous prompt, style analysis, and case-library matches. If Poster copy is enabled, preserve only copy "
+        f'and text hierarchy compatible with "{name}"; rewrite, simplify, or omit copied words that describe a different product.'
+    )
 
 def strip_prior_user_request_sections(text: str) -> str:
     clean = STYLE_REMATCH_PRIOR_REQUEST_SECTION_RE.sub("\n\n", str(text or ""))
@@ -13310,6 +13440,8 @@ def merge_style_rematch_analysis(
     # reference-summary, palette, lighting-lock or composition fields from the
     # previous match after GPT has revised the prompt for the latest request.
     wants_variants = style_rematch_requests_variants(user_request)
+    latest_product_identity = style_rematch_latest_product_identity(user_request)
+    product_identity_override = style_rematch_product_identity_override_prompt(latest_product_identity)
     analysis: Dict[str, Any] = {}
     for key in ("search_query", "summary", "positive_prompt", "negative_prompt", "generation_guidance", "variant_plan"):
         value = revised.get(key) if isinstance(revised, dict) else None
@@ -13322,16 +13454,23 @@ def merge_style_rematch_analysis(
     analysis["_latest_changes_background_palette"] = style_rematch_changes_background_palette(user_request)
     analysis["_poster_copy_enabled"] = bool(poster_copy_enabled)
     analysis["_latest_requests_variants"] = wants_variants
+    if latest_product_identity:
+        analysis["_latest_product_identity"] = latest_product_identity
     if not str(analysis.get("positive_prompt") or "").strip():
         seed = style_rematch_non_authoritative_prompt_context(current_prompt, user_request) or str(analysis.get("summary") or "").strip()
         analysis["positive_prompt"] = "\n\n".join(part for part in [
             seed and f"Stable context from previous prompt (non-authoritative; old user requests removed):\n{seed}",
             f"Latest user modification request: {str(user_request or '').strip()}"
         ] if part)
+    if product_identity_override:
+        positive = str(analysis.get("positive_prompt") or "").strip()
+        if product_identity_override not in positive:
+            analysis["positive_prompt"] = "\n\n".join(part for part in [product_identity_override, positive] if part)
     if user_request:
         guidance = str(analysis.get("generation_guidance") or "").strip()
         analysis["generation_guidance"] = "\n".join(part for part in [
             f"Latest user modification request (highest priority): {str(user_request or '').strip()}",
+            product_identity_override,
             guidance
         ] if part)
     return analysis
@@ -13359,6 +13498,7 @@ async def rematch_style_prompt_with_llm(payload: StyleLibraryRematchPromptReques
         "Immutable UI Poster copy switch:",
         poster_copy_state,
         "If Poster copy is enabled, readable poster/ad copy in the primary reference is allowed and should be preserved when compatible. If disabled, visible readable text must be removed unless the latest user request explicitly typed exact text.",
+        "If the latest request names the product/category (for example product is X, SKU is X, or this is a X), that product identity is authoritative and overrides conflicting product/category/function words in poster copy, old prompt context, style analysis, or case-library matches. Poster copy may keep hierarchy and compatible brand/promotion text, but incompatible old product claims must be rewritten, simplified, or omitted.",
         f"Reference similarity weight: {max(0, min(100, int(payload.reference_weight or 65)))}/100",
         "This is an independent rerun. The latest request must replace previous prompt demands, not append to them.",
         "Revise the prompt and create a fresh search_query for re-matching the style/case library."
@@ -13473,10 +13613,16 @@ async def style_library_rematch_prompt(payload: StyleLibraryRematchPromptRequest
         )
         base_analysis, analyzed_model = await analyze_image_for_style(image_payload)
     if not base_analysis:
+        text_seed = " ".join(
+            part for part in [
+                str(payload.user_request or "").strip(),
+                str(payload.current_prompt or "").strip(),
+            ] if part
+        )
         base_analysis = {
-            "summary": "User-provided prompt context",
-            "positive_prompt": payload.current_prompt,
-            "search_query": "commercial advertising product portrait",
+            "summary": "User-provided text prompt context",
+            "positive_prompt": payload.current_prompt or payload.user_request,
+            "search_query": text_seed[:800] or "commercial advertising image",
         }
     analysis, model = await rematch_style_prompt_with_llm(payload, base_analysis)
     query = style_search_query_from_analysis(analysis)

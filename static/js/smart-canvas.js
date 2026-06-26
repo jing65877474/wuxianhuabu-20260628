@@ -68,6 +68,7 @@ const promptTemplateLibrarySelect = document.getElementById('promptTemplateLibra
 const promptTemplateCats = document.getElementById('promptTemplateCats');
 const promptTemplateBody = document.getElementById('promptTemplateBody');
 const composerTemplateBtn = document.getElementById('composerTemplateBtn');
+const composerPromptMatchBtn = document.getElementById('composerPromptMatchBtn');
 let minimapViewport = document.getElementById('minimapViewport');
 let canvas = null;
 let canvasUsesConnections = true;
@@ -150,6 +151,7 @@ const smartCascadeRuns = new Map();
 let smartLoopContext = null;
 let transientSmartCloudLinks = [];
 let runBtnCooldownToken = 0;
+let composerPromptMatching = false;
 let smartRunStateToken = 0;
 const activeSmartTaskPolls = new Map();
 const cancelledSmartTaskIds = new Set();
@@ -12015,6 +12017,7 @@ function updateComposer(){
         lastComposerNodeId = '';
         setPromptInputLocked(false);
         if(!node) setPromptText('');
+        syncComposerPromptMatchButton();
         return;
     }
     const generatedPromptMode = isGeneratedImagePromptComposerNode(node);
@@ -12029,6 +12032,7 @@ function updateComposer(){
         if(cascadeRunBtn) cascadeRunBtn.style.display = 'none';
         positionComposerForNode(node);
         renderGeneratedImagePromptComposer(node);
+        syncComposerPromptMatchButton();
         return;
     }
     if(generatedPromptComposer) generatedPromptComposer.innerHTML = '';
@@ -12052,6 +12056,7 @@ function updateComposer(){
     renderInputThumbsRow(node);
     renderInputPromptPreview(node);
     syncCascadeRunButton(node);
+    syncComposerPromptMatchButton();
     updateProviderModels();
 }
 function renderInputPromptPreview(node){
@@ -13534,7 +13539,7 @@ function promptNodeLatestVisualOverridePrompt(node){
         'The latest user request explicitly changes the background and/or color palette.',
         'Do not preserve, restore, or visually inherit the reference image’s old background color, backdrop gradient, palette, wardrobe color coordination, or prop colors when they conflict with the latest request.',
         'Use the reference only for non-conflicting subject relationship, product-use logic, beauty-lighting quality, skin/material finish, and commercial polish. The newly requested background and palette are mandatory.'
-    ].join(' ');
+    ].filter(Boolean).join(' ');
 }
 function smartNodeUserIntentText(node, seen=new Set()){
     if(!node?.id || seen.has(node.id)) return '';
@@ -13582,17 +13587,20 @@ function smartPromptExplicitlyRequestsHuman(node, prompt=''){
 function smartRefsLikelyContainPerson(node, refs=[]){
     return imageRefsOnly(refs).some(ref => smartReferenceLikelyContainsPerson(node, ref));
 }
+function smartPromptLooksSystemGenerated(text=''){
+    return /NO HUMAN SUBJECT LOCK:|UPLOADED IMAGE ROLE MAP:|Product truth references:|Product recognition summary from product reference images:|Reference priority:|Original reference similarity:|Style\/reference similarity setting:|HIGHEST PRIORITY|PRODUCT IDENTITY|BRAND IDENTITY LOCK:|POSTER COPY|Negative prompt:|Reference summary:|Shared style anchor:|Generation guidance:|Case-library support:|Lighting\/material lock:/i.test(String(text || ''));
+}
 function smartGenerationAllowsHuman(node, refs=[], prompt=''){
     const latestUserRequest = smartLatestUserRequestText(node, prompt);
     if(smartTextExplicitlyRequestsHuman(latestUserRequest)) return true;
     if(smartTextExplicitlyForbidsHuman(latestUserRequest)) return false;
+    if(String(latestUserRequest || '').trim()) return smartRefsLikelyContainPerson(node, refs);
     const intentText = smartNodeUserIntentText(node);
     if(smartTextExplicitlyRequestsHuman(intentText)) return true;
     if(smartTextExplicitlyForbidsHuman(intentText)) return false;
     if(smartTextExplicitlyForbidsHuman(prompt)) return false;
-    return smartTextExplicitlyRequestsHuman(prompt)
-        || smartRefsLikelyContainPerson(node, refs)
-        || smartStyleMatchLikelyContainsPerson(node);
+    if(!smartPromptLooksSystemGenerated(prompt) && smartTextExplicitlyRequestsHuman(prompt)) return true;
+    return smartRefsLikelyContainPerson(node, refs);
 }
 function smartNoHumanSubjectPrompt(allowHuman=false){
     if(allowHuman) return '';
@@ -13600,6 +13608,7 @@ function smartNoHumanSubjectPrompt(allowHuman=false){
         'NO HUMAN SUBJECT LOCK:',
         'Do not include any person, human model, portrait, face, skin, hair, hands, fingers, arms, legs, body, silhouette, mannequin, or any human body part.',
         'This is a product-only / object-only scene. If style references, case-library matches, or older prompt fragments mention model, person, face, skin, pose, hand placement, holding, beauty portrait, or lifestyle person, ignore those human/body parts.',
+        'Beauty, hair-care, skin-care, scalp-care, body-care, massage, or usage-effect wording does not imply a person unless the latest user request explicitly asks for a model, hand, body part, or human-use scene.',
         'Use product stands, props, packaging, surface contact, shadows, environment, machinery, particles, or lighting to support the product instead of hands or people.'
     ].join(' ');
 }
@@ -13623,15 +13632,22 @@ function smartPosterCopyDisabledForGeneration(node){
     return smartPosterCopyControlForGeneration(node) === false;
 }
 function smartReferenceLikelyContainsPerson(node, ref){
-    const analysis = node?.styleMatch?.analysis || {};
+    if(smartReferenceRoleIsProduct(ref) || smartReferenceRoleIsCase(ref)) return false;
+    if(ref?.containsPerson === true || ref?.hasPerson === true || ref?.personReference === true || ref?.humanReference === true) return true;
+    if(ref?.containsPerson === false || ref?.hasPerson === false || ref?.personReference === false || ref?.humanReference === false) return false;
     const text = smartFlattenTextValues([
+        ref?.subjectKind,
+        ref?.mediaCategory,
         ref?.name,
         ref?.title,
-        analysis?.positive_prompt,
-        analysis?.reference_summary,
-        analysis?.shared_style_anchor,
-        analysis?.style_fingerprint,
-        analysis?.generation_guidance
+        ref?.categoryName,
+        ref?.sourceName,
+        ref?.description,
+        ref?.caption,
+        ref?.alt,
+        ref?.prompt,
+        ref?.runPrompt,
+        ref?.llmInstruction
     ]).join(' ');
     if(!text.trim() || smartTextExplicitlyForbidsHuman(text)) return false;
     return smartHumanPositivePattern().test(smartStripHumanAntiCopyClauses(text));
@@ -13682,7 +13698,33 @@ function smartFilterWeakCaseReferences(node, refs=[]){
         ? (refs || []).filter(ref => !smartReferenceRoleIsCase(ref))
         : (refs || []);
 }
-function smartPrioritizeGenerationReferences(refs=[]){
+function smartEvenlySampleReferences(refs=[], limit=3){
+    const items = uniqueReferenceImages(refs);
+    const max = Math.max(0, Number(limit) || 0);
+    if(items.length <= max) return items;
+    if(max <= 0) return [];
+    if(max === 1) return items.slice(0, 1);
+    const picked = [];
+    for(let i = 0; i < max; i++){
+        const idx = Math.round(i * (items.length - 1) / (max - 1));
+        const item = items[idx];
+        if(item && !picked.some(ref => ref?.url === item.url)) picked.push(item);
+    }
+    for(const item of items){
+        if(picked.length >= max) break;
+        if(item && !picked.some(ref => ref?.url === item.url)) picked.push(item);
+    }
+    return picked;
+}
+function smartExpensiveReferencePath(node, primary=[], products=[]){
+    const styleWeight = promptNodeReferenceWeight(node);
+    return Boolean(
+        (smartPosterCopyEnabledForGeneration(node) || styleWeight >= 85)
+        && primary.length
+        && products.length >= 3
+    );
+}
+function smartPrioritizeGenerationReferences(refs=[], node=null){
     const list = uniqueReferenceImages(refs);
     const generatedBase = list.filter(ref => ref?.generatedEditBase || ref?.structureLock);
     const allPrimary = list.filter(ref => !smartReferenceRoleIsCase(ref) && ['composition_reference','primary_style_reference','primary_reference'].includes(ref?.role));
@@ -13710,14 +13752,19 @@ function smartPrioritizeGenerationReferences(refs=[]){
     const allPrimaryUrls = new Set(allPrimary.map(ref => ref?.url).filter(Boolean));
     const productUrls = new Set(products.map(ref => ref?.url).filter(Boolean));
     const supporting = list.filter(ref => !primaryUrls.has(ref?.url) && !allPrimaryUrls.has(ref?.url) && !productUrls.has(ref?.url) && !smartReferenceRoleIsCase(ref));
-    const productLimit = primary.length ? 4 : 5;
+    const expensive = smartExpensiveReferencePath(node, primary, products);
+    const latestProductIdentity = typeof smartLatestProductIdentityOverrideValue === 'function'
+        ? smartLatestProductIdentityOverrideValue(node)
+        : '';
+    const productLimit = primary.length ? (latestProductIdentity ? 4 : 3) : 4;
+    const selectedProducts = expensive ? smartEvenlySampleReferences(products, productLimit) : products.slice(0, productLimit);
     const ordered = [
         ...primary.slice(0, 1),
-        ...products.slice(0, productLimit),
+        ...selectedProducts,
         ...secondaryGenerated,
         ...supporting
     ];
-    return uniqueReferenceImages(ordered).slice(0, 5);
+    return uniqueReferenceImages(ordered).slice(0, expensive && !latestProductIdentity ? 4 : 5);
 }
 function smartReferenceRoleWeight(ref){
     const raw = Number(ref?.referenceWeight ?? ref?.styleReferenceWeight ?? ref?.weight);
@@ -13820,6 +13867,54 @@ function smartProductIntentText(node){
 function smartProductCuePattern(){
     return /product|sku|packaging|package|same item|same product|reference product|held product|handheld product|hero product|my product|\u4ea7\u54c1|\u5546\u54c1|\u540c\u6b3e|\u5305\u88c5|\u53c2\u8003\u4ea7\u54c1|\u4ea7\u54c1\u56fe|\u6211\u7684\u4ea7\u54c1|\u8fd9\u6b3e\u4ea7\u54c1|\u624b\u4e2d|\u624b\u91cc|\u62ff\u7740|\u624b\u6301|\u4e3b\u89d2\u4ea7\u54c1/i;
 }
+function smartCleanProductIdentityName(value){
+    let text = String(value || '').trim();
+    text = text.replace(/^[\s"'`“”‘’:=：-]+|[\s"'`“”‘’.,，。;；!！?？]+$/g, '');
+    text = text.replace(/^(?:\u4e00\s*)?(?:\u6b3e|\u4e2a|\u4ef6|\u79cd|\u53ea)\s*/i, '');
+    text = text.replace(/\s*(?:\u53c2\u8003|\u6309|\u6839\u636e|\u751f\u6210|\u51fa\u56fe|\u505a|\u753b|\u4f5c\u4e3a)\s*.*$/i, '').trim();
+    text = text.replace(/\s+/g, ' ');
+    if(text.length < 2 || text.length > 60) return '';
+    if(/^(?:\u4ea7\u54c1|\u5546\u54c1|\u56fe\u7247|\u53c2\u8003\u56fe|\u4e00\u5f20\u56fe|image|product|item)$/i.test(text)) return '';
+    return text;
+}
+function smartExtractProductIdentityName(text){
+    const value = String(text || '').trim();
+    if(!value) return '';
+    const patterns = [
+        /LATEST PRODUCT IDENTITY OVERRIDE:[\s\S]{0,180}?product\/category as "([^"]{2,60})"/i,
+        /(?:\u8fd9|\u8fd9\u4e2a|\u8fd9\u6b3e|\u8be5|\u6b64|this)\s*(?:\u662f|\u4e3a|\u5c5e\u4e8e|is|as)\s*(?:\u4e00\s*(?:\u6b3e|\u4e2a|\u4ef6|\u79cd|\u53ea)\s*)?([^\s,，.。;；!！?？、\n]{2,30})/i,
+        /(?:\u4ea7\u54c1|\u5546\u54c1|sku|SKU|\u54c1\u7c7b|\u7c7b\u76ee|\u4e3b\u4f53|\u4e3b\u89d2\u4ea7\u54c1)\s*(?:\u662f|\u4e3a|\u53eb|\u5c5e\u4e8e|=|:|：|is|as)\s*(?:\u4e00\s*(?:\u6b3e|\u4e2a|\u4ef6|\u79cd|\u53ea)\s*)?([^\s,，.。;；!！?？、\n]{2,30})/i,
+        /\b(?:product|item|sku|category)\s*(?:is|as|=|:)\s*([A-Za-z][A-Za-z0-9 -]{1,50})/i
+    ];
+    for(const pattern of patterns){
+        const match = pattern.exec(value);
+        const name = smartCleanProductIdentityName(match?.[1] || '');
+        if(name) return name;
+    }
+    return '';
+}
+function smartLatestProductIdentityOverrideValue(node, prompt=''){
+    const latest = smartLatestUserRequestText(node, prompt);
+    const fromLatest = smartExtractProductIdentityName(latest);
+    if(fromLatest) return fromLatest;
+    return smartExtractProductIdentityName(prompt);
+}
+function smartLatestProductIdentityOverridePrompt(node, prompt='', refs=[]){
+    const identity = smartLatestProductIdentityOverrideValue(node, prompt);
+    if(!identity) return '';
+    const productRefs = imageRefsOnly(refs)
+        .map((ref, index) => ({ref, index}))
+        .filter(item => item.ref?.role === 'product_truth_reference' || item.ref?.role === 'product_detail_reference');
+    const labels = productRefs.map(item => smartReferenceDisplayLabel(item.index)).join(', ');
+    return [
+        'LATEST PRODUCT IDENTITY OVERRIDE:',
+        `The latest user request names the product/category as "${identity}". Treat this as the authoritative product identity.`,
+        labels ? `Use ${labels} as strict visual proof of the same "${identity}" SKU: shape, color, structure, controls, material, surface details, and scale must come from these product-truth images.` : '',
+        'This overrides any conflicting product category, use-case, function claim, or old object implied by the primary poster/reference image, readable poster copy, style analysis, prior prompt, or case-library match.',
+        'If Poster copy is enabled, preserve only brand/promotion/text-block hierarchy that remains compatible with this latest product identity. Rewrite, simplify, or omit copied words that describe a different product category or function.',
+        `FINAL PRODUCT IDENTITY CHECK: the hero product and all readable product claims must read as "${identity}", not as the old reference product.`
+    ].filter(Boolean).join(' ');
+}
 function smartAddProductIndexGroup(indexes, group){
     const text = smartNormalizeProductReferenceText(group);
     const nums = (text.match(/\d+/g) || []).map(n => Number(n)).filter(n => Number.isFinite(n));
@@ -13892,7 +13987,7 @@ function smartProductTruthRolePrompt(refs=[], allowHuman=false){
     const labels = productRefs.map(item => `${smartReferenceDisplayLabel(item.index)} (${item.ref.name || 'product reference'})`).join(', ');
     const parts = [
         `Product truth references: ${labels}.`,
-        'These images define strict SKU identity and override conflicting objects in portrait, pose, or style references.',
+        'These images define strict SKU identity and override conflicting objects in portrait, pose, or style references. If a style/poster reference shows a similar same-category product, treat that old product as a decoy placeholder, not product anatomy.',
         allowHuman
             ? 'Preserve category, silhouette, proportions, structural parts, opening/cap/nozzle geometry, material, colors, product-surface brand marks, logos, printed label text/graphics, label-block placement, edge thickness, finish, and real-world scale.'
             : 'Preserve category, silhouette, proportions, structural parts, shell seams, layer relationships, opening/cap/nozzle/display/control geometry, material, colors, product-surface brand marks, logos, printed label text/graphics, label-block placement, edge thickness, finish, and real-world scale.',
@@ -13905,6 +14000,28 @@ function smartProductTruthRolePrompt(refs=[], allowHuman=false){
         parts.splice(parts.length - 1, 0, 'For appliances, electronics, tools, furniture, or mechanical products, preserve how the upper shell, lower shell, controls, feet, internal modules, motors, coils, wiring, brackets, supports, and seams physically connect.');
     }
     return parts.join(' ');
+}
+function smartProductTruthContrastLockPrompt(refs=[], allowHuman=false){
+    const imageRefs = imageRefsOnly(refs);
+    const productRefs = imageRefs
+        .map((ref, index) => ({ref, index}))
+        .filter(item => item.ref?.role === 'product_truth_reference' || item.ref?.role === 'product_detail_reference');
+    const styleRefs = imageRefs
+        .map((ref, index) => ({ref, index}))
+        .filter(item => ['composition_reference','primary_style_reference','primary_reference'].includes(item.ref?.role));
+    if(!productRefs.length || !styleRefs.length) return '';
+    const productLabels = productRefs.map(item => smartReferenceDisplayLabel(item.index)).join(', ');
+    const styleLabels = styleRefs.map(item => smartReferenceDisplayLabel(item.index)).join(', ');
+    return [
+        'PRODUCT TRUTH VS STYLE PRODUCT CONTRAST LOCK:',
+        `${styleLabels} are composition/poster references only; ${productLabels} are strict SKU references.`,
+        'When a composition/poster reference contains an old or similar same-category product, treat that old product as a decoy placeholder. Do not use it as the product anatomy.',
+        'Do not average, merge, or transplant any head/cap/nozzle shape, light or LED area, bristles, teeth, pins, circular control/display disk, button icons, handle curve, shell seam, accessory, color accent, or functional part from the composition/poster reference unless the same feature is clearly visible in the product-truth references.',
+        'Preserve the product-truth silhouette and distinguishing visible features across views: front/side/top/back proportions, head or cap geometry, teeth/pins/bristle pattern, display/control placement, button/icon layout, seams, ridges, materials, color blocks, and real-world scale.',
+        allowHuman
+            ? 'Adapt the hand grip and pose around the exact product-truth geometry; hands may touch or hold the product but must not hide or redesign the distinguishing head, control, button, teeth/pins/bristles, or handle details.'
+            : 'Adapt placement, lighting, props, and support surfaces around the exact product-truth geometry; do not add hands, people, or extra product-like parts.'
+    ].join(' ');
 }
 function smartProductReplacementRolePrompt(refs=[], allowHuman=false){
     const images = imageRefsOnly(refs);
@@ -14049,16 +14166,31 @@ function smartPosterCopyLockPrompt(node, refs=[]){
     const uploaded = imageRefsOnly(refs).filter(ref => (ref?.posterCopyReference || ref?.copyTextLock) && smartReferenceUploadAllowed(ref));
     if(!uploaded.length) return '';
     const labels = uploaded.map((ref, index) => `${smartReferenceDisplayLabel(index)} (${ref.name || 'primary poster reference'})`).join(', ');
+    const latestProductIdentity = smartLatestProductIdentityOverrideValue(node);
     return [
         'POSTER COPY LOCK:',
         `Use ${labels} as the authoritative source for readable poster/ad copy.`,
         'Use this as a text-reading reference, not as a full-image composition template.',
         'Preserve only the main readable headline, key price/offer, CTA, and important badge text when practical, with similar text-block placement and visual hierarchy.',
+        latestProductIdentity ? `Product-copy compatibility override: the latest product identity is "${latestProductIdentity}". Do not preserve copied poster words that describe a different product category, body area, function, or usage scenario; adapt or simplify those words so the copy matches "${latestProductIdentity}".` : '',
         'Do not force exact line breaks, every small label, dense fine print, or pixel-level typography reconstruction; tiny text may become clean non-readable marks or simplified label blocks.',
         'Do not copy the whole poster layout, border treatment, badge positions, arrows, product placement, background, camera, crop, aspect ratio, or negative-space map unless the reference weight is high and the latest request explicitly asks for a close recreation.',
         'Product-detail references control only SKU/product appearance and must not suppress, remove, replace, translate, or invent the poster copy.',
         'This lock overrides earlier no-readable-text, no-brand-text, clean-no-text, or text-removal instructions unless the user explicitly switched Poster copy off. Do not interpret “do not invent random text” as permission to erase readable copy that already exists in the primary poster reference.',
         'Prefer a timely completed generation over perfect OCR of every minor text element.'
+    ].filter(Boolean).join(' ');
+}
+function smartBrandIdentityPrompt(refs=[]){
+    const uploaded = imageRefsOnly(refs).filter(smartReferenceUploadAllowed);
+    if(!uploaded.length) return '';
+    const labels = uploaded.map((ref, index) => `${smartReferenceDisplayLabel(index)} (${ref.name || 'reference'})`).join(', ');
+    return [
+        'BRAND IDENTITY LOCK:',
+        `Preserve visible brand identity marks in ${labels} as mandatory anchors: top-left or top-corner brand logo, brand name/wordmark, product-line mark, and store/festival brand tag when present.`,
+        'Do not remove, translate, redraw, or absorb those brand elements into the background even when Poster copy is disabled.',
+        'Treat the logo/brand strip as a fixed header identity area, not as removable ad copy.',
+        'Keep the brand area crisp, recognizable, and in the same relative position; only the marketing copy around it may be simplified or removed.',
+        'Brand identity is higher priority than decorative typography and higher priority than text-removal cleanup.'
     ].join(' ');
 }
 function smartPosterCopyDisabledPrompt(node, refs=[]){
@@ -14118,7 +14250,7 @@ function smartSanitizeProductReplacementPrompt(prompt){
     const sections = String(prompt || '').split(/\n{2,}/).map(section => section.trim()).filter(Boolean);
     const dropHeadingPattern = /^(?:Reference anchors|Reference summary|Shared style anchor|Generation guidance|Variant plan|Case-library support|Loose style guidance|Composition lock|Lighting\/material lock):/i;
     const oldProductPattern = /\b(?:pink|gold|beige|champagne|dusty pink|silicone top|raised massage nodes|old product|reference object|serum bottle|dropper bottle|generic product)\b|粉|金|米色|香槟|硅胶|按摩凸点|旧产品|参考图产品/i;
-    const keepPriorityPattern = /^(?:Highest priority user modification request|Active additional generation guidance|Product truth references|Product recognition summary|MECHANICAL STRUCTURE LOCK|NO HUMAN SUBJECT LOCK|UPLOADED IMAGE ROLE MAP|PRODUCT IDENTITY PRIORITY|Style\/reference similarity setting|Original reference similarity|Negative prompt|FINAL PRODUCT CHECK)/i;
+    const keepPriorityPattern = /^(?:Highest priority user modification request|Active additional generation guidance|Latest product identity override|Product truth references|Product recognition summary|MECHANICAL STRUCTURE LOCK|NO HUMAN SUBJECT LOCK|UPLOADED IMAGE ROLE MAP|PRODUCT IDENTITY PRIORITY|LATEST PRODUCT IDENTITY OVERRIDE|Style\/reference similarity setting|Original reference similarity|Negative prompt|FINAL PRODUCT CHECK)/i;
     const kept = sections.filter(section => {
         if(keepPriorityPattern.test(section)) return true;
         if(dropHeadingPattern.test(section)) return false;
@@ -14156,6 +14288,8 @@ function smartProductRecognitionMessage(refs=[]){
         '- exact product category and packaging format',
         '- silhouette, proportions, dimensions, front/back/side/top/underside structure',
         '- cap, nozzle, pump, opening, seal, tabs, folds, handle, box edges, bottle shape, pouch shape, shell seams, upper/lower body split, feet, buttons, display panels, vents, brackets, or other structural parts',
+        '- distinctive features that separate this SKU from similar products in style/poster references',
+        '- for brush, comb, massage, beauty, or handheld devices: exact head/cap shape, teeth/pins/bristle pattern, light/LED placement, circular control or display disk, button/icon layout, handle curves, shell seams, and contact surfaces',
         '- for devices or mechanical products: motor/coil/gear/wire/PCB locations, internal cavity relationship, shell layering, cutaway/exploded-view constraints, and what components must stay inside the body instead of becoming separate props',
         '- material and surface finish: paper, plastic, transparent film, glass, metal, matte, satin, glossy, translucent',
         '- dominant colors, accent colors, label blocks, icon placement, border lines, panel layout, readable text if legible',
@@ -14165,7 +14299,7 @@ function smartProductRecognitionMessage(refs=[]){
     ].join('\n');
 }
 async function smartAnalyzeProductTruthRefs(refs=[], runSettings=settings){
-    const productRefs = smartProductTruthRefs(refs).slice(0, 6);
+    const productRefs = smartEvenlySampleReferences(smartProductTruthRefs(refs), 5);
     if(!productRefs.length) return '';
     const key = smartProductRecognitionCacheKey(productRefs);
     if(smartProductRecognitionCache.has(key)) return smartProductRecognitionCache.get(key);
@@ -14218,7 +14352,7 @@ function visibleReferenceImagesFor(node){
         ...collectMentionedImagesFromPrompt()
     ]);
     const assigned = smartAssignReferenceRoles(node, uniqueReferenceImages(candidates));
-    const finalRefs = smartPrioritizeGenerationReferences(assigned);
+    const finalRefs = smartPrioritizeGenerationReferences(assigned, node);
     return finalRefs;
 }
 function inputMentionCandidateImages(node){
@@ -14637,7 +14771,11 @@ function smartReferenceRequestPayload(img, index){
         structureLock:Boolean(img.structureLock),
         productTruthExplicit:Boolean(img.productTruthExplicit),
         posterCopyReference:Boolean(img.posterCopyReference),
-        copyTextLock:Boolean(img.copyTextLock)
+        copyTextLock:Boolean(img.copyTextLock),
+        containsPerson:img.containsPerson === true ? true : img.containsPerson === false ? false : undefined,
+        hasPerson:img.hasPerson === true ? true : img.hasPerson === false ? false : undefined,
+        personReference:img.personReference === true ? true : img.personReference === false ? false : undefined,
+        humanReference:img.humanReference === true ? true : img.humanReference === false ? false : undefined
     };
 }
 function buildPromptRequest(node, overrideDefaultImages=null, consumeDefault=false, ctx=smartLoopContext){
@@ -14705,11 +14843,12 @@ function buildPromptRequest(node, overrideDefaultImages=null, consumeDefault=fal
 const buildPromptRequestBase = buildPromptRequest;
 buildPromptRequest = function(node, overrideDefaultImages=null, consumeDefault=false, ctx=smartLoopContext){
     const request = buildPromptRequestBase(node, overrideDefaultImages, consumeDefault, ctx);
-    const refs = smartDecorateReferenceWeights(node, smartPrioritizeGenerationReferences(smartAssignReferenceRoles(node, request.refs || [])));
+    const refs = smartDecorateReferenceWeights(node, smartPrioritizeGenerationReferences(smartAssignReferenceRoles(node, request.refs || []), node));
     const allowHuman = smartGenerationAllowsHuman(node, refs, request.prompt || request.displayPrompt || '');
     const noHumanPrompt = smartNoHumanSubjectPrompt(allowHuman);
     const editBasePrompt = smartEditBaseStructureLockPrompt(refs, request.displayPrompt || request.prompt || '');
     const rolePrompt = smartProductTruthRolePrompt(refs, allowHuman);
+    const productContrastPrompt = smartProductTruthContrastLockPrompt(refs, allowHuman);
     const replacementPrompt = smartProductReplacementRolePrompt(refs, allowHuman);
     const replacementMode = Boolean(replacementPrompt);
     const productOnlyReplacementMode = replacementMode && !allowHuman;
@@ -14725,19 +14864,24 @@ buildPromptRequest = function(node, overrideDefaultImages=null, consumeDefault=f
     const posterCopyLockPrompt = smartPosterCopyLockPrompt(node, refs);
     const posterCopyDisabledPrompt = smartPosterCopyDisabledPrompt(node, refs);
     const handInteractionPrompt = smartProductHandInteractionPrompt(refs, allowHuman);
+    const brandIdentityPrompt = smartBrandIdentityPrompt(refs);
+    const latestProductIdentityPrompt = smartLatestProductIdentityOverridePrompt(node, cleanRequestPrompt || request.displayPrompt || request.prompt || '', refs);
     const mechanicalStructurePrompt = allowHuman ? '' : smartMechanicalStructurePrompt(node, refs, cleanRequestPrompt || request.displayPrompt || '');
     const styleBridgePrompt = productOnlyReplacementMode ? smartProductReplacementStyleBridgePrompt(false) : '';
     const roleParts = [
         noHumanPrompt,
         uploadedMapPrompt,
-        posterCopyLockPrompt,
-        posterCopyDisabledPrompt,
-        editBasePrompt,
+        latestProductIdentityPrompt,
         replacementPrompt,
         styleBridgePrompt,
         rolePrompt && !String(cleanRequestPrompt || '').includes('Product truth references:') ? rolePrompt : '',
+        productContrastPrompt,
         mechanicalStructurePrompt,
         handInteractionPrompt,
+        brandIdentityPrompt,
+        posterCopyLockPrompt,
+        posterCopyDisabledPrompt,
+        editBasePrompt,
         similarityPrompt,
         personOverridePrompt,
         cleanRequestPrompt,
@@ -15320,6 +15464,81 @@ async function rematchStylePromptForPromptNode(node){
     };
     smartNotifyPromptCompression(promptBudget);
     return data;
+}
+function syncComposerPromptMatchButton(){
+    if(!composerPromptMatchBtn) return;
+    const text = promptPlainText().trim();
+    const disabled = composerPromptMatching || !composer?.classList?.contains('open') || promptInput?.dataset?.promptLocked === '1' || !text;
+    composerPromptMatchBtn.disabled = disabled;
+    composerPromptMatchBtn.classList.toggle('matching', composerPromptMatching);
+    composerPromptMatchBtn.title = composerPromptMatching ? '匹配中' : '匹配提示词';
+    composerPromptMatchBtn.setAttribute('aria-label', composerPromptMatching ? '匹配中' : '匹配提示词');
+    composerPromptMatchBtn.innerHTML = `<i data-lucide="${composerPromptMatching ? 'loader-2' : 'sparkles'}"></i><span>${composerPromptMatching ? '匹配中' : '匹配提示词'}</span>`;
+    refreshIcons();
+}
+async function matchComposerPromptFromText(){
+    if(composerPromptMatching) return;
+    const userRequest = promptPlainText().trim();
+    if(!userRequest){ toast('请先输入要生成的画面需求'); return; }
+    const subject = activeComposerNode() || selectedNode();
+    if(subject && !isSmartRunnableNode(subject)){ toast('请选择图片/上传节点后再匹配提示词'); return; }
+    const provider = resolveChatProviderId(settings.provider_id || '');
+    const model = preferredPromptRematchModel(provider);
+    pushUndo();
+    composerPromptMatching = true;
+    syncComposerPromptMatchButton();
+    toast('正在用 GPT-5.5 匹配提示词库...');
+    try {
+        const response = await fetch('/api/style-library/rematch-prompt', {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({
+                image:'',
+                analysis:{},
+                current_prompt:userRequest,
+                user_request:userRequest,
+                camera_control:'',
+                poster_copy_enabled:false,
+                provider,
+                model,
+                ms_model: provider === 'modelscope' ? model : '',
+                limit:4,
+                reference_weight:65
+            })
+        });
+        const data = await response.json().catch(() => ({}));
+        if(!response.ok) throw new Error(data.detail || '匹配提示词库失败');
+        const rawPrompt = String(data.prompt || data.analysis?.positive_prompt || '').trim();
+        if(!rawPrompt) throw new Error('没有生成可用提示词');
+        const promptBudget = smartCompressPromptToBudget(rawPrompt, SMART_MATCHED_PROMPT_BUDGET);
+        const prompt = promptBudget.prompt;
+        setPromptText(prompt);
+        delete promptInput.dataset.preserveDraftOnce;
+        const target = activeComposerNode() || selectedNode();
+        if(isSmartRunnableNode(target)){
+            target.promptDraftText = prompt;
+            target.promptDraftHtml = escapeHtml(prompt);
+            target.promptDraftTouched = true;
+            target.textPromptMatched = true;
+            target.textPromptMatch = {
+                query:data.query || userRequest,
+                cases:Array.isArray(data.cases) ? data.cases : [],
+                analysis:data.analysis || {},
+                model:data.model || model,
+                rematchModel:model,
+                source:data.source || '',
+                rematched_at:Date.now()
+            };
+        }
+        smartNotifyPromptCompression(promptBudget);
+        scheduleSave();
+        toast(`已匹配 ${Array.isArray(data.cases) ? data.cases.length : 0} 个提示词库案例，并替换当前输入`);
+    } catch(error) {
+        toast((error.message || '匹配提示词库失败').slice(0, 180));
+    } finally {
+        composerPromptMatching = false;
+        syncComposerPromptMatchButton();
+    }
 }
 async function runStyleMatchedPromptNode(nodeId){
     let node = nodes.find(n => n.id === nodeId);
@@ -16867,11 +17086,21 @@ function smartCreativeReferenceImages(refs=[]){
     const productRefs = images.filter(ref => ref !== preferred && smartReferenceRoleIsProduct(ref));
     return uniqueReferenceImages([preferred, ...productRefs].filter(Boolean)).slice(0, SMART_REFERENCE_IMAGE_MAX);
 }
+function smartGenerationReferenceLimit(prompt='', refs=[]){
+    const images = imageRefsOnly(refs).filter(smartReferenceUploadAllowed);
+    const count = images.length;
+    if(count <= 3) return count;
+    const productCount = smartProductTruthRefs(images).length;
+    const posterCopy = smartPosterCopyEnabledInRequest(prompt, images);
+    if(/LATEST PRODUCT IDENTITY OVERRIDE/i.test(String(prompt || '')) && productCount >= 3) return Math.min(count, 5);
+    return posterCopy || productCount >= 2 ? Math.min(count, 4) : 3;
+}
+const gpt_image_reference_limit = smartGenerationReferenceLimit;
 const SMART_MATCHED_PROMPT_BUDGET = 7000;
 const SMART_IMAGE_PROMPT_BUDGET = 12000;
 const SMART_POSTER_COPY_PROMPT_BUDGET = 5200;
 const SMART_PRODUCT_REPLACEMENT_PROMPT_BUDGET = 5200;
-const SMART_PRODUCT_ONLY_REPLACEMENT_PROMPT_BUDGET = 1800;
+const SMART_PRODUCT_ONLY_REPLACEMENT_PROMPT_BUDGET = 5200;
 const SMART_VIDEO_PROMPT_BUDGET = 3600;
 const SMART_LLM_MESSAGE_BUDGET = 18000;
 let smartPromptCompressionNoticeAt = 0;
@@ -16889,6 +17118,10 @@ function smartPromptDedupeKey(value){
         .replace(/[\s"'`“”‘’.,，。:：;；!?！？()[\]{}<>《》【】_-]+/g, '');
 }
 function smartPromptSectionProfile(value){
+    const brandIdentityHead = String(value || '').slice(0, 260);
+    if(/brand identity lock|latest product identity override/i.test(brandIdentityHead)){
+        return {priority:110, cap:2400, min:750};
+    }
     const head = String(value || '').slice(0, 260);
     if(/highest priority|active additional generation guidance|llm additional guidance|product truth references|product recognition summary|product replacement|output canvas lock|camera override|camera-locked variant|latest background\/palette override|final product check|最高优先级|追加生成指导|产品事实|产品识别|产品替换|输出画布/i.test(head)){
         return {priority:110, cap:2400, min:750};
@@ -17129,9 +17362,10 @@ async function runApiGeneration(prompt, refs, runSettings=settings){
         .join('\n\n');
     const creative = smartCreativeVariantRequested(effectivePrompt);
     const cameraControlled = smartCameraControlRequested(effectivePrompt);
-    const referenceImages = (creative || cameraControlled ? smartCreativeReferenceImages(refs) : imageRefsOnly(refs))
+    const referencePool = creative || cameraControlled ? smartCreativeReferenceImages(refs) : imageRefsOnly(refs);
+    const referenceImages = referencePool
         .filter(smartReferenceUploadAllowed)
-        .slice(0, SMART_REFERENCE_IMAGE_MAX);
+        .slice(0, smartGenerationReferenceLimit(effectivePrompt, referencePool));
     const productPrompt = await smartPromptWithProductRecognition(effectivePrompt, referenceImages, runSettings);
     const productReplacement = Boolean(smartProductReplacementRolePrompt(referenceImages));
     const productOnlyReplacement = productReplacement && String(effectivePrompt || '').includes('NO HUMAN SUBJECT LOCK:');
@@ -18809,15 +19043,6 @@ window.addEventListener('keydown', e => {
         copySelectedImage();
         return;
     }
-    if((e.ctrlKey || e.metaKey) && key === 'v' && !isEditableTarget(e.target) && (imageClipboard?.item?.url || nodeClipboard?.nodes?.length)){
-        const requestedAt = Date.now();
-        setTimeout(() => {
-            if(lastImagePasteAt >= requestedAt) return;
-            if(lastNodePasteAt >= requestedAt) return;
-            if(pasteImageClipboard()) return;
-            pasteNodes();
-        }, 90);
-    }
     if(e.key === 'Escape' && imageEditModal.classList.contains('open')){
         closeImageEditor();
         return;
@@ -18900,6 +19125,13 @@ if(promptResize){
     });
 }
 runBtn.onclick = runGeneration;
+if(composerPromptMatchBtn){
+    composerPromptMatchBtn.onclick = event => {
+        event.preventDefault();
+        event.stopPropagation();
+        matchComposerPromptFromText();
+    };
+}
 if(cascadeRunBtn){
     cascadeRunBtn.onclick = () => {
         const node = selectedNode();
@@ -19289,6 +19521,7 @@ composer.addEventListener('click', event => {
 promptInput.addEventListener('input', maybeOpenMentionPicker);
 promptInput.addEventListener('input', () => {
     delete promptInput.dataset.preserveDraftOnce;
+    syncComposerPromptMatchButton();
     savePromptDraftForCurrent();
     renderInputThumbsRow(selectedNode());
     scheduleSave();
