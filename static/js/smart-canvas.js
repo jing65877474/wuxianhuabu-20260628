@@ -149,6 +149,8 @@ let composerPromptMatching = false;
 let smartRunStateToken = 0;
 const activeSmartTaskPolls = new Map();
 const cancelledSmartTaskIds = new Set();
+const SMART_TASK_RETRY_STATUSES = new Set([429, 502, 503, 504]);
+const SMART_TASK_RETRY_DELAYS = [2000, 5000, 10000];
 const deletedSmartNodeTombstones = new Map();
 const smartNodeRunTokens = new Map();
 let lastImagePasteAt = 0;
@@ -7007,6 +7009,10 @@ function nodeBodyHtml(node, layout){
     if(node.jimengPending && node.jimengPending.submitId && imgs.length === 0){
         return jimengPendingBodyHtml(node, layout);
     }
+    const submitFailedTask = smartSubmitFailedImageTask(node);
+    if(submitFailedTask && imgs.length === 0){
+        return imageTaskSubmitFailedBodyHtml(node, submitFailedTask, layout);
+    }
     const recoverTask = smartRecoverableImageTask(node);
     if(recoverTask && imgs.length === 0){
         return imageTaskRecoverBodyHtml(node, recoverTask, layout);
@@ -7048,6 +7054,21 @@ function jimengPendingBodyHtml(node, layout){
 }
 function smartRecoverableImageTask(node){
     return smartPendingTasks(node).find(task => task.failed && task.recoverTaskId) || null;
+}
+function smartSubmitFailedImageTask(node){
+    return smartPendingTasks(node).find(task => task.submitFailed) || null;
+}
+function imageTaskSubmitFailedBodyHtml(node, task, layout){
+    const submitting = Boolean(task.submitting);
+    const msg = task.error || tr('smart.errRunFailed');
+    return `<div class="jimeng-pending-cell loading-cell single" style="width:${layout.width}px;height:${layout.height}px">
+        <div class="jimeng-pending-overlay">
+            <div class="jimeng-pending-spinner"><i data-lucide="${submitting ? 'loader-2' : 'rotate-cw'}"></i></div>
+            <div class="jimeng-pending-text">${submitting ? '重试提交中' : '单项提交失败'}</div>
+            <div class="jimeng-pending-sub" title="${escapeAttr(msg)}">${escapeHtml(msg).slice(0, 80)}</div>
+            <button class="jimeng-pending-query" type="button" data-image-task-submit-retry="${escapeAttr(node.id)}" data-task-id="${escapeAttr(task.taskId)}" ${submitting ? 'disabled' : ''}><i data-lucide="${submitting ? 'loader-2' : 'rotate-cw'}"></i><span>重试该项</span></button>
+        </div>
+    </div>`;
 }
 function imageTaskRecoverBodyHtml(node, task, layout){
     const querying = Boolean(task.querying);
@@ -8129,6 +8150,13 @@ function bindNodeEvents(){
             btn.addEventListener('click', e => {
                 e.preventDefault(); e.stopPropagation();
                 querySmartImageTaskNow(btn.dataset.imageTaskQuery, btn.dataset.taskId);
+            });
+        });
+        el.querySelectorAll('[data-image-task-submit-retry]').forEach(btn => {
+            btn.addEventListener('mousedown', e => { e.preventDefault(); e.stopPropagation(); }, true);
+            btn.addEventListener('click', e => {
+                e.preventDefault(); e.stopPropagation();
+                retrySmartSubmitPending(btn.dataset.imageTaskSubmitRetry, btn.dataset.taskId);
             });
         });
         el.querySelectorAll('[data-thumb-scroll]').forEach(scroller => {
@@ -15281,8 +15309,15 @@ async function generateUrlsForCurrentSettings(node, prompt, refs, runSettings=se
         const taskResult = await runApiGeneration(prompt, refs, activeSettings);
         const taskIds = Array.isArray(taskResult?.taskIds) ? taskResult.taskIds : [];
         if(taskIds.length){
-            const settled = await Promise.all(taskIds.map(taskId => pollSmartCanvasTask(taskId)));
-            const urls = settled.flatMap(result => resultMediaUrls(result?.images || result)).filter(Boolean);
+            const settled = await Promise.allSettled(taskIds.map(taskId => pollSmartCanvasTask(taskId)));
+            const urls = settled
+                .filter(item => item.status === 'fulfilled')
+                .flatMap(item => resultMediaUrls(item.value?.images || item.value))
+                .filter(Boolean);
+            if(!urls.length){
+                const failed = settled.find(item => item.status === 'rejected');
+                if(failed) throw failed.reason;
+            }
             return {urls, kind:mediaKindForUrls(urls, 'image')};
         }
         const urls = resultMediaUrls(taskResult);
@@ -15455,14 +15490,16 @@ async function runLoopRoundIntoSlot(loopNode, rootNode, outputSlot, loopIndex, c
                 delete history.h;
                 outputSlot.images = [];
             }
-            outputSlot.pendingTasks = taskIds.map(taskId => ({taskId, kind:'image', providerId:taskResult.providerId, model:taskResult.model}));
-            outputSlot.pending = Math.max(taskIds.length, Number(outputSlot.pending || 0) || taskIds.length);
+            const submittedTasks = smartSubmittedTasks(taskResult).map(task => smartPendingTaskFromSubmit(task, {providerId:taskResult.providerId, model:taskResult.model, requestId:taskResult.requestId, size:taskResult.size || sizeForRun(runSettings)}));
+            const failedTasks = (taskResult.failures || []).map(item => smartPendingTaskFromSubmitFailure(item, {providerId:taskResult.providerId, model:taskResult.model, requestId:taskResult.requestId, size:taskResult.size || sizeForRun(runSettings)}));
+            outputSlot.pendingTasks = [...submittedTasks, ...failedTasks];
+            outputSlot.pending = Math.max(outputSlot.pendingTasks.length, Number(outputSlot.pending || 0) || outputSlot.pendingTasks.length);
             outputSlot.running = false;
             render();
             scheduleSave();
             await saveCanvas();
             await resumeSmartPendingNode(outputSlot);
-            if(outputSlot.jimengPending || smartRecoverableImageTask(outputSlot)){
+            if(outputSlot.jimengPending || smartRecoverableImageTask(outputSlot) || smartSubmitFailedImageTask(outputSlot)){
                 outputSlot.queued = false;
                 return [];
             }
@@ -15919,8 +15956,10 @@ async function runGeneration(){
             const taskIds = Array.isArray(outImages?.taskIds) ? outImages.taskIds : [];
             if(!taskIds.length) throw new Error(tr('smart.errRunFailed'));
             const requestedSize = sizeForRun(settings);
-            pendingNode.pendingTasks = taskIds.map(taskId => ({taskId, kind:'image', providerId:outImages.providerId, model:outImages.model, size:requestedSize}));
-            pendingNode.pending = Math.max(taskIds.length, Number(pendingNode.pending || 0) || taskIds.length);
+            const submittedTasks = smartSubmittedTasks(outImages).map(task => smartPendingTaskFromSubmit(task, {providerId:outImages.providerId, model:outImages.model, requestId:outImages.requestId, size:requestedSize}));
+            const failedTasks = (outImages.failures || []).map(item => smartPendingTaskFromSubmitFailure(item, {providerId:outImages.providerId, model:outImages.model, requestId:outImages.requestId, size:requestedSize}));
+            pendingNode.pendingTasks = [...submittedTasks, ...failedTasks];
+            pendingNode.pending = Math.max(pendingNode.pendingTasks.length, Number(pendingNode.pending || 0) || pendingNode.pendingTasks.length);
             pendingNode.runStartedAt = nowMs();
             pendingNode.runTimerHidden = false;
             pendingNode.running = false;
@@ -15934,7 +15973,7 @@ async function runGeneration(){
                 scheduleSave();
                 return;
             }
-            if(pendingNode.jimengPending || smartRecoverableImageTask(pendingNode)){
+            if(pendingNode.jimengPending || smartRecoverableImageTask(pendingNode) || smartSubmitFailedImageTask(pendingNode)){
                 if(sourceVisualState) restoreSourceVisualState(node, sourceVisualState);
                 clearPromptInput({preserveDraft:true});
                 settings = previousSettings;
@@ -16505,16 +16544,47 @@ async function runApiGeneration(prompt, refs, runSettings=settings){
     const compressionOptions = productOnlyReplacement ? {repairFragments:true} : {};
     const compressedBase = smartCompressPromptToBudget(productPrompt, baseBudget, compressionOptions);
     smartNotifyPromptCompression(compressedBase);
+    const requestId = uid('smart_req');
     const basePayload = {provider_id:runSettings.provider_id, model:runSettings.model, size:sizeForRun(runSettings), quality:runSettings.quality || 'auto', n:1, reference_images:referenceImages};
-    const tasks = await Promise.all(Array.from({length:count}, (_, index) => {
+    const submitPayloads = Array.from({length:count}, (_, index) => {
         const variantPrompt = smartVariantPrompt(compressedBase.prompt, index, count, referenceImages);
-        const payload = {...basePayload, prompt:smartCompressPromptToBudget(variantPrompt, requestBudget, compressionOptions).prompt};
-        return fetch('/api/canvas-image-tasks', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)}).then(async r => {
-            if(!r.ok) throw new Error(await r.text());
-            return r.json();
-        });
-    }));
-    return {taskIds:tasks.map(task => task.task_id).filter(Boolean), count, providerId:basePayload.provider_id, model:basePayload.model};
+        return {
+            ...basePayload,
+            prompt:smartCompressPromptToBudget(variantPrompt, requestBudget, compressionOptions).prompt,
+            request_id:requestId,
+            batch_index:index
+        };
+    });
+    const settled = await Promise.allSettled(submitPayloads.map(payload => fetchSmartCanvasTaskJson('/api/canvas-image-tasks', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify(payload)
+    })));
+    const tasks = [];
+    const failures = [];
+    settled.forEach((item, index) => {
+        if(item.status === 'fulfilled' && item.value?.task_id){
+            tasks.push({
+                taskId:item.value.task_id,
+                requestId:item.value.request_id || requestId,
+                batchIndex:index,
+                providerId:item.value.provider_id || basePayload.provider_id,
+                model:item.value.model || basePayload.model,
+                status:item.value.status || 'submitted',
+                upstreamTaskId:item.value.upstream_task_id || '',
+                size:basePayload.size
+            });
+        } else {
+            failures.push({
+                index,
+                requestId,
+                payload:submitPayloads[index],
+                error:item.status === 'rejected' ? item.reason : new Error(tr('smart.errRunFailed'))
+            });
+        }
+    });
+    if(!tasks.length) throw (failures[0]?.error || new Error(tr('smart.errRunFailed')));
+    return {taskIds:tasks.map(task => task.taskId).filter(Boolean), tasks, failures, requestId, count, providerId:basePayload.provider_id, model:basePayload.model, size:basePayload.size};
 }
 async function runApiVideoGeneration(prompt, refs, runSettings=settings){
     if(!runSettings.videoModel) throw new Error(tr('smart.errNoVideoModel'));
@@ -16608,8 +16678,13 @@ async function runModelscopeGeneration(prompt, refs, runSettings=settings){
         });
         return data.url || data.images?.[0] || '';
     };
-    const results = await Promise.all(Array.from({length:count}, submit));
-    return results.filter(Boolean);
+    const settled = await Promise.allSettled(Array.from({length:count}, submit));
+    const results = settled.filter(item => item.status === 'fulfilled').map(item => item.value).filter(Boolean);
+    if(!results.length){
+        const failed = settled.find(item => item.status === 'rejected');
+        if(failed) throw failed.reason;
+    }
+    return results;
 }
 async function urlToBase64(url){
     const res = await fetch(url);
@@ -16623,6 +16698,87 @@ async function urlToBase64(url){
     });
 }
 function sleep(ms){ return new Promise(resolve => setTimeout(resolve, ms)); }
+function smartTaskRetryAfterMs(response, attempt){
+    const retryAfter = Number(response?.headers?.get?.('Retry-After') || 0);
+    if(Number.isFinite(retryAfter) && retryAfter > 0) return Math.min(30000, retryAfter * 1000);
+    return SMART_TASK_RETRY_DELAYS[Math.min(attempt, SMART_TASK_RETRY_DELAYS.length - 1)] || 0;
+}
+function isTransientSmartTaskError(err){
+    return /Failed to fetch|NetworkError|Load failed|ERR_CONNECTION_RESET|ERR_CONNECTION_REFUSED|ERR_NETWORK|timeout|timed out|temporarily unavailable/i.test(err?.message || String(err || ''));
+}
+async function fetchSmartCanvasTaskWithRetry(input, init={}){
+    let lastError = null;
+    for(let attempt = 0; attempt <= SMART_TASK_RETRY_DELAYS.length; attempt++){
+        try {
+            const response = await fetch(input, init);
+            if(response.ok || !SMART_TASK_RETRY_STATUSES.has(response.status) || attempt === SMART_TASK_RETRY_DELAYS.length) return response;
+            lastError = new Error(await smartResponseErrorMessage(response, tr('smart.errRunFailed')));
+            await sleep(smartTaskRetryAfterMs(response, attempt));
+        } catch(err) {
+            if(!isTransientSmartTaskError(err) || attempt === SMART_TASK_RETRY_DELAYS.length) throw err;
+            lastError = err;
+            await sleep(SMART_TASK_RETRY_DELAYS[Math.min(attempt, SMART_TASK_RETRY_DELAYS.length - 1)]);
+        }
+    }
+    throw lastError || new Error(tr('smart.errRunFailed'));
+}
+async function fetchSmartCanvasTaskJson(input, init={}){
+    const response = await fetchSmartCanvasTaskWithRetry(input, init);
+    if(!response.ok) throw new Error(await smartResponseErrorMessage(response, tr('smart.errRunFailed')));
+    return response.json();
+}
+function smartTaskSubmitErrorMessage(err){
+    return (err?.message || String(err || tr('smart.errRunFailed'))).slice(0, 240);
+}
+function smartSubmittedTasks(taskResult){
+    const list = Array.isArray(taskResult?.tasks) ? taskResult.tasks : [];
+    if(list.length) return list.filter(task => task?.taskId || task?.task_id);
+    const taskIds = Array.isArray(taskResult?.taskIds) ? taskResult.taskIds : [];
+    return taskIds.map((taskId, index) => ({
+        taskId,
+        requestId:taskResult?.requestId || '',
+        batchIndex:index,
+        providerId:taskResult?.providerId || '',
+        model:taskResult?.model || '',
+        status:'submitted'
+    }));
+}
+function smartPendingTaskFromSubmit(task, fallback={}){
+    const taskId = task.taskId || task.task_id || '';
+    return {
+        taskId,
+        remoteTaskId:taskId,
+        kind:'image',
+        providerId:task.providerId || task.provider_id || fallback.providerId || '',
+        model:task.model || fallback.model || '',
+        size:task.size || fallback.size || '',
+        requestId:task.requestId || task.request_id || fallback.requestId || '',
+        batchIndex:Number.isFinite(Number(task.batchIndex ?? task.batch_index)) ? Number(task.batchIndex ?? task.batch_index) : 0,
+        status:task.status || 'submitted',
+        upstreamTaskId:task.upstreamTaskId || task.upstream_task_id || ''
+    };
+}
+function smartPendingTaskFromSubmitFailure(item, fallback={}){
+    return {
+        taskId:uid('smart_submit_failed'),
+        kind:'image',
+        failed:true,
+        submitFailed:true,
+        status:'submit_failed',
+        providerId:fallback.providerId || '',
+        model:fallback.model || '',
+        size:fallback.size || '',
+        requestId:item.requestId || fallback.requestId || '',
+        batchIndex:item.index,
+        retryPayload:item.payload || null,
+        error:smartTaskSubmitErrorMessage(item.error)
+    };
+}
+function shouldResumeSmartPendingTask(task){
+    if(!task || task.failed || task.submitFailed || !task.taskId) return false;
+    const status = String(task.status || 'unknown').toLowerCase();
+    return !status || ['queued', 'submitted', 'running', 'generating', 'unknown'].includes(status);
+}
 function smartPendingTasks(node){
     if(!node || !Array.isArray(node.pendingTasks)) return [];
     return node.pendingTasks.filter(task => task && task.taskId);
@@ -16810,6 +16966,26 @@ async function fetchImageTaskQuery(providerId, taskId, size=''){
         return r.json();
     });
 }
+function findSmartPendingTask(taskId){
+    for(const node of nodes){
+        const task = smartPendingTasks(node).find(item => item.taskId === taskId);
+        if(task) return {node, task};
+    }
+    return null;
+}
+function syncSmartPendingTaskSnapshot(taskId, data={}){
+    const found = findSmartPendingTask(taskId);
+    if(!found) return;
+    const task = found.task;
+    task.status = data.status || task.status || 'unknown';
+    task.updatedAt = nowMs();
+    if(data.request_id) task.requestId = data.request_id;
+    if(Number.isFinite(Number(data.batch_index))) task.batchIndex = Number(data.batch_index);
+    if(data.upstream_task_id){
+        task.upstreamTaskId = data.upstream_task_id;
+        task.recoverTaskId = task.recoverTaskId || data.upstream_task_id;
+    }
+}
 async function querySmartImageTaskNow(nodeId, localTaskId){
     const node = nodes.find(n => n.id === nodeId);
     if(!node) return;
@@ -16846,6 +17022,48 @@ async function querySmartImageTaskNow(nodeId, localTaskId){
     } finally {
         const latest = smartPendingTasks(node).find(item => item.taskId === localTaskId);
         if(latest) latest.querying = false;
+        render();
+        scheduleSave();
+    }
+}
+async function retrySmartSubmitPending(nodeId, localTaskId){
+    const node = nodes.find(n => n.id === nodeId);
+    const task = smartPendingTasks(node).find(item => item.taskId === localTaskId);
+    if(!node || !task || task.submitting || !task.retryPayload) return;
+    task.submitting = true;
+    task.error = '';
+    render();
+    try {
+        const data = await fetchSmartCanvasTaskJson('/api/canvas-image-tasks', {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify(task.retryPayload)
+        });
+        if(!data.task_id) throw new Error(tr('smart.errRunFailed'));
+        const next = smartPendingTaskFromSubmit({
+            ...data,
+            taskId:data.task_id,
+            providerId:data.provider_id || task.providerId,
+            model:data.model || task.model,
+            size:task.size,
+            requestId:data.request_id || task.requestId,
+            batchIndex:Number.isFinite(Number(data.batch_index)) ? Number(data.batch_index) : task.batchIndex
+        }, task);
+        node.pendingTasks = smartPendingTasks(node).map(item => item.taskId === localTaskId ? next : item);
+        node.pending = Math.max(1, smartPendingTasks(node).filter(item => !item.failed).length || 1);
+        node.running = false;
+        render();
+        scheduleSave();
+        await saveCanvas();
+        resumeSmartPendingNode(node).catch(() => {
+            render();
+            scheduleSave();
+        });
+    } catch(e) {
+        task.failed = true;
+        task.submitFailed = true;
+        task.submitting = false;
+        task.error = smartTaskSubmitErrorMessage(e);
         render();
         scheduleSave();
     }
@@ -16889,10 +17107,8 @@ async function pollSmartCanvasTask(taskId){
     const promise = (async () => {
         for(let i = 0; i < 900; i++){
             await new Promise(resolve => setTimeout(resolve, 2000));
-            const task = await fetch(`/api/canvas-image-tasks/${encodeURIComponent(taskId)}`).then(async r => {
-                if(!r.ok) throw new Error(await r.text());
-                return r.json();
-            });
+            const task = await fetchSmartCanvasTaskJson(`/api/canvas-image-tasks/${encodeURIComponent(taskId)}`);
+            syncSmartPendingTaskSnapshot(taskId, task);
             if(task.status === 'succeeded') return task.result || {};
             if(task.status === 'jimeng_pending') throw new JimengPendingSignal({submitId:task.submit_id, kind:task.kind, queueInfo:task.queue_info, message:task.message});
             if(task.status === 'failed'){
@@ -16945,7 +17161,7 @@ async function resumeSmartPendingNode(node){
     render();
     const failures = [];
     await Promise.all(tasks.map(async task => {
-        if(task.failed && task.recoverTaskId) return;
+        if(!shouldResumeSmartPendingTask(task)) return;
         try {
             const result = await pollSmartCanvasTask(task.taskId);
             if(isSmartTaskCancelled(task.taskId) || !nodes.some(n => n.id === node.id)) return;
@@ -16965,6 +17181,7 @@ async function resumeSmartPendingNode(node){
                 task.failed = true;
                 task.querying = false;
                 task.recoverTaskId = e.recoverTaskId;
+                task.upstreamTaskId = e.recoverTaskId;
                 task.providerId = e.providerId || task.providerId || providerIdForSmartTask(node, task);
                 task.error = e.message || tr('smart.errRunFailed');
                 node.running = false;

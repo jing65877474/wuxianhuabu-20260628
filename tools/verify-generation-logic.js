@@ -6,6 +6,7 @@ const smartCanvasPath = path.join(root, "static", "js", "smart-canvas.js");
 const source = fs.readFileSync(smartCanvasPath, "utf8");
 const smartCanvasCss = fs.readFileSync(path.join(root, "static", "css", "smart-canvas.css"), "utf8");
 const backendSource = fs.readFileSync(path.join(root, "main.py"), "utf8");
+const canvasSource = fs.readFileSync(path.join(root, "static", "js", "canvas.js"), "utf8");
 const canvasListSource = fs.readFileSync(path.join(root, "static", "js", "canvas-list.js"), "utf8");
 const smartCanvasHtml = fs.readFileSync(path.join(root, "static", "smart-canvas.html"), "utf8");
 
@@ -482,5 +483,35 @@ const cleanedVisualPrompt = stripStaleVisualLocks([
 check(!cleanedVisualPrompt.includes("bright warm orange"), "Stale reference background locks must be removed at generation time.");
 check(cleanedVisualPrompt.includes("mint-blue background"), "The latest requested background must survive stale-lock cleanup.");
 check(cleanedVisualPrompt.includes("Product truth"), "Stale-lock cleanup must preserve product truth.");
+
+check(
+    backendSource.includes("request_id: str") &&
+        backendSource.includes("batch_index: Optional[int]") &&
+        backendSource.includes("CANVAS_TASK_REQUEST_INDEX") &&
+        backendSource.includes("on_upstream_task_id") &&
+        backendSource.includes('"upstream_task_id"'),
+    "Canvas image tasks must persist request metadata and upstream task ids for recovery."
+);
+check(
+    canvasSource.includes("Promise.allSettled(submitPayloads.map") &&
+        canvasSource.includes("fetchCanvasTaskWithRetry") &&
+        canvasSource.includes("retryCanvasSubmitPending") &&
+        canvasSource.includes("shouldResumeCanvasImagePending") &&
+        canvasSource.includes("request_id:requestId") &&
+        canvasSource.includes("batch_index:index") &&
+        canvasSource.includes("CANVAS_TASK_RETRY_STATUSES = new Set([429, 502, 503, 504])"),
+    "Normal canvas task submission must be itemized, retryable, idempotent, and resumable."
+);
+check(
+    source.includes("Promise.allSettled(submitPayloads.map") &&
+        source.includes("fetchSmartCanvasTaskWithRetry") &&
+        source.includes("retrySmartSubmitPending") &&
+        source.includes("shouldResumeSmartPendingTask") &&
+        source.includes("smartPendingTaskFromSubmitFailure") &&
+        source.includes("request_id:requestId") &&
+        source.includes("batch_index:index") &&
+        source.includes("SMART_TASK_RETRY_STATUSES = new Set([429, 502, 503, 504])"),
+    "Smart canvas task submission must be itemized, retryable, idempotent, and resumable."
+);
 
 console.log("generation-logic verification: OK");

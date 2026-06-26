@@ -1943,6 +1943,8 @@ class OnlineImageRequest(BaseModel):
     quality: str = "auto"
     n: int = 1
     reference_images: List[AIReference] = []
+    request_id: str = Field(default="", max_length=120)
+    batch_index: Optional[int] = None
 
 class ImageTaskQueryRequest(BaseModel):
     provider_id: str = "comfly"
@@ -1950,6 +1952,7 @@ class ImageTaskQueryRequest(BaseModel):
     size: str = Field(default="", max_length=32)
 
 CANVAS_TASKS: Dict[str, Dict[str, Any]] = {}
+CANVAS_TASK_REQUEST_INDEX: Dict[tuple, str] = {}
 CANVAS_TASK_LOCK = Lock()
 
 class CanvasVideoRequest(BaseModel):
@@ -7098,7 +7101,7 @@ async def generate_volcengine_provider_image(prompt, size, model, reference_imag
         raw = response.json()
         return extract_image(raw), raw
 
-async def generate_ai_image(prompt, size, quality, model, reference_images=None, provider_id="comfly"):
+async def generate_ai_image(prompt, size, quality, model, reference_images=None, provider_id="comfly", on_upstream_task_id=None):
     provider = get_api_provider(provider_id)
     if provider["id"] == "modelscope":
         return await generate_modelscope_provider_image(prompt, size, model, reference_images, provider)
@@ -7263,6 +7266,11 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
             task_id = extract_task_id(raw)
             if not task_id:
                 raise
+        if task_id and callable(on_upstream_task_id):
+            try:
+                on_upstream_task_id(task_id)
+            except Exception as exc:
+                print("[canvas-task] failed to record upstream task id")
         try:
             task_result = await wait_for_image_task(client, task_id, provider)
             return extract_image(task_result), task_result
@@ -9103,15 +9111,18 @@ async def fetch_upstream_models(provider_id: str):
         raise HTTPException(status_code=400, detail=f"{provider.get('name') or provider_id} 未配置 API Key")
     return await fetch_models_from_upstream(provider.get("base_url") or "", api_key, provider_protocol(provider), provider.get("image_request_mode") or "openai")
 
-async def build_online_image_result(payload: OnlineImageRequest):
+async def build_online_image_result(payload: OnlineImageRequest, on_upstream_task_id=None):
     provider = get_api_provider(payload.provider_id)
     default_model = (provider.get("image_models") or [IMAGE_MODEL])[0]
     model = selected_model(payload.model, default_model)
     refs = [ref.dict() for ref in payload.reference_images if ref.url]
     image_refs = image_references(refs)
     count = max(1, min(8, int(payload.n or 1)))
-    async def generate_one():
-        image_data, raw_item = await generate_ai_image(payload.prompt, payload.size, payload.quality, model, image_refs, provider["id"])
+    async def generate_one(index=0):
+        def record_upstream(task_id):
+            if callable(on_upstream_task_id):
+                on_upstream_task_id(task_id, index)
+        image_data, raw_item = await generate_ai_image(payload.prompt, payload.size, payload.quality, model, image_refs, provider["id"], record_upstream)
         try:
             image_items = extract_images(raw_item) if isinstance(raw_item, dict) else [image_data]
         except HTTPException:
@@ -9123,7 +9134,7 @@ async def build_online_image_result(payload: OnlineImageRequest):
                 local_urls.append(local_url)
         return local_urls, raw_item
     try:
-        generated = await asyncio.gather(*(generate_one() for _ in range(count)))
+        generated = await asyncio.gather(*(generate_one(index) for index in range(count)))
     except httpx.HTTPStatusError as exc:
         log_net_error(f"生图 HTTP状态错误 provider={provider.get('id')} model={model} size={payload.size}", exc)
         text = exc.response.text or ''
@@ -9231,13 +9242,30 @@ async def run_canvas_image_task(task_id: str, payload: OnlineImageRequest):
         if task_id in CANVAS_TASKS:
             CANVAS_TASKS[task_id]["status"] = "running"
             CANVAS_TASKS[task_id]["updated_at"] = time.time()
-    try:
-        result = await build_online_image_result(payload)
+    def record_upstream_task_id(upstream_task_id: str, index: int = 0):
+        value = str(upstream_task_id or "").strip()
+        if not value:
+            return
         with CANVAS_TASK_LOCK:
+            task = CANVAS_TASKS.get(task_id)
+            if not task:
+                return
+            ids = list(task.get("upstream_task_ids") or [])
+            while len(ids) <= index:
+                ids.append("")
+            ids[index] = value
+            task["upstream_task_ids"] = ids
+            task["upstream_task_id"] = task.get("upstream_task_id") or value
+            task["updated_at"] = time.time()
+    try:
+        result = await build_online_image_result(payload, on_upstream_task_id=record_upstream_task_id)
+        with CANVAS_TASK_LOCK:
+            upstream_task_id = extract_task_id(result) if isinstance(result, dict) else ""
             CANVAS_TASKS[task_id].update({
                 "status": "succeeded",
                 "result": result,
                 "error": "",
+                "upstream_task_id": CANVAS_TASKS[task_id].get("upstream_task_id") or upstream_task_id,
                 "updated_at": time.time(),
             })
     except JimengPendingError as exc:
@@ -9248,6 +9276,7 @@ async def run_canvas_image_task(task_id: str, payload: OnlineImageRequest):
                 "status": "jimeng_pending",
                 "jimeng_pending": True,
                 "submit_id": exc.submit_id,
+                "upstream_task_id": exc.submit_id,
                 "kind": exc.kind,
                 "queue_info": exc.queue_info,
                 "message": info["message"],
@@ -9310,6 +9339,18 @@ def canvas_product_truth_prompt_guard(prompt: str, refs: List[AIReference]) -> s
         )
     return "\n\n".join(part for part in [guard, contrast, text] if part)
 
+def canvas_image_task_submit_response(task: Dict[str, Any], duplicate: bool = False) -> Dict[str, Any]:
+    return {
+        "task_id": task.get("id") or "",
+        "status": task.get("status") or "queued",
+        "request_id": task.get("request_id") or "",
+        "batch_index": task.get("batch_index"),
+        "provider_id": task.get("provider_id") or "",
+        "model": task.get("model") or "",
+        "upstream_task_id": task.get("upstream_task_id") or "",
+        "duplicate": duplicate,
+    }
+
 @app.post("/api/canvas-image-tasks")
 async def create_canvas_image_task(payload: OnlineImageRequest):
     refs = [ref for ref in payload.reference_images if ref.url]
@@ -9321,23 +9362,37 @@ async def create_canvas_image_task(payload: OnlineImageRequest):
     )
     if prompt_requires_refs and not refs:
         raise HTTPException(status_code=400, detail="提示词要求使用产品/参考图，但请求未携带任何图片，已阻止纯文本误生成")
+    request_id = str(payload.request_id or "").strip()
+    batch_index = int(payload.batch_index) if payload.batch_index is not None else 0
+    request_key = (request_id, batch_index) if request_id else None
+    if request_key:
+        with CANVAS_TASK_LOCK:
+            existing_id = CANVAS_TASK_REQUEST_INDEX.get(request_key)
+            existing_task = CANVAS_TASKS.get(existing_id or "")
+            if existing_task:
+                return canvas_image_task_submit_response(existing_task, duplicate=True)
     task_id = f"canvas_img_{uuid.uuid4().hex}"
     with CANVAS_TASK_LOCK:
         CANVAS_TASKS[task_id] = {
             "id": task_id,
             "type": "online-image",
             "status": "queued",
+            "request_id": request_id,
+            "batch_index": batch_index,
             "created_at": time.time(),
             "updated_at": time.time(),
             "result": None,
             "error": "",
+            "upstream_task_id": "",
             "provider_id": payload.provider_id,
             "model": payload.model,
             "prompt_length": len(payload.prompt or ""),
             "reference_count": len(refs),
         }
+        if request_key:
+            CANVAS_TASK_REQUEST_INDEX[request_key] = task_id
     asyncio.create_task(run_canvas_image_task(task_id, payload))
-    return {"task_id": task_id, "status": "queued"}
+    return canvas_image_task_submit_response(CANVAS_TASKS[task_id])
 
 @app.get("/api/canvas-image-tasks/{task_id}")
 async def get_canvas_image_task(task_id: str):

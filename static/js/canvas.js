@@ -350,6 +350,9 @@ let assetManagerTab = 'assets';
 let managerSelectedAssetIds = new Set();
 let managerSelectedPromptIds = new Set();
 const activeCanvasTaskPolls = new Set();
+const activeCanvasNodeSubmissions = new Set();
+const CANVAS_TASK_RETRY_STATUSES = new Set([429, 502, 503, 504]);
+const CANVAS_TASK_RETRY_DELAYS = [2000, 5000, 10000];
 let hoveredConnectionId = '';
 let lastMouseBoard = {x: 0, y: 0};
 let undoStack = [];
@@ -4936,6 +4939,20 @@ function pendingOutputStyle(pending){
     return ` style="aspect-ratio:${Math.max(1, size.w)}/${Math.max(1, size.h)}"`;
 }
 function renderPendingOutput(pending){
+    if(pending?.submitFailed){
+        const msg = pending.error || tr('canvas.generationFailed');
+        const submitting = Boolean(pending.submitting);
+        return `<div class="output-img-wrap loading-wrap recoverable" data-pending-id="${escapeAttr(pending.id)}"${pendingOutputStyle(pending)}>
+            <span class="output-time-pill failed">提交失败</span>
+            <div class="output-recover-state">
+                <i data-lucide="${submitting ? 'loader-2' : 'rotate-cw'}" class="${submitting ? 'spinning' : ''}"></i>
+                <div class="output-recover-title">${submitting ? '重试提交中' : '单项提交失败'}</div>
+                <div class="output-recover-sub" title="${escapeAttr(msg)}">${escapeHtml(msg).slice(0, 80)}</div>
+                <button class="output-submit-retry" type="button" ${submitting ? 'disabled' : ''}>重试该项</button>
+            </div>
+            <button class="output-del" title="${tr('common.delete')}">鑴?/button>
+        </div>`;
+    }
     if(pending?.failed){
         const taskId = pending.recoverTaskId || '';
         const querying = Boolean(pending.querying);
@@ -5230,6 +5247,7 @@ function bindOutputWrap(wrap, node){
     const playBtn = wrap.querySelector('.canvas-video-play');
     const del = wrap.querySelector('.output-del');
     const recoverQuery = wrap.querySelector('.output-recover-query');
+    const submitRetry = wrap.querySelector('.output-submit-retry');
     if(img){
         img.draggable = true;
         img.ondragstart = e => {
@@ -5300,6 +5318,15 @@ function bindOutputWrap(wrap, node){
             e.stopPropagation();
             const pid = wrap.dataset.pendingId;
             if(pid) queryRecoverPendingOutput(pid);
+        };
+    }
+    if(submitRetry){
+        submitRetry.onmousedown = e => e.stopPropagation();
+        submitRetry.onclick = e => {
+            e.preventDefault();
+            e.stopPropagation();
+            const pid = wrap.dataset.pendingId;
+            if(pid) retryCanvasSubmitPending(pid);
         };
     }
 }
@@ -7824,8 +7851,11 @@ function refreshGeneratorInputViews(){
 }
 async function runGenerator(genId, opts={}){
     const gen = nodes.find(n => n.id === genId);
-    if(!gen || (gen.running && !opts.cascade)) return;
     const cascadeTargetId = cascadeTargetIdFromOptions(opts);
+    const submissionKey = `${genId}:${opts.cascade ? (cascadeTargetId || 'cascade') : 'manual'}`;
+    if(!gen || (gen.running && !opts.cascade) || activeCanvasNodeSubmissions.has(submissionKey)) return;
+    activeCanvasNodeSubmissions.add(submissionKey);
+    try {
     const sources = orderedSources(gen, generatorSources(gen));
     const prompt = sources.map(s => s.prompt).filter(Boolean).join('\n\n');
     const refs = imageRefsOnly(sources.flatMap(s => s.refs || []));
@@ -7851,7 +7881,26 @@ async function runGenerator(genId, opts={}){
         setTimeout(() => { gen.running = false; refreshRunNodes(gen, out); }, 2000);
     }
     try {
-        const taskInfos = await Promise.all(Array.from({length:count}, () => createCanvasImageTask(payload, {cascadeTargetId})));
+        const requestId = uid('canvas_req');
+        pendingIds = Array.from({length:count}, () => uid('p'));
+        const submitPayloads = Array.from({length:count}, (_, index) => ({
+            ...payload,
+            n:1,
+            request_id:requestId,
+            batch_index:index
+        }));
+        const settledSubmits = await Promise.allSettled(submitPayloads.map(item => createCanvasImageTask(item, {cascadeTargetId})));
+        const taskInfos = [];
+        const submitFailures = [];
+        settledSubmits.forEach((item, index) => {
+            if(item.status === 'fulfilled' && item.value?.task_id){
+                taskInfos.push({...item.value, batchIndex:index, requestId:item.value.requestId || requestId});
+            } else {
+                const reason = item.status === 'rejected' ? item.reason : new Error(tr('canvas.generationFailed'));
+                submitFailures.push({index, error:reason, payload:submitPayloads[index]});
+            }
+        });
+        if(!taskInfos.length) throw (submitFailures[0]?.error || new Error(tr('canvas.generationFailed')));
         if(!out){
             let outputs = [];
             for(const task of taskInfos){
@@ -7869,15 +7918,31 @@ async function runGenerator(genId, opts={}){
             scheduleSave();
             return;
         }
-        pendingIds = taskInfos.map(() => uid('p'));
         if(out) out._pending = [
             ...(out._pending || []),
-            ...taskInfos.map((task, index) => makePendingForRun(pendingIds[index], run, gen, {refs, requestSize:payload.size, cascadeTargetId}, {
+            ...taskInfos.map(task => makePendingForRun(pendingIds[task.batchIndex], run, gen, {refs, requestSize:payload.size, cascadeTargetId}, {
                 canvasTaskId:task.task_id,
+                remoteTaskId:task.task_id,
                 canvasTaskType:'online-image',
+                canvasTaskStatus:task.status || 'submitted',
+                requestId:task.requestId || requestId,
+                batchIndex:task.batchIndex,
+                upstreamTaskId:task.upstream_task_id || '',
                 providerId:payload.provider_id,
                 model:payload.model,
                 appendGenerated:Boolean(opts.cascade)
+            })),
+            ...submitFailures.map(item => makePendingForRun(pendingIds[item.index], run, gen, {refs, requestSize:payload.size, cascadeTargetId}, {
+                failed:true,
+                submitFailed:true,
+                canvasTaskStatus:'submit_failed',
+                requestId,
+                batchIndex:item.index,
+                providerId:payload.provider_id,
+                model:payload.model,
+                appendGenerated:Boolean(opts.cascade),
+                retryPayload:item.payload,
+                error:normalizeCanvasTaskError(item.error, tr('canvas.generationFailed'))
             }))
         ];
         refreshRunNodes(gen, out);
@@ -7885,10 +7950,10 @@ async function runGenerator(genId, opts={}){
         await saveCanvas();
         const statuses = await Promise.all(taskInfos.map(task => pollCanvasImageTask(task.task_id, {cascadeTargetId})));
         if(statuses.includes('aborted')) throw cascadeAbortError(cascadeStopMessage());
-        if(statuses.includes('failed')) throw new Error(gen.runError || tr('canvas.generationFailed'));
+        if(statuses.includes('failed') && !statuses.includes('succeeded')) throw new Error(gen.runError || tr('canvas.generationFailed'));
     } catch(err) {
         const remainingPending = pendingIds.map(id => pendingById(out, id)).filter(Boolean);
-        const removableIds = remainingPending.filter(p => !(p.failed && p.recoverTaskId)).map(p => p.id);
+        const removableIds = remainingPending.filter(p => !(p.failed && (p.recoverTaskId || p.submitFailed))).map(p => p.id);
         if(removableIds.length){
             const metas = collectRunMetas(out, removableIds);
             addGenerationLog({run, outputs:[], runMs:Math.max(...metas.map(m => m.runMs || 0), 0), error:err.message || String(err)});
@@ -7907,6 +7972,9 @@ async function runGenerator(genId, opts={}){
         if(remainingPending.some(p => p.failed && p.recoverTaskId) && !removableIds.length) return;
         if(opts.cascade) throw err;
         showErrorModal(err.message || tr('canvas.generationFailed'), tr('canvas.apiFailed'));
+    }
+    } finally {
+        activeCanvasNodeSubmissions.delete(submissionKey);
     }
 }
 async function runGeneratorLegacy(genId, opts={}){
@@ -9003,13 +9071,19 @@ function findPendingTask(taskId){
     return null;
 }
 async function createCanvasImageTask(payload, options={}){
-    const res = await cascadeFetch('/api/canvas-image-tasks', {
+    const res = await fetchCanvasTaskWithRetry('/api/canvas-image-tasks', {
         method:'POST',
         headers:{'Content-Type':'application/json'},
         body:JSON.stringify(payload)
     }, options);
     if(!res.ok) throw new Error(await responseErrorMessage(res, tr('canvas.generationFailed')));
-    return res.json();
+    const data = await res.json();
+    return {
+        ...data,
+        task_id:data.task_id || data.taskId || '',
+        requestId:data.request_id || payload.request_id || '',
+        batchIndex:Number.isFinite(Number(data.batch_index)) ? Number(data.batch_index) : Number(payload.batch_index || 0)
+    };
 }
 function extractUpstreamTaskId(text){
     const match = String(text || '').match(/(?:task_id|taskId|task id)\s*[:=]\s*([A-Za-z0-9_.:-]+)/i);
@@ -9087,7 +9161,82 @@ async function queryRecoverPendingOutput(pendingId){
         }
     }
 }
+async function retryCanvasSubmitPending(pendingId){
+    const out = findOutputByPendingId(pendingId);
+    const pending = pendingById(out, pendingId);
+    if(!out || !pending || pending.submitting || !pending.retryPayload) return;
+    pending.submitting = true;
+    pending.error = '';
+    refreshNodes([out.id]);
+    try {
+        const task = await createCanvasImageTask(pending.retryPayload, {cascadeTargetId:pending.cascadeTargetId || ''});
+        if(!task.task_id) throw new Error(tr('canvas.generationFailed'));
+        pending.canvasTaskId = task.task_id;
+        pending.remoteTaskId = task.task_id;
+        pending.canvasTaskType = 'online-image';
+        pending.canvasTaskStatus = task.status || 'submitted';
+        pending.requestId = task.requestId || pending.requestId || pending.retryPayload.request_id || '';
+        pending.batchIndex = Number.isFinite(Number(task.batchIndex)) ? Number(task.batchIndex) : pending.batchIndex;
+        pending.providerId = task.provider_id || pending.providerId;
+        pending.model = task.model || pending.model;
+        if(task.upstream_task_id) pending.upstreamTaskId = task.upstream_task_id;
+        pending.updatedAt = nowMs();
+        delete pending.failed;
+        delete pending.submitFailed;
+        delete pending.submitting;
+        delete pending.error;
+        refreshNodes([out.id]);
+        scheduleSave();
+        await saveCanvas();
+        pollCanvasImageTask(task.task_id, {cascadeTargetId:pending.cascadeTargetId || ''});
+    } catch(err) {
+        pending.failed = true;
+        pending.submitFailed = true;
+        pending.submitting = false;
+        pending.error = normalizeCanvasTaskError(err, tr('canvas.generationFailed'));
+        refreshNodes([out.id]);
+        scheduleSave();
+    }
+}
 function sleep(ms){ return new Promise(resolve => setTimeout(resolve, ms)); }
+function canvasTaskRetryAfterMs(response, attempt){
+    const retryAfter = Number(response?.headers?.get?.('Retry-After') || 0);
+    if(Number.isFinite(retryAfter) && retryAfter > 0) return Math.min(30000, retryAfter * 1000);
+    return CANVAS_TASK_RETRY_DELAYS[Math.min(attempt, CANVAS_TASK_RETRY_DELAYS.length - 1)] || 0;
+}
+function isTransientCanvasTaskError(err){
+    if(isCascadeAbortError(err)) return false;
+    return /Failed to fetch|NetworkError|Load failed|ERR_CONNECTION_RESET|ERR_CONNECTION_REFUSED|ERR_NETWORK|timeout|timed out|temporarily unavailable/i.test(err?.message || String(err || ''));
+}
+async function fetchCanvasTaskWithRetry(input, init={}, options={}){
+    let lastError = null;
+    for(let attempt = 0; attempt <= CANVAS_TASK_RETRY_DELAYS.length; attempt++){
+        try {
+            const response = await cascadeFetch(input, init, options);
+            if(response.ok || !CANVAS_TASK_RETRY_STATUSES.has(response.status) || attempt === CANVAS_TASK_RETRY_DELAYS.length) return response;
+            lastError = new Error(await responseErrorMessage(response, tr('canvas.generationFailed')));
+            await sleep(canvasTaskRetryAfterMs(response, attempt));
+        } catch(err) {
+            if(!isTransientCanvasTaskError(err) || attempt === CANVAS_TASK_RETRY_DELAYS.length) throw err;
+            lastError = err;
+            await sleep(CANVAS_TASK_RETRY_DELAYS[Math.min(attempt, CANVAS_TASK_RETRY_DELAYS.length - 1)]);
+        }
+    }
+    throw lastError || new Error(tr('canvas.generationFailed'));
+}
+function syncCanvasPendingTaskSnapshot(taskId, data={}){
+    const found = findPendingTask(taskId);
+    if(!found) return;
+    const pending = found.pending;
+    pending.canvasTaskStatus = data.status || pending.canvasTaskStatus || 'unknown';
+    pending.updatedAt = nowMs();
+    if(data.request_id) pending.requestId = data.request_id;
+    if(Number.isFinite(Number(data.batch_index))) pending.batchIndex = Number(data.batch_index);
+    if(data.upstream_task_id){
+        pending.upstreamTaskId = data.upstream_task_id;
+        pending.recoverTaskId = pending.recoverTaskId || data.upstream_task_id;
+    }
+}
 async function pollCanvasImageTask(taskId, options={}){
     if(!taskId) return 'failed';
     if(activeCanvasTaskPolls.has(taskId)) return 'running';
@@ -9098,12 +9247,13 @@ async function pollCanvasImageTask(taskId, options={}){
             if(!found) return 'missing';
             const cascadeTargetId = String(options?.cascadeTargetId || found?.pending?.cascadeTargetId || '');
             if(cascadeTargetId) ensureCascadeActive(cascadeTargetId);
-            const res = await cascadeFetch(`/api/canvas-image-tasks/${encodeURIComponent(taskId)}`, {}, {cascadeTargetId});
+            const res = await fetchCanvasTaskWithRetry(`/api/canvas-image-tasks/${encodeURIComponent(taskId)}`, {}, {cascadeTargetId});
             if(!res.ok){
                 if(res.status === 404) throw new Error(cascadeBackendRestartMessage());
                 throw new Error(await responseErrorMessage(res, tr('canvas.generationFailed')));
             }
             const data = await res.json();
+            syncCanvasPendingTaskSnapshot(taskId, data);
             if(data.status === 'succeeded'){
                 completeCanvasImageTask(taskId, data.result || {});
                 return 'succeeded';
@@ -9128,12 +9278,13 @@ async function waitCanvasImageTaskResult(taskId, options={}){
     while(true){
         const cascadeTargetId = cascadeTargetIdFromOptions(options);
         if(cascadeTargetId) ensureCascadeActive(cascadeTargetId);
-        const res = await cascadeFetch(`/api/canvas-image-tasks/${encodeURIComponent(taskId)}`, {}, {cascadeTargetId});
+        const res = await fetchCanvasTaskWithRetry(`/api/canvas-image-tasks/${encodeURIComponent(taskId)}`, {}, {cascadeTargetId});
         if(!res.ok){
             if(res.status === 404) throw new Error(cascadeBackendRestartMessage());
             throw new Error(await responseErrorMessage(res, tr('canvas.generationFailed')));
         }
         const data = await res.json();
+        syncCanvasPendingTaskSnapshot(taskId, data);
         if(data.status === 'succeeded') return data.result || {};
         if(data.status === 'failed') throw new Error(data.error || tr('canvas.generationFailed'));
         await sleep(1800);
@@ -9175,6 +9326,7 @@ function failCanvasImageTask(taskId, message, taskData={}){
         pending.querying = false;
         pending.error = message || tr('canvas.generationFailed');
         pending.recoverTaskId = recoverTaskId;
+        pending.upstreamTaskId = recoverTaskId;
         pending.providerId = taskData?.provider_id || pending.providerId || providerIdForPending(pending);
         pending.canvasTaskStatus = 'failed';
         if(gen){
@@ -9199,10 +9351,15 @@ function failCanvasImageTask(taskId, message, taskData={}){
     refreshRunNodes(gen, out);
     scheduleSave();
 }
+function shouldResumeCanvasImagePending(pending){
+    if(!pending || pending.canvasTaskType !== 'online-image' || !pending.canvasTaskId || pending.failed) return false;
+    const status = String(pending.canvasTaskStatus || pending.status || 'unknown').toLowerCase();
+    return !status || ['queued', 'submitted', 'running', 'generating', 'unknown'].includes(status);
+}
 function resumeCanvasImageTasks(){
     nodes.filter(n => n.type === 'output').forEach(out => {
         (out._pending || []).forEach(p => {
-            if(p.canvasTaskType === 'online-image' && p.canvasTaskId && !p.failed) pollCanvasImageTask(p.canvasTaskId, {cascadeTargetId:p.cascadeTargetId || ''});
+            if(shouldResumeCanvasImagePending(p)) pollCanvasImageTask(p.canvasTaskId, {cascadeTargetId:p.cascadeTargetId || ''});
         });
     });
 }
