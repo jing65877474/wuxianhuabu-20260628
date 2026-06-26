@@ -79,6 +79,8 @@ let selectedImage = {nodeId:'', index:-1};
 let dragState = null;
 let loopInsertPreview = null;
 let selectionState = null;
+let smartGenerationPreflightOpen = false;
+let smartGenerationSubmitting = false;
 let isRKeyDown = false;
 let isSpaceKeyDown = false;
 let selectionJustFinished = false;
@@ -1048,6 +1050,179 @@ function toast(text){
     clearTimeout(toast._timer);
     toast._timer = setTimeout(() => el.classList.remove('show'), 1800);
 }
+function smartReferenceRoleLabel(ref){
+    const role = String(ref?.role || '');
+    if(ref?.generatedEditBase || ref?.structureLock) return smartReferenceRoleWeight(ref) >= 85 ? '\u7f16\u8f91\u57fa\u51c6' : '\u6743\u91cd\u57fa\u51c6';
+    if(role === 'product_truth_reference' || role === 'product_detail_reference') return '\u4ea7\u54c1\u4e8b\u5b9e';
+    if(role === 'composition_reference' || role === 'primary_style_reference' || role === 'primary_reference') return '\u4e3b\u53c2\u8003';
+    if(role === 'case_style_reference' || smartReferenceRoleIsCase(ref)) return '\u6848\u4f8b\u6587\u5b57';
+    if(ref?.textOnlyReference || ref?.uploadReference === false) return '\u6587\u5b57\u53c2\u8003';
+    if(role === 'supporting_reference') return '\u8f85\u52a9\u53c2\u8003';
+    return '\u53c2\u8003';
+}
+function smartReferenceUploadStateLabel(ref){
+    if(mediaKindForItem(ref) !== 'image') return mediaKindForItem(ref);
+    return smartReferenceUploadAllowed(ref) ? '\u4e0a\u4f20' : '\u4e0d\u4e0a\u4f20';
+}
+function smartRunEngineLabel(sourceSettings=settings, kind='image'){
+    if(sourceSettings.engine === 'runninghub') return 'RunningHub';
+    if(sourceSettings.engine === 'modelscope') return 'Modelscope';
+    if(kind === 'video') return videoProviderById(sourceSettings.videoProvider || '')?.name || sourceSettings.videoProvider || 'Video';
+    return apiProviderById(sourceSettings.provider_id || '')?.name || sourceSettings.provider_id || sourceSettings.engine || 'API';
+}
+function smartBuildGenerationTrace({node, prompt='', refs=[], runSettings=settings, kind='image'}={}){
+    const basePrompt = String(prompt || '');
+    const apiImageRun = kind === 'image' && isApiLikeEngine(runSettings.engine);
+    const tracePrompt = apiImageRun
+        ? [outputCanvasLockPrompt(runSettings), smartRelaxPromptForReferenceSimilarity(smartRelaxPromptForCameraControl(basePrompt))].filter(Boolean).join('\n\n')
+        : basePrompt;
+    const creative = apiImageRun && smartCreativeVariantRequested(tracePrompt);
+    const cameraControlled = apiImageRun && smartCameraControlRequested(tracePrompt);
+    const referencePool = apiImageRun
+        ? (creative || cameraControlled ? smartCreativeReferenceImages(refs) : imageRefsOnly(refs))
+        : imageRefsOnly(refs);
+    const imageRefs = imageRefsOnly(refs);
+    const uploadRefs = apiImageRun
+        ? referencePool.filter(smartReferenceUploadAllowed).slice(0, smartGenerationReferenceLimit(tracePrompt, referencePool))
+        : imageRefs.filter(smartReferenceUploadAllowed);
+    const uploadKeys = new Set(uploadRefs.map(ref => smartReferenceUrlKey(ref?.url || ref?.sourceUrl || '')));
+    const allowHuman = smartGenerationAllowsHuman(node, refs, prompt);
+    const productRefs = imageRefs.filter(ref => ref?.role === 'product_truth_reference' || ref?.role === 'product_detail_reference');
+    const primaryRefs = imageRefs.filter(ref => ['composition_reference','primary_style_reference','primary_reference'].includes(ref?.role));
+    const editBaseRefs = imageRefs.filter(ref => ref?.generatedEditBase || ref?.structureLock);
+    const size = kind === 'image' && isApiLikeEngine(runSettings.engine) ? sizeForRun(runSettings) : '';
+    return {
+        nodeId:node?.id || '',
+        nodeType:node?.type || 'smart-image',
+        kind,
+        engine:runSettings.engine || '',
+        provider:smartRunEngineLabel(runSettings, kind),
+        model:kind === 'video' ? (runSettings.videoModel || '') : (runSettings.model || runSettings.msgenModel || runSettings.comfyWorkflow || ''),
+        size,
+        quality:runSettings.quality || '',
+        count:kind === 'image' ? Math.max(1, Math.min(8, Number(runSettings.count || 1))) : 1,
+        promptLength:tracePrompt.length,
+        promptPreview:tracePrompt.slice(0, 2200),
+        referenceCount:imageRefs.length,
+        uploadReferenceCount:uploadRefs.length,
+        productReferenceCount:productRefs.length,
+        primaryReferenceCount:primaryRefs.length,
+        editBaseReferenceCount:editBaseRefs.length,
+        allowHuman,
+        noHumanLock:!allowHuman,
+        productLock:Boolean(productRefs.length),
+        posterCopy:smartPosterCopyEnabledInRequest(prompt, refs),
+        references:imageRefs.map((ref, index) => ({
+            index:index + 1,
+            name:ref.name || `Image ${index + 1}`,
+            role:ref.role || '',
+            roleLabel:smartReferenceRoleLabel(ref),
+            upload:uploadKeys.has(smartReferenceUrlKey(ref.url || ref.sourceUrl || '')),
+            uploadLabel:uploadKeys.has(smartReferenceUrlKey(ref.url || ref.sourceUrl || '')) ? '\u4e0a\u4f20' : (smartReferenceUploadAllowed(ref) ? '\u8d85\u9650\u672a\u4f20' : '\u4e0d\u4e0a\u4f20'),
+            weight:smartReferenceRoleWeight(ref),
+            fidelity:ref.inputFidelity || '',
+            kind:mediaKindForItem(ref),
+            generatedEditBase:Boolean(ref.generatedEditBase || ref.structureLock),
+            containsPerson:ref.containsPerson === true || ref.hasPerson === true || ref.personReference === true || ref.humanReference === true,
+            url:ref.url || ''
+        }))
+    };
+}
+function smartTraceSummary(trace){
+    if(!trace) return '';
+    const locks = [
+        trace.noHumanLock ? '\u65e0\u4eba\u7269\u9501' : '\u5141\u8bb8\u4eba\u7269',
+        trace.productLock ? `\u4ea7\u54c1\u4e8b\u5b9e ${trace.productReferenceCount}` : '\u65e0\u4ea7\u54c1\u4e8b\u5b9e',
+        trace.posterCopy ? '\u6d77\u62a5\u6587\u6848' : ''
+    ].filter(Boolean).join(' / ');
+    return `${trace.provider || trace.engine || 'API'} ${trace.model || ''} ${trace.size || ''} · ${trace.uploadReferenceCount}/${trace.referenceCount} \u56fe\u4e0a\u4f20 · ${locks}`.trim();
+}
+function smartPreflightReferenceRows(trace){
+    const refs = trace?.references || [];
+    if(!refs.length) return `<div class="generation-preflight-empty">\u6ca1\u6709\u56fe\u7247\u53c2\u8003</div>`;
+    return refs.map(ref => `
+        <div class="generation-preflight-ref ${ref.upload ? '' : 'muted'}">
+            <span class="generation-preflight-ref-index">${ref.index}</span>
+            <span class="generation-preflight-ref-name" title="${escapeAttr(ref.name || '')}">${escapeHtml(ref.name || `Image ${ref.index}`)}</span>
+            <span class="generation-preflight-ref-role">${escapeHtml(ref.roleLabel || '')}</span>
+            <span class="generation-preflight-ref-state">${escapeHtml(ref.uploadLabel || '')}</span>
+            <span class="generation-preflight-ref-weight">${Number(ref.weight || 0)}%</span>
+        </div>
+    `).join('');
+}
+function smartPreflightLockHtml(trace){
+    const items = [
+        {label:'\u4eba\u7269', value:trace?.allowHuman ? '\u5141\u8bb8' : '\u4e0d\u5141\u8bb8', strong:!trace?.allowHuman},
+        {label:'\u4ea7\u54c1', value:trace?.productLock ? `\u5df2\u9501\u5b9a ${trace.productReferenceCount}` : '\u672a\u9501\u5b9a', strong:trace?.productLock},
+        {label:'\u53c2\u8003\u56fe', value:`${trace?.uploadReferenceCount || 0}/${trace?.referenceCount || 0} \u4e0a\u4f20`, strong:Boolean(trace?.uploadReferenceCount)},
+        {label:'\u5c3a\u5bf8', value:trace?.size || '\u9ed8\u8ba4', strong:Boolean(trace?.size)}
+    ];
+    return items.map(item => `<span class="generation-preflight-chip ${item.strong ? 'strong' : ''}"><small>${escapeHtml(item.label)}</small>${escapeHtml(item.value)}</span>`).join('');
+}
+function ensureSmartGenerationPreflightModal(){
+    let modal = document.getElementById('generationPreflightModal');
+    if(modal) return modal;
+    modal = document.createElement('div');
+    modal.id = 'generationPreflightModal';
+    modal.className = 'generation-preflight-modal';
+    modal.innerHTML = `
+        <div class="generation-preflight-panel" role="dialog" aria-modal="true" aria-label="\u751f\u6210\u524d\u9884\u68c0">
+            <div class="generation-preflight-head">
+                <div>
+                    <strong>\u751f\u6210\u524d\u9884\u68c0</strong>
+                    <span data-preflight-summary></span>
+                </div>
+                <button class="generation-preflight-close" type="button" data-preflight-cancel title="\u53d6\u6d88"><i data-lucide="x"></i></button>
+            </div>
+            <div class="generation-preflight-body">
+                <div class="generation-preflight-chips" data-preflight-locks></div>
+                <section class="generation-preflight-section">
+                    <div class="generation-preflight-section-title">\u53c2\u8003\u56fe\u89d2\u8272</div>
+                    <div class="generation-preflight-refs" data-preflight-refs></div>
+                </section>
+                <section class="generation-preflight-section">
+                    <div class="generation-preflight-section-title">\u8bf7\u6c42\u63d0\u793a\u8bcd\u9884\u89c8</div>
+                    <pre class="generation-preflight-prompt" data-preflight-prompt></pre>
+                </section>
+            </div>
+            <div class="generation-preflight-actions">
+                <button class="generation-preflight-btn secondary" type="button" data-preflight-cancel>\u53d6\u6d88</button>
+                <button class="generation-preflight-btn primary" type="button" data-preflight-confirm>\u786e\u8ba4\u751f\u6210</button>
+            </div>
+        </div>`;
+    document.body.appendChild(modal);
+    return modal;
+}
+function closeSmartGenerationPreflightModal(){
+    const modal = document.getElementById('generationPreflightModal');
+    if(modal) modal.classList.remove('open');
+    smartGenerationPreflightOpen = false;
+    syncRunButtonState();
+}
+function confirmSmartGenerationPreflight(trace){
+    const modal = ensureSmartGenerationPreflightModal();
+    modal.querySelector('[data-preflight-summary]').textContent = smartTraceSummary(trace);
+    modal.querySelector('[data-preflight-locks]').innerHTML = smartPreflightLockHtml(trace);
+    modal.querySelector('[data-preflight-refs]').innerHTML = smartPreflightReferenceRows(trace);
+    modal.querySelector('[data-preflight-prompt]').textContent = trace?.promptPreview || '\u65e0\u63d0\u793a\u8bcd';
+    smartGenerationPreflightOpen = true;
+    syncRunButtonState();
+    refreshIcons();
+    modal.classList.add('open');
+    return new Promise(resolve => {
+        const finish = value => {
+            modal.querySelectorAll('[data-preflight-confirm],[data-preflight-cancel]').forEach(btn => btn.onclick = null);
+            closeSmartGenerationPreflightModal();
+            resolve(value);
+        };
+        modal.querySelectorAll('[data-preflight-cancel]').forEach(btn => btn.onclick = () => finish(false));
+        const confirm = modal.querySelector('[data-preflight-confirm]');
+        if(confirm) confirm.onclick = () => finish(true);
+        modal.onclick = event => {
+            if(event.target === modal) finish(false);
+        };
+    });
+}
 function selectedNode(){ return nodes.find(n => n.id === selectedId) || null; }
 function clearSelection(){
     savePromptDraftForCurrent();
@@ -1714,12 +1889,14 @@ function smartNodeInputThumbsHtml(images, opts={}){
     const limit = Math.min(10, refs.length);
     const items = refs.slice(0, limit).map((img, index) => {
         const label = opts.labelPrefix ? `${opts.labelPrefix}${index + 1}` : (window.StudioI18n?.lang?.() === 'en' ? `Image ${index + 1}` : `图${index + 1}`);
+        const roleLabel = smartReferenceRoleLabel(img);
+        const uploadLabel = smartReferenceUploadStateLabel(img);
         const media = isAudioMediaItem(img)
             ? `<div class="media-thumb audio-thumb"><i data-lucide="file-audio"></i><span>${escapeHtml(img.name || 'Audio')}</span></div>`
             : isVideoMediaItem(img)
             ? smartVideoPreviewHtml(img, 256, 'alt=""')
             : smartPreviewImgHtml(img, 256, 'alt=""');
-        return `<div class="smart-node-input-thumb" title="${escapeHtml(label)}">${media}<span class="smart-node-input-badge">${escapeHtml(label)}</span></div>`;
+        return `<div class="smart-node-input-thumb" title="${escapeHtml(`${label} · ${roleLabel} · ${uploadLabel}`)}">${media}<span class="smart-node-input-badge">${escapeHtml(label)}</span><span class="smart-node-role-badge">${escapeHtml(roleLabel)}</span></div>`;
     }).join('');
     const more = refs.length > limit ? `<div class="smart-node-input-thumb smart-node-input-more">+${refs.length - limit}</div>` : '';
     return `<div class="smart-node-input-thumbs">${items}${more}</div>`;
@@ -5413,7 +5590,7 @@ function syncRunButtonState(node=selectedNode()){
     if(!runBtn) return;
     // 只在“当前选中节点自己”忙时禁用运行：节点正在生成/排队，或它本身是正在跑的循环。
     // 不再因为“画布上有任意循环/级联在跑”就全局禁用——跑循环时仍可对其他节点点生成。
-    runBtn.disabled = !isSmartRunnableNode(node) || smartNodeInFlight(node) || smartCascadeIsLoopRunning(node?.id);
+    runBtn.disabled = smartGenerationPreflightOpen || smartGenerationSubmitting || !isSmartRunnableNode(node) || smartNodeInFlight(node) || smartCascadeIsLoopRunning(node?.id);
 }
 function mergeSmartNode(local, remote){
     if(local?.clearedAt && Number(local.clearedAt || 0) >= Number(remote?.runFinishedAt || remote?.runAt || remote?.created_at || 0)){
@@ -7217,7 +7394,16 @@ function smartRunSnapshot(node, prompt, refs=[], kind='image'){
         kind,
         settings:settingsSnapshot,
         prompt:prompt || '',
-        refs:(refs || []).map(ref => ({url:ref.url || '', name:ref.name || 'image', kind:ref.kind || ''})).filter(ref => ref.url),
+        refs:(refs || []).map(ref => ({
+            url:ref.url || '',
+            name:ref.name || 'image',
+            kind:ref.kind || '',
+            role:ref.role || '',
+            roleLabel:smartReferenceRoleLabel(ref),
+            upload:smartReferenceUploadAllowed(ref),
+            weight:smartReferenceRoleWeight(ref)
+        })).filter(ref => ref.url),
+        trace:smartBuildGenerationTrace({node, prompt, refs, runSettings:settingsSnapshot, kind}),
         size: kind === 'image' && isApiLikeEngine(settingsSnapshot.engine) ? sizeForRun(settingsSnapshot) : ''
     };
 }
@@ -7237,6 +7423,7 @@ function addSmartGenerationLog({run, outputs=[], runMs=0, error=''}) {
         prompt:run?.prompt || '',
         outputs:outputUrls,
         refs:run?.refs || [],
+        trace:run?.trace || null,
         runMs:Number(runMs || 0),
         error:error ? String(error) : ''
     };
@@ -7311,6 +7498,11 @@ function renderSmartCanvasLog(){
             taskId ? `ID ${taskId}` : '',
             backend
         ].filter(Boolean);
+        const trace = log.trace || null;
+        const traceText = trace ? smartTraceSummary(trace) : '';
+        const traceRefs = trace?.references?.length
+            ? trace.references.slice(0, 8).map(ref => `${ref.index}.${ref.roleLabel}${ref.upload ? '' : '(\u4e0d\u4e0a\u4f20)'}`).join('  ')
+            : '';
         return `<div class="log-item ${log.status === 'failed' ? 'failed' : ''}">
             <div class="log-main">
                 <div class="log-meta">
@@ -7320,6 +7512,7 @@ function renderSmartCanvasLog(){
                     <span class="log-chip">${escapeHtml(formatRunDuration(log.runMs || 0))}</span>
                 </div>
                 <div class="log-subline">${subParts.map(part => `<span title="${escapeAttr(part)}">${escapeHtml(part)}</span>`).join('')}</div>
+                ${traceText ? `<div class="log-trace" title="${escapeAttr([traceText, traceRefs].filter(Boolean).join('\n'))}" data-trace="${escapeAttr(JSON.stringify(trace || {}))}"><i data-lucide="scan-search"></i><span>${escapeHtml(traceText)}</span>${traceRefs ? `<small>${escapeHtml(traceRefs)}</small>` : ''}</div>` : ''}
                 ${log.error ? `<div class="log-error" title="${escapeAttr(log.error)}" data-error="${escapeAttr(log.error)}">${escapeHtml(log.error)}</div>` : ''}
                 <div class="log-prompt" title="${escapeAttr(log.prompt || tr('canvas.noPromptMeta'))}" data-prompt="${escapeAttr(log.prompt || '')}">${escapeHtml(log.prompt || tr('canvas.noPromptMeta'))}</div>
             </div>
@@ -12815,7 +13008,7 @@ function promptHtmlWithMentionTokens(text, refs=[]){
     }
     return html;
 }
-function snapshotRunMeta(prompt, sourceId, displayPrompt='', refs=[]){
+function snapshotRunMeta(prompt, sourceId, displayPrompt='', refs=[], trace=null){
     return {
         prompt,
         displayPrompt:displayPrompt || promptPlainText() || prompt,
@@ -12825,6 +13018,7 @@ function snapshotRunMeta(prompt, sourceId, displayPrompt='', refs=[]){
         inputRefs:(refs || []).map(ref => ({url:ref.url || '', name:ref.name || '', nodeId:ref.nodeId || '', imageIndex:ref.imageIndex ?? '', kind:ref.kind || ''})).filter(ref => ref.url),
         sourceNodeId:sourceId,
         settings:JSON.parse(JSON.stringify(settings)),
+        trace:trace || null,
         createdAt:Date.now()
     };
 }
@@ -12841,6 +13035,8 @@ function attachRunMeta(targetNode, meta){
         kind:ref.kind || ''
     })).filter(ref => ref.url);
     targetNode.runSettings = meta.settings;
+    if(meta.trace) targetNode.runTrace = meta.trace;
+    else delete targetNode.runTrace;
     if(meta.sourceNodeId && meta.sourceNodeId !== targetNode.id) targetNode.sourceNodeId = meta.sourceNodeId;
     else delete targetNode.sourceNodeId;
     targetNode.runAt = meta.createdAt;
@@ -16693,9 +16889,9 @@ async function runGeneration(){
     const previousSettings = cloneSmartSettings(settings);
     const runSettings = smartSettingsForNode(node);
     settings = {...settings, ...cloneSmartSettings(runSettings || {})};
-    const request = buildPromptRequest(node, null, true, smartLoopContext);
-    const prompt = request.prompt.trim();
-    const refs = request.refs;
+    let request = buildPromptRequest(node, null, false, smartLoopContext);
+    let prompt = request.prompt.trim();
+    let refs = request.refs;
     try {
         smartValidateReferenceRequest(node, prompt, refs);
     } catch(error) {
@@ -16721,8 +16917,29 @@ async function runGeneration(){
             customSize:`${outpaintSize.width}x${outpaintSize.height}`
         };
     }
-    const meta = snapshotRunMeta(prompt, node.id, request.displayPrompt, refs);
     const logKind = isApiLikeEngine(settings.engine) && settings.apiKind === 'video' ? 'video' : 'image';
+    let trace = smartBuildGenerationTrace({node, prompt, refs, runSettings:settings, kind:logKind});
+    const confirmed = await confirmSmartGenerationPreflight(trace);
+    if(!confirmed){
+        settings = previousSettings;
+        return;
+    }
+    smartGenerationSubmitting = true;
+    syncRunButtonState();
+    request = buildPromptRequest(node, null, true, smartLoopContext);
+    prompt = request.prompt.trim();
+    refs = request.refs;
+    try {
+        smartValidateReferenceRequest(node, prompt, refs);
+    } catch(error) {
+        smartGenerationSubmitting = false;
+        syncRunButtonState();
+        settings = previousSettings;
+        toast(error.message);
+        return;
+    }
+    trace = smartBuildGenerationTrace({node, prompt, refs, runSettings:settings, kind:logKind});
+    const meta = snapshotRunMeta(prompt, node.id, request.displayPrompt, refs, trace);
     const runLog = smartRunSnapshot(node, prompt, refs, logKind);
     rememberRecentSmartSettings(settings, node);
     const runLogStart = nowMs();
@@ -16859,6 +17076,8 @@ async function runGeneration(){
             clearNodeRunningState(pendingNode);
             syncRunButtonState();
         }
+        smartGenerationSubmitting = false;
+        syncRunButtonState();
         render();
     }
 }

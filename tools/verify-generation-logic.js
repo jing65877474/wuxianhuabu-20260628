@@ -4,6 +4,7 @@ const path = require("path");
 const root = path.resolve(__dirname, "..");
 const smartCanvasPath = path.join(root, "static", "js", "smart-canvas.js");
 const source = fs.readFileSync(smartCanvasPath, "utf8");
+const smartCanvasCss = fs.readFileSync(path.join(root, "static", "css", "smart-canvas.css"), "utf8");
 const backendSource = fs.readFileSync(path.join(root, "main.py"), "utf8");
 const canvasListSource = fs.readFileSync(path.join(root, "static", "js", "canvas-list.js"), "utf8");
 const smartCanvasHtml = fs.readFileSync(path.join(root, "static", "smart-canvas.html"), "utf8");
@@ -76,7 +77,31 @@ includesAll([
     "filterStaleEmptyRunPlaceholders",
     "meta.sourceNodeId !== targetNode.id",
     "cleanupCaseStyleReferenceInputs",
+    "smartBuildGenerationTrace",
+    "confirmSmartGenerationPreflight",
+    "smartGenerationPreflightOpen",
+    "run?.trace || null",
 ], "A required generation safeguard is missing.");
+
+check(
+    source.includes("const confirmed = await confirmSmartGenerationPreflight(trace)") &&
+        source.includes("if(!confirmed)") &&
+        source.includes("snapshotRunMeta(prompt, node.id, request.displayPrompt, refs, trace)"),
+    "Generation must show a preflight request preview and stop cleanly when the user cancels."
+);
+check(
+    source.includes("function smartReferenceRoleLabel") &&
+        source.includes("smartReferenceUploadStateLabel") &&
+        smartCanvasCss.includes(".input-thumb[data-ref-role=\"product_truth_reference\"]::before") &&
+        smartCanvasCss.includes(".smart-node-role-badge"),
+    "Reference role badges must remain visible on composer and node thumbnails."
+);
+check(
+    source.includes("trace:run?.trace || null") &&
+        source.includes("smartTraceSummary(trace)") &&
+        smartCanvasCss.includes(".log-trace"),
+    "Generation trace metadata must be saved and shown in the generation log."
+);
 
 check(
     source.includes("image:editBase.url") &&
