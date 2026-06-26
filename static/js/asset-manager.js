@@ -1,4 +1,4 @@
-const root = document.getElementById('assetManagerRoot');
+﻿const root = document.getElementById('assetManagerRoot');
 const statusEl = document.getElementById('assetStatus');
 const refreshBtn = document.getElementById('refreshBtn');
 const uploadInput = document.getElementById('assetUploadInput');
@@ -34,23 +34,17 @@ let activeAssetLibraryId = '';
 let activeAssetCategoryId = '';
 let activeAssetClassFilter = '';
 let openAssetClassGroup = 'environment';
-let activeWorkflowLibraryId = '';
-let activeWorkflowCategoryId = '';
 let activePromptLibraryId = '';
 let activePromptCategory = 'all';
 let assetTreeFocus = 'category';
 let promptTreeFocus = 'category';
 let selectedAssetId = '';
-let selectedWorkflowId = '';
 let selectedPromptId = '';
 let selectedAssetIds = new Set();
-let selectedWorkflowIds = new Set();
 let selectedPromptIds = new Set();
 let assetQuery = '';
-let workflowQuery = '';
 let promptQuery = '';
 let assetManageMode = false;
-let workflowManageMode = false;
 let promptManageMode = false;
 let assetMoveTarget = '';
 let assetClipboard = null;
@@ -62,7 +56,6 @@ let pendingDeleteAssetId = '';
 let pendingDeletePromptId = '';
 let pendingBatchDelete = '';
 let assetTreeEdit = null;
-let workflowTreeEdit = null;
 let promptTreeEdit = null;
 let pendingTreeDelete = '';
 let marqueeState = null;
@@ -111,7 +104,7 @@ let searchRenderTimer = null;
 let lastSearchCompositionEndAt = 0;
 
 const LOCAL_MEDIA_EXTS = /\.(png|jpe?g|webp|gif|bmp|avif|svg|mp4|webm|mov|m4v|mp3|wav|flac|ogg|m4a|aac)(\?|#|$)/i;
-const SEARCH_INPUT_IDS = new Set(['assetSearch','workflowSearch','promptSearch','localSearch','localUploadSearch','canvasAssetSearch']);
+const SEARCH_INPUT_IDS = new Set(['assetSearch','promptSearch','localSearch','localUploadSearch','canvasAssetSearch']);
 
 function refreshIcons(){ if(window.lucide) lucide.createIcons(); }
 function setStatus(text='准备就绪'){ if(statusEl) statusEl.textContent = text || '准备就绪'; }
@@ -168,21 +161,8 @@ function activeAssetLibrary(){
     const libs = assetLibraries();
     return libs.find(lib => lib.id === activeAssetLibraryId) || libs[0] || null;
 }
-function activeWorkflowLibrary(){
-    const libs = assetLibraries();
-    return libs.find(lib => lib.id === activeWorkflowLibraryId) || libs[0] || null;
-}
 function assetCategories(){
     return (activeAssetLibrary()?.categories || []).filter(cat => (cat.type || 'image') === 'image');
-}
-function workflowCategories(){
-    const cats = [];
-    assetLibraries().forEach(lib => {
-        (lib.categories || []).filter(cat => (cat.type || '') === 'workflow').forEach(cat => {
-            cats.push({...cat, __libraryId:lib.id, __libraryName:lib.name || '资产库'});
-        });
-    });
-    return cats;
 }
 function activeAssetCategory(){
     const cats = assetCategories();
@@ -198,16 +178,6 @@ function assetViewSubtitle(items){
     const entry = activeAssetClassEntry();
     if(entry) return `${libName} / 智能分类：${entry.label} / ${items.length} 个素材`;
     return `${libName} / ${items.length} 个素材`;
-}
-function activeWorkflowCategory(){
-    const cats = workflowCategories();
-    return cats.find(cat => cat.id === activeWorkflowCategoryId && cat.__libraryId === activeWorkflowLibraryId)
-        || cats.find(cat => cat.id === activeWorkflowCategoryId)
-        || cats[0]
-        || null;
-}
-function workflowCount(){
-    return workflowCategories().reduce((sum, cat) => sum + ((cat.items || []).length), 0);
 }
 function assetCountForLibrary(lib){
     return (lib?.categories || [])
@@ -408,12 +378,6 @@ function renderClassificationChips(item, limit=10, options={}){
         }).join('')}</div>`
         : '';
 }
-function workflowKindLabel(item){
-    const format = String(item?.format || '').toLowerCase();
-    const url = String(item?.url || '').toLowerCase();
-    if(format === 'json' || url.endsWith('.json')) return 'JSON 工作流';
-    return 'ZIP 工作流包';
-}
 function assetKindLabel(item){
     const kind = assetKind(item);
     if(kind === 'video') return '视频';
@@ -442,9 +406,6 @@ function assetThumb(item){
     if(kind === 'audio') return `<div class="asset-file-icon"><i data-lucide="file-audio"></i><span>音频</span></div>`;
     if(kind === 'text') return `<div class="asset-file-icon"><i data-lucide="file-text"></i><span>文本</span></div>`;
     return `<img src="${escapeAttr(assetPreviewUrl(item.url, 256))}" alt="${escapeAttr(item.name || 'asset')}" loading="lazy" decoding="async">`;
-}
-function workflowThumb(item){
-    return `<div class="asset-file-icon workflow-file-icon"><i data-lucide="workflow"></i><span>${escapeHtml(workflowKindLabel(item))}</span></div>`;
 }
 function isLocalMediaFile(file){
     if(!file) return false;
@@ -655,13 +616,6 @@ function currentAssetItems(){
         return [item.name, item.url, assetKindLabel(item), assetClassificationSearchText(item)].join(' ').toLowerCase().includes(query);
     });
 }
-function currentWorkflowItems(){
-    const query = workflowQuery.trim().toLowerCase();
-    return (activeWorkflowCategory()?.items || []).filter(item => {
-        if(!query) return true;
-        return [item.name, item.url, workflowKindLabel(item)].join(' ').toLowerCase().includes(query);
-    });
-}
 function canvasAssetCategories(){
     const cats = Array.isArray(canvasAssetsData.categories) && canvasAssetsData.categories.length
         ? canvasAssetsData.categories.filter(cat => ['smart','classic'].includes(cat.id))
@@ -848,13 +802,6 @@ function findAssetItem(id){
     for(const lib of assetLibraries()) for(const cat of lib.categories || []) for(const item of cat.items || []) if(item.id === id) return item;
     return null;
 }
-function findWorkflowItem(id){
-    for(const lib of assetLibraries()) for(const cat of lib.categories || []) {
-        if((cat.type || '') !== 'workflow') continue;
-        for(const item of cat.items || []) if(item.id === id) return item;
-    }
-    return null;
-}
 function findPromptItem(id){
     for(const lib of promptLibraries()) for(const item of lib.items || []) if(item.id === id) return item;
     return null;
@@ -865,10 +812,6 @@ function findCanvasAssetItem(id){
 function selectedAsset(){
     const items = currentAssetItems();
     return items.find(item => item.id === selectedAssetId) || items[0] || null;
-}
-function selectedWorkflow(){
-    const items = currentWorkflowItems();
-    return items.find(item => item.id === selectedWorkflowId) || items[0] || null;
 }
 function selectedPrompt(){
     const items = currentPromptItems();
@@ -906,12 +849,6 @@ function managedSelectionTarget(target){
         const id = check?.dataset.localCheck || card?.dataset.localCard || '';
         if(id) return {kind:'local', id};
     }
-    if(activeTab === 'workflows' && workflowManageMode){
-        const check = target.closest?.('[data-workflow-check]');
-        const card = target.closest?.('[data-workflow-card]');
-        const id = check?.dataset.workflowCheck || card?.dataset.workflowCard || '';
-        if(id) return {kind:'workflow', id};
-    }
     if(activeTab === 'prompts' && promptManageMode){
         const check = target.closest?.('[data-prompt-check]');
         const row = target.closest?.('[data-prompt-row]');
@@ -936,9 +873,6 @@ function applyManagedSelection(kind, id){
     } else if(kind === 'local'){
         const selected = toggleSelectionSet(selectedLocalIds, id);
         selectedLocalId = selected ? id : (selectedLocalId === id ? '' : selectedLocalId);
-    } else if(kind === 'workflow'){
-        const selected = toggleSelectionSet(selectedWorkflowIds, id);
-        selectedWorkflowId = selected ? id : (selectedWorkflowId === id ? '' : selectedWorkflowId);
     } else if(kind === 'prompt'){
         const selected = toggleSelectionSet(selectedPromptIds, id);
         selectedPromptId = selected ? id : (selectedPromptId === id ? '' : selectedPromptId);
@@ -968,24 +902,6 @@ function normalizeAssetState(){
     if(selectedAssetId && !items.some(item => item.id === selectedAssetId)) selectedAssetId = '';
     if(!selectedAssetId && items.length) selectedAssetId = items[0].id;
     selectedAssetIds = new Set([...selectedAssetIds].filter(id => findAssetItem(id)));
-}
-function normalizeWorkflowState(){
-    const libs = assetLibraries();
-    if(!activeWorkflowLibraryId || !libs.some(lib => lib.id === activeWorkflowLibraryId)) activeWorkflowLibraryId = assetLibrary.active_library_id || libs[0]?.id || '';
-    const cats = workflowCategories();
-    if(
-        !activeWorkflowCategoryId
-        || !cats.some(cat => cat.id === activeWorkflowCategoryId && cat.__libraryId === activeWorkflowLibraryId)
-    ){
-        activeWorkflowCategoryId = cats[0]?.id || '';
-        activeWorkflowLibraryId = cats[0]?.__libraryId || activeWorkflowLibraryId;
-    }
-    const activeCat = cats.find(cat => cat.id === activeWorkflowCategoryId && cat.__libraryId === activeWorkflowLibraryId) || null;
-    if(activeCat?.__libraryId) activeWorkflowLibraryId = activeCat.__libraryId;
-    const items = currentWorkflowItems();
-    if(selectedWorkflowId && !items.some(item => item.id === selectedWorkflowId)) selectedWorkflowId = '';
-    if(!selectedWorkflowId && items.length) selectedWorkflowId = items[0].id;
-    selectedWorkflowIds = new Set([...selectedWorkflowIds].filter(id => findWorkflowItem(id)));
 }
 function normalizePromptState(){
     const libs = promptLibraries();
@@ -1050,13 +966,9 @@ async function loadAll(){
     // 刷新时默认回到「默认资产库」
     const libs = assetLibraries();
     activeAssetLibraryId = (libs.find(lib => lib.id === 'default') || libs[0])?.id || '';
-    activeWorkflowLibraryId = (libs.find(lib => lib.id === 'default') || libs[0])?.id || '';
     activeAssetCategoryId = '';
-    activeWorkflowCategoryId = '';
     selectedAssetId = '';
-    selectedWorkflowId = '';
     selectedAssetIds.clear();
-    selectedWorkflowIds.clear();
     selectedPromptIds.clear();
     selectedCanvasAssetIds.clear();
     render();
@@ -1067,7 +979,6 @@ function render(){
         .map((el, index) => ({index, top:el.scrollTop, left:el.scrollLeft}));
     document.querySelectorAll('[data-tab]').forEach(btn => btn.classList.toggle('active', btn.dataset.tab === activeTab));
     if(activeTab === 'prompts') renderPromptManager();
-    else if(activeTab === 'workflows') renderWorkflowManager();
     else if(activeTab === 'local') renderLocalManager();
     else if(activeTab === 'canvas-assets') renderCanvasAssetsManager();
     else renderAssetManager();
@@ -1085,7 +996,6 @@ function render(){
 }
 function updateSearchQueryFromInput(id, value){
     if(id === 'assetSearch') assetQuery = value || '';
-    else if(id === 'workflowSearch') workflowQuery = value || '';
     else if(id === 'promptSearch') promptQuery = value || '';
     else if(id === 'localSearch') localQuery = value || '';
     else if(id === 'localUploadSearch') localUploadQuery = value || '';
@@ -1093,7 +1003,6 @@ function updateSearchQueryFromInput(id, value){
 }
 function clearSearchSelection(id){
     if(id === 'assetSearch') selectedAssetId = '';
-    else if(id === 'workflowSearch') selectedWorkflowId = '';
     else if(id === 'promptSearch') selectedPromptId = '';
     else if(id === 'localSearch') selectedLocalId = '';
     else if(id === 'localUploadSearch') selectedLocalUploadId = '';
@@ -1679,141 +1588,6 @@ function renderAssetManager(){
         </aside>
     `;
 }
-function renderWorkflowManager(){
-    normalizeWorkflowState();
-    const cats = workflowCategories();
-    const cat = activeWorkflowCategory();
-    const items = currentWorkflowItems();
-    const detail = selectedWorkflow();
-    root.innerHTML = `
-        <aside class="asset-panel asset-nav">
-            <div class="panel-head">
-                <div class="panel-title"><strong>工作流层级</strong><span>独立管理工作流分组</span></div>
-                <div class="panel-actions compact-actions">
-                    ${workflowTreeEdit?.placement === 'head' ? '' : '<button class="asset-icon-btn" type="button" data-workflow-cat-new title="新建工作流分组"><i data-lucide="folder-plus"></i></button>'}
-                    ${renderHeadTreeInlineEdit(workflowTreeEdit, 'workflowTreeEditInput', 'data-workflow-tree-edit-save', 'data-workflow-tree-edit-cancel')}
-                </div>
-            </div>
-            <div class="nav-scroll">
-                <div class="nav-tree">
-                    <div class="tree-branch expanded">
-                        <button class="tree-row tree-parent contains-active" type="button" data-workflow-root>
-                            <span class="tree-row-icon"><i data-lucide="folder-open"></i></span>
-                            <span class="tree-row-name">工作流库</span>
-                            <span class="tree-row-count">${workflowCount()}</span>
-                        </button>
-                        <div class="tree-children">
-                            ${cats.length ? cats.map(c => {
-                                const active = c.id === activeWorkflowCategoryId && c.__libraryId === activeWorkflowLibraryId;
-                                return `<button class="tree-row tree-child ${active ? 'active' : ''}" type="button" data-workflow-cat="${escapeAttr(c.id)}" data-workflow-cat-lib="${escapeAttr(c.__libraryId || '')}">
-                                <span class="tree-elbow"></span>
-                                <span class="tree-row-icon"><i data-lucide="workflow"></i></span>
-                                <span class="tree-row-name">${escapeHtml(c.name || '工作流')}</span>
-                                <span class="tree-row-count">${(c.items || []).length}</span>
-                            </button>${active ? renderWorkflowTreeActionBar() : ''}`;
-                            }).join('') : '<div class="tree-empty">暂无工作流分组</div>'}
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </aside>
-        <section class="asset-panel asset-content ${workflowManageMode ? 'manage-on' : ''}">
-            <div class="content-toolbar">
-                <div class="content-heading">
-                    <strong>${escapeHtml(cat?.name || '工作流管理')}</strong>
-                    <span>工作流库 / ${items.length} 个工作流</span>
-                </div>
-                <div class="asset-tools">
-                    <label class="asset-search-wrap"><i data-lucide="search"></i><input id="workflowSearch" class="asset-search" type="search" value="${escapeAttr(workflowQuery)}" placeholder="搜索工作流"></label>
-                    <button class="asset-btn ${workflowManageMode ? 'primary' : ''}" type="button" data-workflow-manage><i data-lucide="list-checks"></i><span>${workflowManageMode ? '完成管理' : '批量管理'}</span></button>
-                </div>
-            </div>
-            <div class="manage-tools">
-                <span>已选择 ${selectedWorkflowIds.size} 个工作流。</span>
-                <div class="asset-tools">
-                    <button class="asset-btn" type="button" data-workflow-select-all ${items.length ? '' : 'disabled'}><i data-lucide="check-square"></i><span>全选</span></button>
-                    <button class="asset-btn" type="button" data-workflow-clear-selection ${selectedWorkflowIds.size ? '' : 'disabled'}><i data-lucide="square"></i><span>清空</span></button>
-                    <button class="asset-btn" type="button" data-workflow-export-selected ${selectedWorkflowIds.size ? '' : 'disabled'}><i data-lucide="download"></i><span>导出所选</span></button>
-                    <button class="asset-btn danger" type="button" data-workflow-delete-selected ${selectedWorkflowIds.size ? '' : 'disabled'}><i data-lucide="trash-2"></i><span>删除所选</span></button>
-                </div>
-            </div>
-            <div class="content-scroll">
-                <div class="asset-grid">
-                    ${renderWorkflowUploadCard(cat)}
-                    ${items.map(item => renderWorkflowCard(item)).join('')}
-                    ${items.length ? '' : '<div class="empty-state">当前分组还没有工作流，可以上传 JSON / ZIP，或从传统画布导出到资产库。</div>'}
-                </div>
-            </div>
-        </section>
-        <aside class="asset-panel asset-detail">
-            ${renderWorkflowDetail(detail)}
-        </aside>
-    `;
-}
-function renderWorkflowUploadCard(cat){
-    return `<button id="workflowDrop" class="upload-grid-card" type="button" data-workflow-upload ${!cat ? 'disabled' : ''}>
-        <span class="upload-thumb"><i data-lucide="upload-cloud"></i></span>
-        <span class="upload-body">
-            <strong>上传工作流</strong>
-            <small>支持 JSON / ZIP</small>
-        </span>
-    </button>`;
-}
-function renderWorkflowTreeActionBar(){
-    const editHtml = renderWorkflowTreeInlineEdit();
-    if(editHtml) return editHtml;
-    const deleteKey = `workflow-cat:${activeWorkflowLibraryId}:${activeWorkflowCategoryId}`;
-    return `<div class="tree-action-bar child-actions">
-        <button type="button" data-workflow-cat-rename><i data-lucide="pencil"></i><span>重命名</span></button>
-        <button type="button" class="danger ${pendingTreeDelete === deleteKey ? 'detail-confirm' : ''}" data-workflow-cat-delete><i data-lucide="trash-2"></i><span>${pendingTreeDelete === deleteKey ? '确认删除' : '删除'}</span></button>
-    </div>`;
-}
-function renderWorkflowTreeInlineEdit(){
-    if(!workflowTreeEdit || workflowTreeEdit.placement === 'head') return '';
-    if(workflowTreeEdit.kind !== 'category-rename') return '';
-    const label = workflowTreeEdit.label || '名称';
-    return `<div class="tree-inline-edit child-actions">
-        <input id="workflowTreeEditInput" type="text" value="${escapeAttr(workflowTreeEdit.value || '')}" placeholder="${escapeAttr(label)}">
-        <button type="button" class="primary" data-workflow-tree-edit-save><i data-lucide="check"></i><span>保存</span></button>
-        <button type="button" data-workflow-tree-edit-cancel><i data-lucide="x"></i><span>取消</span></button>
-    </div>`;
-}
-function renderWorkflowCard(item){
-    return `<article class="asset-card workflow-card ${item.id === selectedWorkflowId ? 'active' : ''}" data-workflow-card="${escapeAttr(item.id)}">
-        <input class="asset-card-check" type="checkbox" data-workflow-check="${escapeAttr(item.id)}" ${selectedWorkflowIds.has(item.id) ? 'checked' : ''}>
-        <div class="asset-thumb">${workflowThumb(item)}</div>
-        <div class="asset-card-body">
-            <div class="asset-card-name" title="${escapeAttr(item.name || '')}">${escapeHtml(item.name || 'workflow')}</div>
-            <div class="asset-card-meta">${escapeHtml(workflowKindLabel(item))} · ${escapeHtml(formatDate(item.created_at))}</div>
-        </div>
-    </article>`;
-}
-function renderWorkflowDetail(item){
-    if(!item) return `<div class="panel-head"><div class="panel-title"><strong>工作流详情</strong><span>选择一个工作流查看详情</span></div></div><div class="detail-scroll"><div class="detail-empty"><i data-lucide="workflow"></i><span>暂无工作流</span></div></div>`;
-    return `
-        <div class="panel-head">
-            <div class="panel-title"><strong>工作流详情</strong><span>${escapeHtml(workflowKindLabel(item))}</span></div>
-            <div class="panel-actions">
-                <button class="asset-icon-btn" type="button" data-workflow-download="${escapeAttr(item.id)}" title="导出工作流"><i data-lucide="download"></i></button>
-                <button class="asset-icon-btn" type="button" data-workflow-rename="${escapeAttr(item.id)}" title="重命名"><i data-lucide="pencil"></i></button>
-                <button class="asset-icon-btn danger ${pendingDeleteAssetId === item.id ? 'detail-confirm' : ''}" type="button" data-workflow-delete="${escapeAttr(item.id)}" title="${pendingDeleteAssetId === item.id ? '再次点击确认删除' : '删除'}"><i data-lucide="trash-2"></i></button>
-            </div>
-        </div>
-        <div class="detail-scroll">
-            <div class="detail-media"><div class="detail-media-frame">${workflowThumb(item)}</div></div>
-            <div class="detail-body">
-                <input class="detail-name-input" data-workflow-inline-name="${escapeAttr(item.id)}" type="text" value="${escapeAttr(item.name || 'workflow')}" title="直接修改名称">
-                <div class="detail-meta-grid">
-                    <div class="detail-meta"><span>类型</span><strong>${escapeHtml(workflowKindLabel(item))}</strong></div>
-                    <div class="detail-meta"><span>创建时间</span><strong>${escapeHtml(formatDate(item.created_at))}</strong></div>
-                    <div class="detail-meta"><span>位置</span><strong>工作流库</strong></div>
-                    <div class="detail-meta"><span>分组</span><strong>${escapeHtml(activeWorkflowCategory()?.name || '工作流')}</strong></div>
-                </div>
-                <div class="detail-url">${escapeHtml(item.url || '')}</div>
-            </div>
-        </div>
-    `;
-}
 function renderUploadCard(cat){
     return `<button id="assetDrop" class="upload-grid-card" type="button" data-asset-upload ${!cat ? 'disabled' : ''}>
         <span class="upload-thumb"><i data-lucide="upload-cloud"></i></span>
@@ -2266,22 +2040,6 @@ async function uploadFiles(files){
     setStatus(`已上传 ${items.length} 个素材`);
     return {count:items.length, items:data.items || []};
 }
-async function uploadWorkflowFiles(files){
-    const cat = activeWorkflowCategory();
-    if(!cat) throw new Error('请先创建工作流分组');
-    const list = [...files].filter(file => /\.(json|zip)$/i.test(file.name || '') || ['application/json','application/zip','application/x-zip-compressed'].includes(String(file.type || '').toLowerCase()));
-    if(!list.length) throw new Error('没有可上传的工作流文件');
-    const form = new FormData();
-    form.append('library_id', activeWorkflowLibraryId || '');
-    form.append('category_id', activeWorkflowCategoryId || '');
-    list.forEach(file => form.append('files', file));
-    const data = await apiJson('/api/asset-library/workflows/upload', {method:'POST', body:form});
-    assetLibrary = data.library || assetLibrary;
-    selectedWorkflowIds.clear();
-    selectedWorkflowId = data.items?.[0]?.id || selectedWorkflowId;
-    render();
-    setStatus(`已上传 ${data.items?.length || 0} 个工作流`);
-}
 function downloadUrl(url, filename='download'){
     if(!url) return;
     const link = document.createElement('a');
@@ -2291,32 +2049,6 @@ function downloadUrl(url, filename='download'){
     document.body.appendChild(link);
     link.click();
     link.remove();
-}
-async function exportWorkflowItems(ids){
-    const items = (ids || []).map(id => findWorkflowItem(id)).filter(item => item?.url);
-    if(!items.length) return;
-    if(items.length === 1){
-        const item = items[0];
-        const ext = String(item.url || '').toLowerCase().split('?')[0].endsWith('.json') ? '.json' : '.zip';
-        downloadUrl(item.url, `${item.name || 'workflow'}${ext}`);
-        setStatus('已导出工作流');
-        return;
-    }
-    const res = await fetch('/api/canvas-assets/download', {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({filename:'workflows.zip', items:items.map(item => ({url:item.url, name:item.name || 'workflow'}))})
-    });
-    if(!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || '导出工作流失败');
-    const blob = await res.blob();
-    const link = document.createElement('a');
-    link.href = URL.createObjectURL(blob);
-    link.download = 'workflows.zip';
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    setTimeout(() => URL.revokeObjectURL(link.href), 1200);
-    setStatus(`已导出 ${items.length} 个工作流`);
 }
 async function downloadCanvasAssetItems(ids){
     const items = (ids || []).map(id => findCanvasAssetItem(id)).filter(item => item?.url);
@@ -2494,42 +2226,6 @@ async function pasteLocalUploadClipboard(){
     } catch(err){
         setStatus(err.message || '移动失败');
     }
-}
-async function renameWorkflowItem(id){
-    const item = findWorkflowItem(id);
-    const name = window.prompt('工作流名称', item?.name || '');
-    if(!item || !String(name || '').trim()) return;
-    const data = await apiJson(`/api/asset-library/items/${encodeURIComponent(id)}`, {method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name})});
-    assetLibrary = data.library || assetLibrary;
-    render();
-    setStatus('已重命名工作流');
-}
-async function deleteWorkflowItem(id){
-    const item = findWorkflowItem(id);
-    if(!item) return;
-    if(pendingDeleteAssetId !== id){
-        pendingDeleteAssetId = id;
-        render();
-        setStatus('再次点击确认删除工作流');
-        return;
-    }
-    const data = await apiJson(`/api/asset-library/items/${encodeURIComponent(id)}`, {method:'DELETE'});
-    assetLibrary = data.library || assetLibrary;
-    selectedWorkflowIds.delete(id);
-    selectedWorkflowId = '';
-    pendingDeleteAssetId = '';
-    render();
-    setStatus('已删除工作流');
-}
-async function deleteSelectedWorkflows(){
-    const ids = [...selectedWorkflowIds];
-    if(!ids.length) return;
-    const data = await apiJson('/api/asset-library/items/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({library_id:activeWorkflowLibraryId, ids})});
-    assetLibrary = data.library || assetLibrary;
-    selectedWorkflowIds.clear();
-    selectedWorkflowId = '';
-    render();
-    setStatus(`已删除 ${data.removed || 0} 个工作流`);
 }
 async function uploadLocalAssets(files){
     const list = [...files].filter(f => isLocalMediaFile(f));
@@ -2905,20 +2601,6 @@ async function handleClick(event){
             return;
         }
     }
-    if(activeTab === 'workflows' && workflowManageMode){
-        const workflowCheck = target.closest?.('[data-workflow-check]');
-        const workflowCard = target.closest?.('[data-workflow-card]');
-        if(workflowCheck || workflowCard){
-            event.preventDefault();
-            event.stopPropagation();
-            const id = workflowCheck?.dataset.workflowCheck || workflowCard?.dataset.workflowCard || '';
-            const selected = toggleSelectionSet(selectedWorkflowIds, id);
-            selectedWorkflowId = selected ? id : (selectedWorkflowId === id ? '' : selectedWorkflowId);
-            pendingBatchDelete = '';
-            render();
-            return;
-        }
-    }
     if(activeTab === 'prompts' && promptManageMode){
         const promptCheck = target.closest?.('[data-prompt-check]');
         const promptRow = target.closest?.('[data-prompt-row]');
@@ -2949,7 +2631,7 @@ async function handleClick(event){
         }
     }
     const tabBtn = target.closest?.('[data-tab]');
-    if(tabBtn){ activeTab = tabBtn.dataset.tab || 'assets'; selectedAssetIds.clear(); selectedWorkflowIds.clear(); selectedPromptIds.clear(); selectedLocalIds.clear(); selectedLocalUploadIds.clear(); selectedCanvasAssetIds.clear(); render(); return; }
+    if(tabBtn){ activeTab = tabBtn.dataset.tab || 'assets'; selectedAssetIds.clear(); selectedPromptIds.clear(); selectedLocalIds.clear(); selectedLocalUploadIds.clear(); selectedCanvasAssetIds.clear(); render(); return; }
     if(target.closest?.('#refreshBtn')){ await loadAll(); return; }
     const assetPreview = target.closest?.('[data-asset-preview]');
     if(assetPreview){ showDetailPreview('asset', assetPreview.dataset.assetPreview || ''); return; }
@@ -3158,66 +2840,8 @@ async function handleClick(event){
         render();
         return;
     }
-    if(target.closest?.('[data-workflow-manage]')){
-        workflowManageMode = !workflowManageMode;
-        if(!workflowManageMode) selectedWorkflowIds.clear();
-        pendingDeleteAssetId = '';
-        render();
-        return;
-    }
-    if(target.closest?.('[data-workflow-select-all]')){ currentWorkflowItems().forEach(item => selectedWorkflowIds.add(item.id)); render(); return; }
-    if(target.closest?.('[data-workflow-clear-selection]')){ selectedWorkflowIds.clear(); render(); return; }
-    if(target.closest?.('[data-workflow-export-selected]')){ await exportWorkflowItems([...selectedWorkflowIds]); return; }
-    if(target.closest?.('[data-workflow-delete-selected]')){ await deleteSelectedWorkflows(); return; }
-    if(target.closest?.('[data-workflow-upload]')){
-        if(uploadInput) uploadInput.accept = '.json,.zip,application/json,application/zip,application/x-zip-compressed';
-        uploadInput?.click();
-        return;
-    }
-    const workflowDownload = target.closest?.('[data-workflow-download]');
-    if(workflowDownload){ await exportWorkflowItems([workflowDownload.dataset.workflowDownload || '']); return; }
-    const workflowRename = target.closest?.('[data-workflow-rename]');
-    if(workflowRename){ await renameWorkflowItem(workflowRename.dataset.workflowRename || ''); return; }
-    const workflowDelete = target.closest?.('[data-workflow-delete]');
-    if(workflowDelete){ await deleteWorkflowItem(workflowDelete.dataset.workflowDelete || ''); return; }
-    if(target.closest?.('[data-workflow-cat-new]')){
-        workflowTreeEdit = {kind:'category-new', placement:'head', value:'新工作流分组', label:'工作流分组名称'};
-        pendingTreeDelete = '';
-        render();
-        focusTreeEditInput('workflowTreeEditInput');
-        return;
-    }
-    if(target.closest?.('[data-workflow-cat-rename]')){
-        const cat = activeWorkflowCategory();
-        if(!cat) return;
-        workflowTreeEdit = {kind:'category-rename', value:cat.name || '', label:'工作流分组名称', categoryId:cat.id};
-        pendingTreeDelete = '';
-        render();
-        focusTreeEditInput('workflowTreeEditInput');
-        return;
-    }
-    if(target.closest?.('[data-workflow-cat-delete]')){ await deleteWorkflowCategory(); return; }
-    const workflowLib = target.closest?.('[data-workflow-lib]');
-    if(workflowLib){ activeWorkflowLibraryId = workflowLib.dataset.workflowLib || ''; activeWorkflowCategoryId = ''; selectedWorkflowId = ''; selectedWorkflowIds.clear(); render(); return; }
-    const workflowCat = target.closest?.('[data-workflow-cat]');
-    if(workflowCat){ activeWorkflowLibraryId = workflowCat.dataset.workflowCatLib || activeWorkflowLibraryId; activeWorkflowCategoryId = workflowCat.dataset.workflowCat || ''; selectedWorkflowId = ''; selectedWorkflowIds.clear(); render(); return; }
-    const workflowCard = target.closest?.('[data-workflow-card]');
-    if(workflowCard){
-        const id = workflowCard.dataset.workflowCard || '';
-        if(workflowManageMode){
-            const selected = toggleSelectionSet(selectedWorkflowIds, id);
-            selectedWorkflowId = selected ? id : (selectedWorkflowId === id ? '' : selectedWorkflowId);
-        } else {
-            selectedWorkflowId = id;
-        }
-        pendingDeleteAssetId = '';
-        render();
-        return;
-    }
     if(target.closest?.('[data-asset-tree-edit-save]')){ await saveAssetTreeEdit(); return; }
     if(target.closest?.('[data-asset-tree-edit-cancel]')){ assetTreeEdit = null; render(); return; }
-    if(target.closest?.('[data-workflow-tree-edit-save]')){ await saveWorkflowTreeEdit(); return; }
-    if(target.closest?.('[data-workflow-tree-edit-cancel]')){ workflowTreeEdit = null; render(); return; }
     if(target.closest?.('[data-prompt-tree-edit-save]')){ await savePromptTreeEdit(); return; }
     if(target.closest?.('[data-prompt-tree-edit-cancel]')){ promptTreeEdit = null; render(); return; }
     const assetEditSave = target.closest?.('[data-asset-edit-save]');
@@ -3676,65 +3300,6 @@ async function saveAssetTreeEdit(){
     pendingTreeDelete = '';
     render();
     setStatus('已保存');
-}
-async function saveWorkflowTreeEdit(){
-    if(!workflowTreeEdit) return;
-    const name = document.getElementById('workflowTreeEditInput')?.value || '';
-    if(!String(name || '').trim()){
-        setStatus('名称不能为空');
-        return;
-    }
-    if(workflowTreeEdit.kind === 'category-new'){
-        const lib = activeWorkflowLibrary();
-        if(!lib){
-            setStatus('请先选择资产库');
-            return;
-        }
-        activeWorkflowLibraryId = lib.id || activeWorkflowLibraryId;
-        const data = await apiJson('/api/asset-library/categories', {
-            method:'POST',
-            headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({library_id:activeWorkflowLibraryId, name, type:'workflow'})
-        });
-        assetLibrary = data.library || assetLibrary;
-        activeWorkflowCategoryId = data.category?.id || activeWorkflowCategoryId;
-    } else if(workflowTreeEdit.kind === 'category-rename'){
-        const cat = activeWorkflowCategory();
-        const categoryId = workflowTreeEdit.categoryId || cat?.id || activeWorkflowCategoryId;
-        if(!categoryId) return;
-        const data = await apiJson(`/api/asset-library/categories/${encodeURIComponent(categoryId)}`, {
-            method:'PATCH',
-            headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({name, library_id:activeWorkflowLibraryId})
-        });
-        assetLibrary = data.library || assetLibrary;
-        activeWorkflowCategoryId = categoryId;
-    }
-    workflowTreeEdit = null;
-    pendingTreeDelete = '';
-    render();
-    setStatus('已保存');
-}
-async function deleteWorkflowCategory(){
-    const cat = activeWorkflowCategory();
-    if(!cat) return;
-    const libraryId = cat.__libraryId || activeWorkflowLibraryId;
-    const key = `workflow-cat:${libraryId}:${cat.id}`;
-    if(pendingTreeDelete !== key){
-        pendingTreeDelete = key;
-        workflowTreeEdit = null;
-        render();
-        setStatus('再次点击确认删除工作流分组');
-        return;
-    }
-    const data = await apiJson(`/api/asset-library/categories/${encodeURIComponent(cat.id)}?library_id=${encodeURIComponent(libraryId)}`, {method:'DELETE'});
-    assetLibrary = data.library || assetLibrary;
-    activeWorkflowCategoryId = '';
-    selectedWorkflowId = '';
-    selectedWorkflowIds.clear();
-    pendingTreeDelete = '';
-    render();
-    setStatus('工作流分组已删除');
 }
 async function renameAssetLibrary(){
     const lib = activeAssetLibrary();
@@ -4260,10 +3825,6 @@ document.addEventListener('keydown', event => {
         if(event.key === 'Enter'){ event.preventDefault(); saveAssetTreeEdit().catch(err => setStatus(err.message || '保存失败')); }
         if(event.key === 'Escape'){ event.preventDefault(); assetTreeEdit = null; render(); }
     }
-    if(event.target?.id === 'workflowTreeEditInput'){
-        if(event.key === 'Enter'){ event.preventDefault(); saveWorkflowTreeEdit().catch(err => setStatus(err.message || '保存失败')); }
-        if(event.key === 'Escape'){ event.preventDefault(); workflowTreeEdit = null; render(); }
-    }
     if(event.target?.id === 'promptTreeEditInput'){
         if(event.key === 'Enter'){ event.preventDefault(); savePromptTreeEdit().catch(err => setStatus(err.message || '保存失败')); }
         if(event.key === 'Escape'){ event.preventDefault(); promptTreeEdit = null; render(); }
@@ -4320,19 +3881,6 @@ root.addEventListener('change', event => {
         saveAssetInlineName(inlineAssetName.dataset.assetInlineName || '', inlineAssetName.value || '').catch(err => setStatus(err.message || '保存失败'));
         return;
     }
-    const inlineWorkflowName = event.target.closest?.('[data-workflow-inline-name]');
-    if(inlineWorkflowName){
-        apiJson(`/api/asset-library/items/${encodeURIComponent(inlineWorkflowName.dataset.workflowInlineName || '')}`, {
-            method:'PATCH',
-            headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({name:inlineWorkflowName.value || ''})
-        }).then(data => {
-            assetLibrary = data.library || assetLibrary;
-            render();
-            setStatus('已保存工作流名称');
-        }).catch(err => setStatus(err.message || '保存失败'));
-        return;
-    }
     if(event.target?.id === 'canvasAssetSort'){
         canvasAssetSort = event.target.value || 'canvas_asc';
         selectedCanvasAssetId = '';
@@ -4362,28 +3910,26 @@ root.addEventListener('change', event => {
     }
 });
 root.addEventListener('dragover', event => {
-    const drop = event.target.closest?.('#assetDrop, #localUploadDrop, #workflowDrop');
+    const drop = event.target.closest?.('#assetDrop, #localUploadDrop');
     if(!drop) return;
     event.preventDefault();
     drop.classList.add('drag-over');
 });
 root.addEventListener('dragleave', event => {
-    event.target.closest?.('#assetDrop, #localUploadDrop, #workflowDrop')?.classList.remove('drag-over');
+    event.target.closest?.('#assetDrop, #localUploadDrop')?.classList.remove('drag-over');
 });
 root.addEventListener('drop', event => {
-    const drop = event.target.closest?.('#assetDrop, #localUploadDrop, #workflowDrop');
+    const drop = event.target.closest?.('#assetDrop, #localUploadDrop');
     if(!drop) return;
     event.preventDefault();
     drop.classList.remove('drag-over');
     if(drop.id === 'localUploadDrop') uploadLocalAssets(event.dataTransfer.files);
-    else if(drop.id === 'workflowDrop') uploadWorkflowFiles(event.dataTransfer.files).catch(err => setStatus(err.message || '上传失败'));
     else uploadFiles(event.dataTransfer.files).catch(err => setStatus(err.message || '上传失败'));
 });
 uploadInput?.addEventListener('change', event => {
     const files = event.target.files;
     if(files?.length){
         if(activeTab === 'local') uploadLocalAssets(files);
-        else if(activeTab === 'workflows') uploadWorkflowFiles(files).catch(err => setStatus(err.message || '上传失败'));
         else uploadFiles(files).catch(err => setStatus(err.message || '上传失败'));
     }
     event.target.value = '';
@@ -4392,7 +3938,6 @@ document.querySelectorAll('[data-tab]').forEach(btn => {
     btn.addEventListener('click', () => {
         activeTab = btn.dataset.tab || 'assets';
         selectedAssetIds.clear();
-        selectedWorkflowIds.clear();
         selectedPromptIds.clear();
         selectedLocalIds.clear();
         selectedLocalUploadIds.clear();

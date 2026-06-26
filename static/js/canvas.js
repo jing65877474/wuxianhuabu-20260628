@@ -1,4 +1,4 @@
-﻿function refreshIcons(){ if(window.lucide) lucide.createIcons(); }
+function refreshIcons(){ if(window.lucide) lucide.createIcons(); }
 refreshIcons();
 function tr(key){ return window.StudioI18n ? StudioI18n.t(key) : key; }
 function trf(key, values={}){
@@ -231,14 +231,7 @@ const canvasAssetAddCategoryBtn = document.getElementById('canvasAssetAddCategor
 const canvasAssetDropZone = document.getElementById('canvasAssetDropZone');
 const canvasAssetGrid = document.getElementById('canvasAssetGrid');
 const canvasAssetHoverPreview = document.getElementById('canvasAssetHoverPreview');
-const workflowTransferToggle = document.getElementById('workflowTransferToggle');
 const canvasLogToggle = document.getElementById('canvasLogToggle');
-const workflowTransferModal = document.getElementById('workflowTransferModal');
-const workflowTransferSub = document.getElementById('workflowTransferSub');
-const workflowExportMeta = document.getElementById('workflowExportMeta');
-const workflowImportInput = document.getElementById('workflowImportInput');
-const workflowImportDropZone = document.getElementById('workflowImportDropZone');
-const workflowExportLibraryBtn = document.getElementById('workflowExportLibraryBtn');
 const assetManagerModal = document.getElementById('assetManagerModal');
 const assetManagerBody = document.getElementById('assetManagerBody');
 function revealCanvasAssetControls(){
@@ -309,7 +302,6 @@ let chatModels = ['gpt-4o-mini'];
 let videoModels = [];
 let msChatModels = [];
 let apiProviders = [];
-let runningHubWorkflowCache = {};
 let managedProviderId = 'comfly';
 let localImageModels = [];
 let localChatModels = [];
@@ -356,9 +348,7 @@ const LOCAL_CANVAS_ASSET_LIBRARY_ID = '__local_assets__';
 let localCanvasAssetLibrary = {items:[], tree:null};
 let assetManagerTab = 'assets';
 let managerSelectedAssetIds = new Set();
-let managerSelectedWorkflowIds = new Set();
 let managerSelectedPromptIds = new Set();
-let activeCanvasWorkflowCategoryId = '';
 const activeCanvasTaskPolls = new Set();
 let hoveredConnectionId = '';
 let lastMouseBoard = {x: 0, y: 0};
@@ -396,10 +386,6 @@ const PROMPT_TEXT_MAX_LENGTH = 20000;
 const CLIENT_ID = 'canvas_' + Math.random().toString(36).slice(2);
 const ZOOM_PREVIEW_NODE_DEFAULT_SCALE = 1;
 const ZOOM_PREVIEW_NODE_MAX_SCALE = 1.15;
-const LTX_DIRECTOR_WORKFLOW = 'LTXDirectorv2-API.json';
-const LTX_DIRECTOR_WF_NODE = '46';
-const LTX_DIRECTOR_SEED_NODE = '94:28';
-const LTX_SEGMENT_COLORS = ['#e07b3a', '#3b82f6', '#10b981', '#8b5cf6', '#ec4899', '#f59e0b'];
 const CANVAS_EMOJIS = ['layers','sparkles','image','palette','wand-2','star','heart','rocket','flame','moon','cloud','leaf','gem','compass','pin','flag','bookmark','crown'];
 function renderCanvasIcon(icon, size = 14) {
     // 鏃х殑榛樿 emoji 鎴栫┖鍊奸兘鏄犲皠涓?layers
@@ -540,11 +526,39 @@ function uniqueModels(list){
 function defaultApiProviders(){
     return [{id:'comfly', name:'Comfly', base_url:'', enabled:true, image_models:imageModels, chat_models:chatModels, video_models:videoModels.length ? videoModels : DEFAULT_VIDEO_MODELS, has_key:false, key_preview:''}];
 }
-function isRunningHubProvider(provider){
-    const id = String(provider?.id || '').trim().toLowerCase();
-    const protocol = String(provider?.protocol || '').trim().toLowerCase();
-    const name = String(provider?.name || '').trim().toLowerCase();
-    return id === 'runninghub' || protocol === 'runninghub' || name === 'runninghub' || id === 'rh';
+const DEPRECATED_CANVAS_GENERATION_PROVIDER_IDS = new Set(['comfy', 'comfyui', 'runninghub', 'rh']);
+function isDeprecatedCanvasGenerationProvider(value){
+    return DEPRECATED_CANVAS_GENERATION_PROVIDER_IDS.has(String(value || '').trim().toLowerCase());
+}
+function stripDeprecatedCanvasGenerationFields(target){
+    /* 仅用于读取和迁移旧版画布数据：清理 ComfyUI、RunningHub 和旧版生图工作流字段，避免新保存继续写入已移除供应商。 */
+    if(!target || typeof target !== 'object') return target;
+    [
+        'mode','comfyMode','comfyWorkflow','comfyParams','comfyRandomActive','comfy_workflow','comfy_params','workflow_json','workflow',
+        'rhMode','rhPayment','webappId','workflowId','instanceType','rhAppInfo','rhWorkflowInfo','rhParams','rhRandomActive',
+        'runninghubApiKey','runninghubBaseUrl','runninghubWorkflowId','runninghubWorkflowJson','runninghubNodeMapping',
+        'runninghubTaskId','runninghubModel','workflowJson','workflowName','workflowInputs','workflowOutputs','workflowNodes',
+        'workflowTaskId','workflowHistory','inputNodeMapping','outputNodeMapping'
+    ].forEach(key => delete target[key]);
+    return target;
+}
+function markDeprecatedCanvasProviderNodeIfNeeded(node){
+    /* 仅用于读取和迁移旧版画布数据：旧供应商节点允许打开和删除，但不能再次提交任务。 */
+    if(!node || typeof node !== 'object') return false;
+    const removed = isDeprecatedCanvasGenerationProvider(node.type)
+        || node.type === 'ltxDirector'
+        || isDeprecatedCanvasGenerationProvider(node.provider)
+        || isDeprecatedCanvasGenerationProvider(node.apiProvider)
+        || Boolean(node.comfyWorkflow || node.workflowId || node.workflowJson || node.rhMode || node.webappId);
+    if(removed){
+        node.type = 'deprecatedProvider';
+        node.deprecatedProviderRemoved = true;
+        node.removedProviderMessage = '该节点对应的供应商已被移除';
+        node.w = node.w || 360;
+        node.h = node.h || 180;
+    }
+    stripDeprecatedCanvasGenerationFields(node);
+    return removed;
 }
 function normalizeProviderId(value){
     return String(value || '').trim().toLowerCase().replace(/[^a-z0-9_-]/g, '-').replace(/-+/g, '-').slice(0, 40);
@@ -1236,7 +1250,7 @@ function refreshOutputTimer(){
 }
 function serializableCanvasNode(node){
     const copy = {...(node || {})};
-    delete copy._ltxEditor;
+    stripDeprecatedCanvasGenerationFields(copy);
     delete copy.running;
     delete copy.runStatus;
     delete copy.runError;
@@ -1247,6 +1261,9 @@ function serializableCanvasNode(node){
 }
 function serializableCanvasNodes(list=nodes){
     return (list || []).map(serializableCanvasNode);
+}
+function migrateDeprecatedCanvasGenerationNodes(list=nodes){
+    (list || []).forEach(markDeprecatedCanvasProviderNodeIfNeeded);
 }
 async function saveCanvas(){
     if(!canvas || applyingRemoteCanvas) return;
@@ -1320,12 +1337,6 @@ async function loadConfig(){
         apiProviders = Array.isArray(cfg.api_providers) && cfg.api_providers.length ? cfg.api_providers : defaultApiProviders();
         models.nano = imageModels.find(m => m.toLowerCase().includes('nano')) || 'nano-banana-pro';
         models.gpt = imageModels.find(m => !m.toLowerCase().includes('nano')) || cfg.image_model || 'gpt-image-2';
-        runningHubWorkflowCache = {};
-        const rhProvider = apiProviders.find(p => p.id === 'runninghub');
-        const rhWorkflowIds = (rhProvider?.rh_workflows || []).map(item => String(item.workflowId || item.id || '').trim()).filter(Boolean);
-        await Promise.all(rhWorkflowIds.map(async workflowId => {
-            try { await ensureRunningHubWorkflow(workflowId); } catch(_) {}
-        }));
     } catch(e) {
         apiProviders = defaultApiProviders();
     }
@@ -1839,6 +1850,7 @@ async function openCanvas(id){
         canvas.logs = canvas.logs || [];
         nodes = canvas.nodes || [];
         connections = canvas.connections || [];
+        migrateDeprecatedCanvasGenerationNodes(nodes);
         viewport = localViewportForCanvas(canvas.id, canvas.viewport || {x:0, y:0, scale:1});
         canvas.viewport = {...viewport};
         lastCanvasUpdatedAt = Number(canvas.updated_at || 0);
@@ -1875,6 +1887,7 @@ function applyRemoteCanvasData(remote){
         canvas.logs = canvas.logs || [];
         nodes = canvas.nodes || [];
         connections = canvas.connections || [];
+        migrateDeprecatedCanvasGenerationNodes(nodes);
         viewport = localViewport;
         canvas.viewport = {...viewport};
         lastCanvasUpdatedAt = Number(canvas.updated_at || Date.now());
@@ -2345,528 +2358,6 @@ function addVideoNode(point){
         running:false
     });
 }
-function addRhNode(point){
-    const p = point || defaultPoint(180, 0);
-    return addNode({
-        id:uid('rh'),
-        type:'rh',
-        x:p.x,
-        y:p.y,
-        w:430,
-        h:0,
-        rhMode:'app',
-        rhPayment:'free',
-        webappId:'',
-        workflowId:'',
-        instanceType:'',
-        rhAppInfo:null,
-        rhWorkflowInfo:null,
-        rhParams:{},
-        inputs:[],
-        running:false
-    });
-}
-function defaultLTXSegment(start=0, length=120){
-    return {
-        id:uid('ltxseg'),
-        type:'text',
-        prompt:'',
-        start,
-        length,
-        color:LTX_SEGMENT_COLORS[0],
-        strength:1,
-        imageRef:null
-    };
-}
-function addLTXDirectorNode(point){
-    const p = point || defaultPoint(200, 0);
-    return addNode({
-        id:uid('ltxdir'),
-        type:'ltxDirector',
-        x:p.x,
-        y:p.y,
-        w:1000,
-        h:800,
-        globalPrompt:'',
-        durationFrames:120,
-        durationSeconds:5,
-        frameRate:24,
-        customWidth:0,
-        customHeight:0,
-        displayMode:'seconds',
-        useCustomAudio:false,
-        imgCompression:18,
-        epsilon:0.001,
-        divisibleBy:32,
-        noiseSeed:12,
-        ltxTimelineData:'',
-        ltxLocalPrompts:'',
-        ltxSegmentLengths:'',
-        ltxGuideStrength:'',
-        ltxSegments:[],
-        ltxSelectedSegId:'',
-        inputs:[],
-        running:false
-    });
-}
-async function getImageDimensions(url){
-    return new Promise((resolve, reject) => {
-        const img = new Image();
-        img.onload = () => resolve({width: img.naturalWidth, height: img.naturalHeight});
-        img.onerror = () => reject(new Error('鍥剧墖鍔犺浇澶辫触'));
-        img.src = url;
-    });
-}
-async function urlToBase64(url){
-    const res = await fetch(url);
-    if(!res.ok) throw new Error('鍥剧墖璇诲彇澶辫触');
-    const blob = await res.blob();
-    return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(reader.result);
-        reader.onerror = reject;
-        reader.readAsDataURL(blob);
-    });
-}
-function renderMsGenBody(node){
-    const wrap = document.createElement('div');
-    wrap.className = 'generator-body';
-    const modelKey = node.msgenModel || 'zimage';
-    const msModel = MS_GEN_MODELS[modelKey] || MS_GEN_MODELS.zimage;
-    const inputSources = generatorSources(node);
-    const ordered = orderedSources(node, inputSources);
-    const mediaInputs = ordered.filter(src => src.refs?.some(ref => ['image','video','audio'].includes(mediaKindForRef(ref))));
-    const promptInputs = ordered.filter(src => src.prompt && !src.refs?.length);
-    const referenceImages = ordered.flatMap(src => src.refs || []);
-    const isCustomMs = modelKey === 'custom';
-    const msUsesImages = Boolean(msModel.supportsImage || msModel.acceptsImage);
-    node.msCustomModel = node.msCustomModel || modelscopeImageModels()[0] || 'Tongyi-MAI/Z-Image-Turbo';
-    const msModelId = currentMsModelId(modelKey, node);
-    const msLoras = modelscopeLorasForModel(msModelId);
-    const selectedMsLora = msLoras.find(lora => String(lora.id || '').trim() === String(node.msLoraId || '').trim()) || msLoras[0];
-    const loraEnabled = Boolean(node.msLoraEnabled);
-    const loraStrength = node.msLoraStrength ?? Number(selectedMsLora?.strength ?? 0.8);
-    const msCount = Math.max(1, Math.min(8, Number(node.count || 1)));
-    wrap.innerHTML = `
-        <div class="ms-model-tabs">
-            ${Object.entries(MS_GEN_MODELS).map(([k,m]) =>
-                `<button type="button" data-model="${k}" class="${modelKey===k?'active':''}">${escapeHtml(m.labelKey ? tr(m.labelKey) : m.label)}</button>`
-            ).join('')}
-        </div>
-        <div class="ms-content">
-            <div class="prompt-list mt-2 mb-2"></div>
-            ${msUsesImages ? `
-            <div class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-2">${tr('canvas.images')}</div>
-            <div class="input-list ms-img-list"></div>
-            ` : ''}
-        </div>
-        <div class="ms-controls">
-            <div class="gen-settings">
-                ${isCustomMs ? `
-                <div class="gen-settings-row">
-                    <select class="select-lite ms-custom-model-select">${modelscopeImageModelOptions(node.msCustomModel)}</select>
-                </div>
-                ` : ''}
-                <div class="gen-settings-row">
-                    <select class="select-lite resolution compact-select" data-field="msResolution">
-                        <option value="1k">1K</option>
-                        <option value="2k">2K</option>
-                        <option value="4k">4K</option>
-                    <option value="custom">${tr('canvas.custom')}</option>
-                </select>
-                <select class="select-lite ratio compact-select" data-field="msRatio">
-                    <option value="square">1:1</option>
-                    <option value="portrait">2:3</option>
-                    <option value="landscape">3:2</option>
-                        <option value="portrait43">3:4</option>
-                        <option value="landscape43">4:3</option>
-                        <option value="story">9:16</option>
-                        <option value="wide">16:9</option>
-                        <option value="ultrawide">21:9</option>
-                        <option value="ultratall">9:21</option>
-                        <option value="custom">${tr('canvas.custom')}</option>
-                    </select>
-                    <div class="gen-count-row">
-                        <div class="gen-stepper">
-                            <button class="gen-step-btn" data-ms-step="-1" type="button" title="${tr('canvas.decrease')}" aria-label="${tr('canvas.decreaseCount')}"><i data-lucide="chevron-left" class="w-3.5 h-3.5"></i></button>
-                            <input class="gen-count-input ms-count-input" type="text" inputmode="numeric" pattern="[0-9]*" value="${msCount}">
-                            <button class="gen-step-btn" data-ms-step="1" type="button" title="${tr('canvas.increase')}" aria-label="${tr('canvas.increaseCount')}"><i data-lucide="chevron-right" class="w-3.5 h-3.5"></i></button>
-                        </div>
-                    </div>
-                </div>
-                <div class="gen-settings-row ms-custom-ratio-row" style="display:none">
-                    <label class="field">
-                        <div class="setting-title">${tr('canvas.ratioWidth')}</div>
-                        <input class="setting-input ms-custom-ratio-w-input" type="number" min="1" step="1" value="${escapeHtml(node.msCustomRatioWidth || '')}" placeholder="4">
-                    </label>
-                    <label class="field">
-                        <div class="setting-title">${tr('canvas.ratioHeight')}</div>
-                        <input class="setting-input ms-custom-ratio-h-input" type="number" min="1" step="1" value="${escapeHtml(node.msCustomRatioHeight || '')}" placeholder="3">
-                    </label>
-                </div>
-                <div class="gen-settings-row ms-custom-size-row" style="display:none">
-                    <label class="field">
-                        <div class="setting-title">${tr('canvas.width')}</div>
-                        <input class="setting-input ms-custom-w-input" type="number" min="64" step="64" value="${escapeHtml(node.msCustomWidth || '')}" placeholder="Auto">
-                    </label>
-                    <label class="field">
-                        <div class="setting-title">${tr('canvas.height')}</div>
-                        <input class="setting-input ms-custom-h-input" type="number" min="64" step="64" value="${escapeHtml(node.msCustomHeight || '')}" placeholder="Auto">
-                    </label>
-                    <button class="secondary-btn ms-fit-size-btn" type="button" style="height:32px;align-self:flex-end;padding:0 10px;font-size:11px">${tr('canvas.fitImageSize')}</button>
-                </div>
-                ${msLoras.length ? `
-                <div class="gen-settings-row">
-                    <label class="setting-check" style="cursor:pointer">
-                        <input type="checkbox" class="ms-lora-check" ${node.msLoraEnabled ? 'checked' : ''}>
-                        <span style="font-size:11px;font-weight:700">${tr('canvas.enableLora')}</span>
-                    </label>
-                </div>
-                ${node.msLoraEnabled ? `
-                <div class="gen-settings-row">
-                    <label class="field" style="flex:1">
-                        <div class="setting-title">LoRA</div>
-                        <select class="select-lite ms-lora-select">${modelscopeLoraOptions(msLoras, String(selectedMsLora?.id || '').trim())}</select>
-                    </label>
-                </div>
-                <div class="gen-settings-row">
-                    <label class="field" style="flex:1">
-                        <div class="setting-title" style="display:flex;justify-content:space-between">
-                            <span>${tr('canvas.loraStrength')}</span><span class="ms-lora-strength-val">${loraStrength.toFixed(2)}</span>
-                        </div>
-                        <input type="range" class="canvas-range ms-lora-strength-slider" min="0.1" max="1.0" step="0.05" value="${loraStrength}">
-                    </label>
-                </div>` : ''}` : ''}
-                ${!msLoras.length ? `<div class="gen-settings-row"><div style="color:var(--faint);font-size:11px;font-weight:700;line-height:1.45">${tr('canvas.noLoraForModel')}</div></div>` : ''}
-            </div>
-            <div class="gen-run-row">
-                <button class="gen-btn ${node.running?'running':''}" ${node.running?'disabled':''}>
-                    <i data-lucide="zap" class="w-4 h-4"></i>${node.running ? tr('canvas.generating') : tr('canvas.msGenerate')}
-                </button>
-                ${cascadeBtnHtml(node)}
-            </div>
-            ${retryBarHtml(node)}
-        </div>
-    `;
-    wrap.querySelectorAll('.ms-model-tabs button').forEach(btn => {
-        btn.onclick = e => {
-            e.stopPropagation();
-            if(node.msgenModel !== btn.dataset.model){
-                node.msLoraId = '';
-                delete node.msLoraStrength;
-                node.msLoraEnabled = false;
-            }
-            node.msgenModel = btn.dataset.model;
-            render();
-            scheduleSave();
-        };
-    });
-    const msCustomModelSelect = wrap.querySelector('.ms-custom-model-select');
-    if(msCustomModelSelect){
-        msCustomModelSelect.onmousedown = e => e.stopPropagation();
-        msCustomModelSelect.onclick = e => e.stopPropagation();
-        msCustomModelSelect.onchange = e => {
-            e.stopPropagation();
-            node.msCustomModel = e.target.value;
-            node.msLoraId = '';
-            delete node.msLoraStrength;
-            node.msLoraEnabled = false;
-            scheduleSave();
-            render();
-        };
-    }
-    const msRatioSelect = wrap.querySelector('[data-field="msRatio"]');
-    const msResolutionSelect = wrap.querySelector('[data-field="msResolution"]');
-    if(msRatioSelect && msResolutionSelect){
-        const msCustomRatioRow = wrap.querySelector('.ms-custom-ratio-row');
-        const msCustomSizeRow = wrap.querySelector('.ms-custom-size-row');
-        const msCustomRatioWInput = wrap.querySelector('.ms-custom-ratio-w-input');
-        const msCustomRatioHInput = wrap.querySelector('.ms-custom-ratio-h-input');
-        const msCustomWInput = wrap.querySelector('.ms-custom-w-input');
-        const msCustomHInput = wrap.querySelector('.ms-custom-h-input');
-        const msFitSizeBtn = wrap.querySelector('.ms-fit-size-btn');
-        if((!node.msCustomRatioWidth || !node.msCustomRatioHeight) && node.msCustomRatio) {
-            const raw = String(node.msCustomRatio || '');
-            if(raw.includes(':')){
-                const [w,h] = raw.split(':');
-                node.msCustomRatioWidth = node.msCustomRatioWidth || w;
-                node.msCustomRatioHeight = node.msCustomRatioHeight || h;
-            }
-        }
-        if((!node.msCustomWidth || !node.msCustomHeight) && node.msCustomSize) {
-            const parsed = parseSizeValue(node.msCustomSize);
-            node.msCustomWidth = node.msCustomWidth || parsed?.width || '';
-            node.msCustomHeight = node.msCustomHeight || parsed?.height || '';
-        }
-        const syncMsCustomSizeControls = () => {
-            const ratioValue = node.msRatio && [...msRatioSelect.options].some(opt => opt.value === node.msRatio) ? node.msRatio : 'square';
-            msRatioSelect.value = ratioValue;
-            msResolutionSelect.value = node.msResolution || '1k';
-            msRatioSelect.disabled = node.msResolution === 'custom';
-            msCustomRatioRow.style.display = node.msRatio === 'custom' ? 'flex' : 'none';
-            msCustomSizeRow.style.display = node.msResolution === 'custom' ? 'flex' : 'none';
-            msCustomRatioWInput.value = node.msCustomRatioWidth || '';
-            msCustomRatioHInput.value = node.msCustomRatioHeight || '';
-            msCustomWInput.value = node.msCustomWidth || '';
-            msCustomHInput.value = node.msCustomHeight || '';
-            if(msFitSizeBtn) msFitSizeBtn.disabled = !referenceImages.some(ref => ref.url);
-        };
-        msRatioSelect.onmousedown = e => e.stopPropagation();
-        msRatioSelect.onclick = e => e.stopPropagation();
-        msRatioSelect.onchange = e => {
-            e.stopPropagation();
-            node.msRatio = e.target.value;
-            if(node.msRatio !== 'custom') {
-                node.msCustomRatio = '';
-                node.msCustomRatioWidth = '';
-                node.msCustomRatioHeight = '';
-            }
-            syncMsCustomSizeControls();
-            scheduleSave();
-        };
-        msResolutionSelect.onmousedown = e => e.stopPropagation();
-        msResolutionSelect.onclick = e => e.stopPropagation();
-        msResolutionSelect.onchange = e => {
-            e.stopPropagation();
-            node.msResolution = e.target.value;
-            if(node.msResolution === 'custom') {
-                node.msRatio = '';
-            } else if(!node.msRatio) {
-                node.msRatio = 'square';
-                node.msCustomSize = '';
-                node.msCustomWidth = '';
-                node.msCustomHeight = '';
-            } else {
-                node.msCustomSize = '';
-                node.msCustomWidth = '';
-                node.msCustomHeight = '';
-            }
-            syncMsCustomSizeControls();
-            scheduleSave();
-        };
-        [msCustomRatioWInput, msCustomRatioHInput].forEach(input => {
-            input.onmousedown = e => e.stopPropagation();
-            input.onclick = e => e.stopPropagation();
-            input.oninput = () => {
-                node.msCustomRatioWidth = msCustomRatioWInput.value;
-                node.msCustomRatioHeight = msCustomRatioHInput.value;
-                node.msCustomRatio = node.msCustomRatioWidth && node.msCustomRatioHeight ? `${node.msCustomRatioWidth}:${node.msCustomRatioHeight}` : '';
-                node.msRatio = 'custom';
-                syncMsCustomSizeControls();
-                scheduleSave();
-            };
-        });
-        [msCustomWInput, msCustomHInput].forEach(input => {
-            input.onmousedown = e => e.stopPropagation();
-            input.onclick = e => e.stopPropagation();
-            input.oninput = () => {
-                node.msCustomWidth = msCustomWInput.value;
-                node.msCustomHeight = msCustomHInput.value;
-                node.msCustomSize = node.msCustomWidth && node.msCustomHeight ? `${node.msCustomWidth}x${node.msCustomHeight}` : '';
-                node.msResolution = 'custom';
-                node.msRatio = '';
-                syncMsCustomSizeControls();
-                scheduleSave();
-            };
-        });
-        if(msFitSizeBtn){
-            msFitSizeBtn.onmousedown = e => e.stopPropagation();
-            msFitSizeBtn.onclick = async e => {
-                e.stopPropagation();
-                const ref = referenceImages.find(item => item.url);
-                if(!ref) return;
-                try {
-                    const dims = await getImageDimensions(ref.url);
-                    node.msCustomWidth = dims.width;
-                    node.msCustomHeight = dims.height;
-                    node.msCustomSize = `${dims.width}x${dims.height}`;
-                    node.msResolution = 'custom';
-                    node.msRatio = '';
-                    syncMsCustomSizeControls();
-                    scheduleSave();
-                } catch(err) {
-                    showErrorModal(tr('canvas.imageReadFailed'));
-                }
-            };
-        }
-        syncMsCustomSizeControls();
-    }
-    const msCountInput = wrap.querySelector('.ms-count-input');
-    if(msCountInput){
-        msCountInput.onmousedown = e => e.stopPropagation();
-        msCountInput.onclick = e => e.stopPropagation();
-        msCountInput.oninput = e => {
-            node.count = Math.max(1, Math.min(8, Number(e.target.value) || 1));
-            scheduleSave();
-        };
-        msCountInput.onblur = e => { e.target.value = String(Math.max(1, Math.min(8, Number(node.count || 1)))); };
-        wrap.querySelectorAll('[data-ms-step]').forEach(btn => {
-            btn.onclick = e => {
-                e.stopPropagation();
-                const next = Math.max(1, Math.min(8, Number(node.count || 1) + Number(btn.dataset.msStep || 0)));
-                node.count = next;
-                msCountInput.value = String(next);
-                scheduleSave();
-            };
-        });
-    }
-    const msLoraCheck = wrap.querySelector('.ms-lora-check');
-    if(msLoraCheck){
-        msLoraCheck.onchange = e => {
-            node.msLoraEnabled = e.target.checked;
-            if(node.msLoraEnabled && !node.msLoraId && msLoras[0]){
-                node.msLoraId = String(msLoras[0].id || '').trim();
-                node.msLoraStrength = Number(msLoras[0].strength ?? 0.8);
-            }
-            scheduleSave();
-            render();
-        };
-    }
-    const msLoraSelect = wrap.querySelector('.ms-lora-select');
-    if(msLoraSelect){
-        msLoraSelect.onmousedown = e => e.stopPropagation();
-        msLoraSelect.onclick = e => e.stopPropagation();
-        msLoraSelect.onchange = e => {
-            node.msLoraId = e.target.value;
-            const picked = msLoras.find(lora => String(lora.id || '').trim() === node.msLoraId);
-            node.msLoraStrength = Number(picked?.strength ?? node.msLoraStrength ?? 0.8);
-            scheduleSave();
-            render();
-        };
-    }
-    const msLoraSlider = wrap.querySelector('.ms-lora-strength-slider');
-    if(msLoraSlider){
-        msLoraSlider.onmousedown = e => e.stopPropagation();
-        msLoraSlider.onclick = e => e.stopPropagation();
-        msLoraSlider.oninput = e => {
-            node.msLoraStrength = parseFloat(e.target.value);
-            const val = wrap.querySelector('.ms-lora-strength-val');
-            if(val) val.textContent = node.msLoraStrength.toFixed(2);
-            scheduleSave();
-        };
-    }
-    // Make entire setting-check pill clickable (not just the checkbox square)
-    wrap.querySelectorAll('.setting-check').forEach(pill => {
-        pill.onmousedown = e => e.stopPropagation();
-        const cb = pill.querySelector('input[type="checkbox"]');
-        if(!cb) return;
-        pill.onclick = e => {
-            e.stopPropagation();
-            e.preventDefault(); // prevent native label activation; we handle it
-            cb.checked = !cb.checked;
-            cb.dispatchEvent(new Event('change'));
-        };
-        cb.onclick = e => e.stopPropagation(); // prevent bubble 鈫?pill.onclick
-    });
-    if(msUsesImages){
-        const list = wrap.querySelector('.ms-img-list');
-        renderImageInputList(list, node, mediaInputs);
-    }
-    renderPromptPreview(wrap.querySelector('.prompt-list'), promptInputs);
-    wrap.querySelector('.gen-btn').onclick = e => { e.stopPropagation(); runCanvasGenerate(node.id); };
-    bindCascadeButtons(wrap, node.id);
-    return wrap;
-}
-async function runMsGenNode(nodeId, opts={}){
-    const node = nodes.find(n => n.id === nodeId);
-    if(!node || (node.running && !opts.cascade)) return;
-    const cascadeTargetId = cascadeTargetIdFromOptions(opts);
-    const sources = orderedSources(node, generatorSources(node));
-    const prompt = sources.map(s => s.prompt).filter(Boolean).join('\n\n');
-    const refs = imageRefsOnly(sources.flatMap(s => s.refs || []));
-    const modelKey = node.msgenModel || 'zimage';
-    const msModel = MS_GEN_MODELS[modelKey] || MS_GEN_MODELS.zimage;
-    const msModelId = currentMsModelId(modelKey, node);
-    const msLoras = modelscopeLorasForModel(msModelId);
-    if(!prompt){ alert(tr('canvas.needPrompt')); return; }
-    if(msModel.supportsImage && !refs.length){ alert(tr('canvas.needImage')); return; }
-    const count = Math.max(1, Math.min(8, Number(node.count || 1)));
-    let out = outputForNode(node, 460);
-    const pendingIds = Array.from({length:count}, () => uid('p'));
-    const run = runSnapshot(node, prompt, refs);
-    const size = apiImageSize(node.msRatio ?? 'square', node.msResolution || '1k', node.msCustomRatio || '', node.msCustomSize || '');
-    const parsed = parseSizeValue(size);
-    let width = Number(parsed?.width) || 1024;
-    let height = Number(parsed?.height) || 1024;
-    if(!parsed && node.msWidth && node.msHeight){
-        width = Number(node.msWidth) || width;
-        height = Number(node.msHeight) || height;
-    }
-    const requestSize = {width, height};
-    if(out) out._pending = [...(out._pending || []), ...pendingIds.map(id => makePendingForRun(id, run, node, {refs, requestSize, cascadeTargetId}))];
-    if(!opts.cascade){
-        node.running = true;
-        refreshRunNodes(node, out);
-        setTimeout(() => { node.running = false; refreshRunNodes(node, out); }, 2000);
-    }
-    else refreshRunNodes(node, out);
-    try {
-        const imageUrls = [];
-        if(msModel.supportsImage || msModel.acceptsImage){
-            for(const ref of refs.slice(0, CANVAS_REFERENCE_IMAGE_MAX)){
-                if(ref.url){
-                    try { imageUrls.push(await urlToBase64(ref.url)); }
-                    catch(e){ imageUrls.push(ref.url); }
-                }
-            }
-        }
-        const submitMs = async () => {
-            let apiBody;
-            if(modelKey === 'zimage'){
-                apiBody = { prompt, resolution: `${width}x${height}`, client_id: CLIENT_ID };
-            } else if(modelKey === 'qwen_edit'){
-                apiBody = { prompt, image_urls: imageUrls, resolution: `${width}x${height}`, client_id: CLIENT_ID };
-            } else if(modelKey === 'custom'){
-                apiBody = {
-                    prompt,
-                    model: node.msCustomModel || modelscopeImageModels()[0] || 'Tongyi-MAI/Z-Image-Turbo',
-                    image_urls: imageUrls,
-                    width,
-                    height,
-                    size: `${width}x${height}`,
-                    client_id: CLIENT_ID
-                };
-            } else {
-                apiBody = { prompt, model: msModel.modelId, image_urls: imageUrls, width, height, size:`${width}x${height}`, client_id: CLIENT_ID };
-            }
-            if(node.msLoraEnabled){
-                const selected = msLoras.find(lora => String(lora.id || '').trim() === String(node.msLoraId || '').trim()) || msLoras[0];
-                const loraId = String(selected?.id || node.msLoraId || '').trim();
-                if(!loraId) throw new Error(tr('canvas.noLoraBoundError'));
-                apiBody.loras = { [loraId]: Number(node.msLoraStrength ?? selected?.strength ?? 0.8) };
-            }
-            const res = await cascadeFetch(msModel.endpoint, {
-                method:'POST', headers:{'Content-Type':'application/json'},
-                body:JSON.stringify(apiBody)
-            }, {cascadeTargetId});
-            if(!res.ok) throw new Error(await responseErrorMessage(res, tr('canvas.msFailed')));
-            return await res.json();
-        };
-        const results = await Promise.all(Array.from({length:count}, submitMs));
-        const metas = collectRunMetas(out, pendingIds);
-        const outputUrls = results.map(data => data.url).filter(Boolean);
-        run.request = results[0] ? requestMetaFromResult(results[0]) : {};
-        if(out) out._pending = (out._pending || []).filter(p => !pendingIds.includes(p.id));
-        appendOutputImages(out, outputUrls, refs[0], metas);
-        mergeGeneratedOutputs(node, outputUrls, Boolean(opts.cascade));
-        addGenerationLog({run, outputs:outputUrls, runMs:Math.max(...metas.map(m => m.runMs || 0), 0)});
-        node.runStatus = 'done'; node.runError = '';
-        refreshRunNodes(node, out);
-        scheduleSave();
-    } catch(err){
-        const metas = collectRunMetas(out, pendingIds);
-        addGenerationLog({run, outputs:[], runMs:Math.max(...metas.map(m => m.runMs || 0), 0), error:err.message || String(err)});
-        if(out) out._pending = (out._pending || []).filter(p => !pendingIds.includes(p.id));
-        if(isCascadeAbortError(err)){
-            if(opts.cascade) throw err;
-            return;
-        }
-        node.runStatus = 'failed'; node.runError = err.message || String(err);
-        refreshRunNodes(node, out);
-        if(opts.cascade) throw err;
-        alert(err.message || tr('canvas.msFailed'));
-    }
-}
 function addOutputNode(point){
     const p = point || defaultPoint(260, 0);
     return addNode({id:uid('out'), type:'output', x:p.x, y:p.y, images:[]});
@@ -2892,7 +2383,6 @@ function linkCreateOptions(state){
             return [
                 {type:'generator', label:tr('canvas.apiGenerate'), icon:'wand-sparkles'},
                 {type:'msgen', label:tr('canvas.modelscopeGenerate'), icon:'cloud-lightning'},
-                {type:'rh', label:tr('canvas.rhGenerate'), icon:'workflow'},
                 {type:'video', label:tr('canvas.videoGenerateNode'), icon:'clapperboard'},
                 ...(node.type === 'output' ? [] : [{type:'llm', label:'LLM', icon:'message-square-text'}])
             ];
@@ -3263,7 +2753,6 @@ function createNodeByType(type, point){
     if(type === 'generator') return addGeneratorNode(point);
     if(type === 'msgen') return addMsGenNode(point);
     if(type === 'video') return addVideoNode(point);
-    if(type === 'rh') return addRhNode(point);
     if(type === 'output') return addOutputNode(point);
     return null;
 }
@@ -3276,7 +2765,6 @@ function menuAdd(type){
     if(type === 'generator') addGeneratorNode(menuPoint);
     if(type === 'msgen') addMsGenNode(menuPoint);
     if(type === 'video') addVideoNode(menuPoint);
-    if(type === 'rh') addRhNode(menuPoint);
     if(type === 'output') addOutputNode(menuPoint);
 }
 function mediaKindForUpload(file){
@@ -5440,9 +4928,6 @@ function pendingPreviewSizeFromRefs(refs=[]){
 function pendingPreviewSizeForRun(node, options={}){
     const requestSize = normalizedPendingPreviewSize(options.requestSize) || pendingPreviewSizeFromSizeString(options.requestSize);
     if(requestSize) return requestSize;
-    if(node?.type === 'comfy' && (node.mode || 'text') === 'text'){
-        return normalizedPendingPreviewSize({w:Number(node.width || 1024), h:Number(node.height || 1024)});
-    }
     return pendingPreviewSizeFromRefs(options.refs || []);
 }
 function pendingOutputStyle(pending){
@@ -5502,19 +4987,14 @@ function restoreOutputScrolls(state){
     });
 }
 function isNodeControl(target){
-    return !!target.closest('textarea, input, select, option, button, audio, video, [contenteditable="true"], .seg, .gen-btn, .comfy-run, .input-item, .blank-image, .mode-tabs, .ms-model-tabs, .llm-provider, .llm-output, .llm-chat-log, .llm-bubble, .llm-pane-resizer, .loop-preview, .ltx-director-timeline-host, .pr-wrapper, .pr-toolbar, .pr-viewport, .pr-canvas, .pr-player-controls, .pr-prompt-area');
-}
-function destroyLTXEditor(node){
-    if(!node?._ltxEditor) return;
-    try { node._ltxEditor.destroy?.(); } catch(e) {}
-    node._ltxEditor = null;
+    return !!target.closest('textarea, input, select, option, button, audio, video, [contenteditable="true"], .seg, .gen-btn, .input-item, .blank-image, .mode-tabs, .ms-model-tabs, .llm-provider, .llm-output, .llm-chat-log, .llm-bubble, .llm-pane-resizer, .loop-preview, .pr-wrapper, .pr-toolbar, .pr-viewport, .pr-canvas, .pr-player-controls, .pr-prompt-area');
 }
 function isNodeDragSurface(target){
     return !isNodeControl(target) && !target.closest('.port, .resize-handle, .output-img-wrap');
 }
 function renderNode(node){
+    markDeprecatedCanvasProviderNodeIfNeeded(node);
     normalizeApiNodeLayout(node);
-    if(node.type === 'rh' && Number(node.h) === 560) delete node.h;
     const el = document.createElement('div');
     const size = defaultNodeSize(node.type);
     const hasFixedSize = Boolean(node.h || size.h);
@@ -5538,10 +5018,10 @@ function renderNode(node){
         if(node.type === 'output') openOutputNodeMenu(node.id, e.clientX, e.clientY);
         else openGeneratorNodeMenu(node.id, e.clientX, e.clientY);
     };
-    const title = node.type === 'image' ? 'Image' : node.type === 'prompt' ? 'Prompt' : node.type === 'loop' ? tr('canvas.loopNode') : node.type === 'promptGroup' ? 'Prompts' : node.type === 'group' ? 'Group' : node.type === 'output' ? 'Output' : node.type === 'llm' ? 'LLM' : node.type === 'comfy' ? tr('canvas.comfyGenerate') : node.type === 'ltxDirector' ? tr('canvas.ltxDirector') : node.type === 'rh' ? 'RunningHub' : node.type === 'msgen' ? tr('canvas.modelscopeGenerate') : node.type === 'video' ? tr('canvas.videoGenerateNode') : tr('canvas.apiGenerate');
+    const title = node.type === 'image' ? 'Image' : node.type === 'prompt' ? 'Prompt' : node.type === 'loop' ? tr('canvas.loopNode') : node.type === 'promptGroup' ? 'Prompts' : node.type === 'group' ? 'Group' : node.type === 'output' ? 'Output' : node.type === 'llm' ? 'LLM' : node.type === 'deprecatedProvider' ? '已移除供应商' : node.type === 'msgen' ? tr('canvas.modelscopeGenerate') : node.type === 'video' ? tr('canvas.videoGenerateNode') : tr('canvas.apiGenerate');
     const displayTitle = node.type === 'image' && node.url ? nodeTitleForMedia(node) : title;
     // 澶辫触寰界珷鍙湪涓€閿繍琛屾ā寮忎腑鏄剧ず锛屽崟鑺傜偣澶辫触宸查€氳繃 alert 鎻愮ず
-    const showStatus = ['generator','msgen','ltxDirector','llm','video','rh'].includes(node.type) && node.runStatus
+    const showStatus = ['generator','msgen','llm','video'].includes(node.type) && node.runStatus
         && (node.runStatus !== 'failed' || node._cascadeFailed);
     const statusHtml = showStatus ? (() => {
         const label = { queued:'排队中', running:'运行中', done:'完成', failed:'失败' }[node.runStatus] || '';
@@ -5695,7 +5175,9 @@ function renderNode(node){
     if(node.type === 'generator') body.appendChild(renderGeneratorBody(node));
     if(node.type === 'msgen') body.appendChild(renderMsGenBody(node));
     if(node.type === 'video') body.appendChild(renderVideoBody(node));
-    if(node.type === 'rh') body.appendChild(renderRhBody(node));
+    if(node.type === 'deprecatedProvider') {
+        body.innerHTML = `<div class="deprecated-provider-node"><i data-lucide="circle-off" class="w-6 h-6"></i><div class="deprecated-provider-title">${escapeHtml(node.removedProviderMessage || '该节点对应的供应商已被移除')}</div><div class="deprecated-provider-sub">旧节点已保留用于查看和删除，不能继续提交生成任务。</div></div>`;
+    }
     if(node.type === 'output') {
         const pendingHtml = (node._pending || []).map(p =>
             renderPendingOutput(p)
@@ -5715,8 +5197,8 @@ function renderNode(node){
         if(e.button !== 0 || !isNodeDragSurface(e.target)) return;
         startNodeDrag(e, node);
     };
-    const canInput = ['generator','output','llm','msgen','video','rh'].includes(node.type) || (node.type === 'loop' && (node.imageInput || node.showPrompt));
-    const canOutput = ['image','prompt','loop','group','promptGroup','generator','llm','msgen','video','rh','output'].includes(node.type);
+    const canInput = ['generator','output','llm','msgen','video'].includes(node.type) || (node.type === 'loop' && (node.imageInput || node.showPrompt));
+    const canOutput = ['image','prompt','loop','group','promptGroup','generator','llm','msgen','video','output'].includes(node.type);
     if(canInput) el.insertAdjacentHTML('beforeend', `<div class="port in" title="${tr('canvas.connectHere')}"></div>`);
     if(canOutput) el.insertAdjacentHTML('beforeend', `<div class="port out" title="${tr('canvas.dragConnect')}"></div>`);
     el.insertAdjacentHTML('beforeend', `<div class="resize-handle" title="${tr('canvas.resize')}"></div>`);
@@ -5886,8 +5368,7 @@ function defaultNodeSize(type){
     if(type === 'generator') return {w:380, h:0};
     if(type === 'msgen') return {w:380, h:0};
     if(type === 'video') return {w:400, h:0};
-    if(type === 'rh') return {w:430, h:0};
-    if(type === 'ltxDirector') return {w:1000, h:800};
+    if(type === 'deprecatedProvider') return {w:360, h:180};
     if(type === 'output') return {w:460, h:0};
     return {w:260, h:0};
 }
@@ -6144,7 +5625,7 @@ function activeCanvasAssetLibrary(){
 function canvasAssetCategories(){
     return (activeCanvasAssetLibrary()?.categories || canvasAssetLibrary.categories || []).filter(cat => {
         const type = String(cat.type || 'image').toLowerCase();
-        return type === 'image' || type === 'media' || type === 'workflow';
+        return type === 'image' || type === 'media';
     });
 }
 function canvasMediaCategories(){
@@ -6161,24 +5642,16 @@ function activeCanvasMediaCategory(){
     const cats = canvasMediaCategories();
     return cats.find(cat => cat.id === activeCanvasAssetCategoryId) || cats[0] || null;
 }
-function canvasWorkflowCategories(){
-    return (activeCanvasAssetLibrary()?.categories || canvasAssetLibrary.categories || []).filter(cat => String(cat.type || '').toLowerCase() === 'workflow');
-}
-function activeCanvasWorkflowCategory(){
-    const cats = canvasWorkflowCategories();
-    return cats.find(cat => cat.id === activeCanvasWorkflowCategoryId) || cats[0] || null;
-}
 function currentCanvasAssetItem(itemId){
     return (activeCanvasAssetCategory()?.items || []).find(item => item.id === itemId)
-        || (activeCanvasWorkflowCategory()?.items || []).find(item => item.id === itemId)
         || null;
 }
 function canvasAssetItemKind(item){
     const explicit = String(item?.kind || item?.mediaKind || '').toLowerCase();
-    if(['image','video','audio','text','file','workflow'].includes(explicit)) return explicit;
-    if(String(item?.type || '').toLowerCase() === 'workflow') return 'workflow';
+    if(['image','video','audio','text','file'].includes(explicit)) return explicit;
+    if(String(item?.type || '').toLowerCase() === 'workflow') return 'file';
     const url = String(item?.url || item || '');
-    if(/\.(json|zip)(\?|#|$)/i.test(url)) return 'workflow';
+    if(/\.(json|zip)(\?|#|$)/i.test(url)) return 'file';
     if(isVideoUrl(url)) return 'video';
     if(isAudioUrl(url)) return 'audio';
     return 'image';
@@ -6193,9 +5666,7 @@ function canvasAssetThumbHtml(item){
     if(kind === 'audio'){
         return `<div class="canvas-asset-thumb-wrap canvas-asset-file-thumb"><i data-lucide="file-audio" class="w-6 h-6"></i><span>${escapeHtml(item?.name || 'audio')}</span></div>`;
     }
-    if(kind === 'workflow'){
-        return `<div class="canvas-asset-thumb-wrap canvas-asset-file-thumb workflow-thumb"><i data-lucide="workflow" class="w-6 h-6"></i><span>${escapeHtml(item?.name || 'workflow')}</span></div>`;
-    }
+    if(kind === 'file') return `<div class="canvas-asset-thumb-wrap canvas-asset-file-thumb"><i data-lucide="file" class="w-6 h-6"></i><span>${escapeHtml(item?.name || 'file')}</span></div>`;
     return `<div class="canvas-asset-thumb-wrap">${canvasPreviewImgHtml(thumbUrl, 512, 'class="canvas-asset-thumb" alt=""')}</div>`;
 }
 function positionCanvasAssetHoverPreview(event){
@@ -6212,7 +5683,7 @@ function positionCanvasAssetHoverPreview(event){
 }
 function showCanvasAssetHoverPreview(event, item){
     if(!canvasAssetHoverPreview || !item?.url) return;
-    if(canvasAssetItemKind(item) === 'workflow') return;
+    if(canvasAssetItemKind(item) === 'file') return;
     const img = canvasAssetHoverPreview.querySelector('img');
     const video = canvasAssetHoverPreview.querySelector('video');
     const isVideo = canvasAssetItemKind(item) === 'video';
@@ -6268,7 +5739,6 @@ async function deleteCanvasAssetItem(itemId){
     const data = await fetch(`/api/asset-library/items/${encodeURIComponent(item.id)}`, {method:'DELETE'}).then(r => r.json());
     canvasAssetLibrary = data.library || canvasAssetLibrary;
     managerSelectedAssetIds.delete(item.id);
-    managerSelectedWorkflowIds.delete(item.id);
     hideCanvasAssetHoverPreview();
     renderCanvasAssetLibrary();
     if(assetManagerModal?.classList.contains('open')) renderAssetManager();
@@ -6304,19 +5774,14 @@ function renderCanvasAssetLibrary(){
     const cats = canvasAssetCategories();
     if(!cats.some(cat => cat.id === activeCanvasAssetCategoryId)) activeCanvasAssetCategoryId = cats[0]?.id || '';
     if(canvasAssetCategorySelect){
-        canvasAssetCategorySelect.innerHTML = cats.map(cat => {
-            const type = String(cat.type || 'image').toLowerCase();
-            const prefix = type === 'workflow' ? '工作流 / ' : '';
-            return `<option value="${escapeAttr(cat.id)}" ${cat.id === activeCanvasAssetCategoryId ? 'selected' : ''}>${escapeHtml(prefix + (cat.name || '默认分组'))}</option>`;
-        }).join('');
+        canvasAssetCategorySelect.innerHTML = cats.map(cat => `<option value="${escapeAttr(cat.id)}" ${cat.id === activeCanvasAssetCategoryId ? 'selected' : ''}>${escapeHtml(cat.name || '默认分组')}</option>`).join('');
     }
     const cat = activeCanvasAssetCategory();
-    const catType = String(cat?.type || 'image').toLowerCase();
     const localMode = canvasAssetLibraryIsLocal();
     if(canvasAssetAddCategoryBtn) canvasAssetAddCategoryBtn.disabled = localMode;
     if(canvasAssetDropZone) {
         canvasAssetDropZone.style.display = localMode ? 'none' : 'flex';
-        canvasAssetDropZone.textContent = catType === 'workflow' ? '宸ヤ綔娴佸垎缁勬敮鎸佷笂浼?瀵煎嚭宸ヤ綔娴侊紝鍙屽嚮鍗＄墖瀵煎叆鐢诲竷' : '鎷栧叆鍥剧墖鎴栬緭鍑轰繚瀛樺埌褰撳墠鍒嗙粍';
+        canvasAssetDropZone.textContent = '拖入图片或输出结果，保存到当前分组';
     }
     const items = cat?.items || [];
     canvasAssetGrid.innerHTML = items.length ? items.map(item => `
@@ -6339,8 +5804,7 @@ function renderCanvasAssetLibrary(){
             event.dataTransfer.setData('text/plain', card.dataset.url || '');
         });
         card.addEventListener('dblclick', () => {
-            if(card.dataset.kind === 'workflow') importWorkflowAssetUrl(card.dataset.url, card.dataset.name || 'workflow');
-            else createImageCardFromUrl(card.dataset.url, defaultPoint(0, 0), card.dataset.name || 'asset');
+            createImageCardFromUrl(card.dataset.url, defaultPoint(0, 0), card.dataset.name || 'asset');
         });
         const item = items.find(entry => entry.id === card.dataset.assetId);
         card.addEventListener('mouseenter', event => showCanvasAssetHoverPreview(event, item));
@@ -6366,7 +5830,6 @@ function renderCanvasAssetLibrary(){
 }
 function toggleCanvasAssetLibrary(open=!canvasAssetLibraryOpen){
     canvasAssetLibraryOpen = !!open;
-    if(canvasAssetLibraryOpen && workflowTransferModal?.classList.contains('open')) closeWorkflowTransferModal();
     canvasAssetPanel?.classList.toggle('open', canvasAssetLibraryOpen);
     canvasAssetToggle?.classList.toggle('active', canvasAssetLibraryOpen);
     if(!canvasAssetLibraryOpen) hideCanvasAssetHoverPreview();
@@ -6376,7 +5839,6 @@ async function addUrlToCanvasAssetLibrary(url, name=''){
     if(canvasAssetLibraryIsLocal()){ setStatus('鏈湴绱犳潗璇峰湪绱犳潗搴撶鐞嗕腑涓婁紶'); return; }
     const cat = activeCanvasAssetCategory();
     if(!cat){ setStatus('璇峰厛鍒涘缓璧勪骇鍒嗙粍'); return; }
-    if(String(cat.type || 'image').toLowerCase() === 'workflow'){ setStatus('当前是工作流分组，请切换到图片分组保存媒体'); return; }
     const data = await fetch('/api/asset-library/items', {
         method:'POST',
         headers:{'Content-Type':'application/json'},
@@ -6416,7 +5878,6 @@ function renderAssetManager(){
     if(!assetManagerBody) return;
     document.querySelectorAll('[data-manager-tab]').forEach(btn => btn.classList.toggle('active', btn.dataset.managerTab === assetManagerTab));
     if(assetManagerTab === 'prompts') renderPromptAssetManager();
-    else if(assetManagerTab === 'workflows') renderWorkflowAssetManager();
     else renderImageAssetManager();
     refreshIcons();
 }
@@ -6473,61 +5934,6 @@ function renderImageAssetManager(){
         const data = await uploadFilesToLibrary(upload.files, library.id, cat.id);
         if(data?.library) canvasAssetLibrary = data.library;
         managerSelectedAssetIds.clear();
-        renderAssetManager();
-        renderCanvasAssetLibrary();
-    });
-}
-function workflowAssetThumbHtml(item){
-    return `<div class="asset-manager-card-text workflow-manager-thumb"><i data-lucide="workflow" class="w-6 h-6"></i><span>${escapeHtml(item?.format === 'json' ? 'JSON 工作流' : 'ZIP 工作流包')}</span></div>`;
-}
-function renderWorkflowAssetManager(){
-    const libs = canvasAssetLibraries();
-    const library = activeCanvasAssetLibrary();
-    const cats = canvasWorkflowCategories();
-    if(!cats.some(cat => cat.id === activeCanvasWorkflowCategoryId)) activeCanvasWorkflowCategoryId = cats[0]?.id || '';
-    const cat = activeCanvasWorkflowCategory();
-    const items = cat?.items || [];
-    assetManagerBody.innerHTML = `
-        <div class="asset-manager-side">
-            <div class="asset-manager-tools">
-                <button type="button" class="primary" data-manager-workflow-cat-new><i data-lucide="folder-plus" class="w-4 h-4"></i><span>新分组</span></button>
-            </div>
-            <div class="asset-manager-list">
-                ${libs.map(lib => `<button type="button" class="${lib.id === activeCanvasAssetLibraryId ? 'active' : ''}" data-manager-workflow-lib="${escapeAttr(lib.id)}"><span>${escapeHtml(lib.name || '资产库')}</span><small>${(lib.categories || []).filter(c => String(c.type || '') === 'workflow').reduce((n,c)=>n+(c.items || []).length,0)}</small></button>`).join('')}
-            </div>
-            <div class="asset-manager-list">
-                ${cats.map(item => `<button type="button" class="${item.id === activeCanvasWorkflowCategoryId ? 'active' : ''}" data-manager-workflow-cat="${escapeAttr(item.id)}"><span>${escapeHtml(item.name || '工作流')}</span><small>${(item.items || []).length}</small></button>`).join('') || '<div class="canvas-asset-empty">暂无工作流分组</div>'}
-            </div>
-        </div>
-        <div class="asset-manager-main">
-            <div class="asset-manager-tools">
-                <label class="${!cat ? 'disabled' : ''}"><i data-lucide="upload" class="w-4 h-4"></i><span>上传工作流</span><input id="managerWorkflowUpload" type="file" multiple accept=".json,.zip,application/json,application/zip" ${!cat ? 'disabled' : ''}></label>
-                <button type="button" ${!managerSelectedWorkflowIds.size ? 'disabled' : ''} data-manager-workflow-export><i data-lucide="download" class="w-4 h-4"></i><span>瀵煎嚭鎵€閫?${managerSelectedWorkflowIds.size ? managerSelectedWorkflowIds.size : ''}</span></button>
-                <button type="button" class="danger" ${managerSelectedWorkflowIds.size ? '' : 'disabled'} data-manager-workflow-delete><i data-lucide="trash-2" class="w-4 h-4"></i><span>鍒犻櫎鎵€閫?${managerSelectedWorkflowIds.size ? managerSelectedWorkflowIds.size : ''}</span></button>
-            </div>
-            <div class="asset-manager-grid">
-                ${items.length ? items.map(item => `<div class="asset-manager-card">
-                    <input type="checkbox" data-manager-workflow-check="${escapeAttr(item.id)}" ${managerSelectedWorkflowIds.has(item.id) ? 'checked' : ''}>
-                    ${workflowAssetThumbHtml(item)}
-                    <span class="asset-manager-card-name" title="${escapeAttr(item.name || '')}">${escapeHtml(item.name || 'workflow')}</span>
-                    <div class="asset-manager-card-actions">
-                        <button type="button" data-manager-workflow-rename="${escapeAttr(item.id)}"><i data-lucide="pencil" class="w-3.5 h-3.5"></i><span>閲嶅懡鍚?/span></button>
-                        <button type="button" class="danger" data-manager-workflow-remove="${escapeAttr(item.id)}"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i><span>鍒犻櫎</span></button>
-                    </div>
-                </div>`).join('') : `<div class="canvas-asset-empty">褰撳墠鍒嗙粍涓虹┖</div>`}
-            </div>
-        </div>
-    `;
-    const upload = document.getElementById('managerWorkflowUpload');
-    upload?.addEventListener('change', async () => {
-        if(!upload.files?.length || !cat) return;
-        const form = new FormData();
-        form.append('library_id', library?.id || '');
-        form.append('category_id', cat.id || '');
-        [...upload.files].forEach(file => form.append('files', file));
-        const data = await fetch('/api/asset-library/workflows/upload', {method:'POST', body:form}).then(r => r.json());
-        canvasAssetLibrary = data.library || canvasAssetLibrary;
-        managerSelectedWorkflowIds.clear();
         renderAssetManager();
         renderCanvasAssetLibrary();
     });
@@ -8171,594 +7577,9 @@ function renderVideoImageInputs(list, node, imageInputs){
     });
     refreshIcons();
 }
-function renderRhBody(node){
-    const wrap = document.createElement('div');
-    wrap.className = 'rh-body';
-    node.rhParams = node.rhParams || {};
-    const entry = ensureRhNodeSelection(node);
-    const selectedRef = rhSelectedEntryRef(node);
-    const media = rhMediaSources(node);
-    const fields = rhActiveFields(node);
-    const mode = selectedRef?.kind || rhCurrentKind(node);
-    const selectedId = selectedRef?.id || (mode === 'workflow' ? (node.workflowId || '') : (node.webappId || ''));
-    const selectedKey = selectedRef ? runningHubEntryKey(selectedRef.kind, selectedRef.id) : '';
-    const entryNote = entry?.note || entry?.description || '';
-    wrap.innerHTML = `
-        <div class="rh-top">
-            <label class="field rh-webapp-field">
-                <div class="setting-title">RunningHub 閰嶇疆</div>
-                <select class="select-lite rh-entry-select">${rhEntryOptions(selectedKey)}</select>
-            </label>
-            <label class="field rh-payment-field">
-                <div class="setting-title">Key</div>
-                <select class="select-lite rh-payment-select">${rhPaymentOptions(node)}</select>
-            </label>
-            <label class="field rh-machine-field">
-                <div class="setting-title">鏄惧瓨</div>
-                <select class="select-lite rh-machine-select">
-                    <option value="" ${!node.instanceType ? 'selected' : ''}>24G</option>
-                    <option value="plus" ${node.instanceType === 'plus' ? 'selected' : ''}>48G</option>
-                </select>
-            </label>
-        </div>
-        <div class="rh-prompt-list"></div>
-        <div class="rh-media-section">
-            <div class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-2">${tr('canvas.rhInputs')}</div>
-            <div class="input-list rh-input-list"></div>
-        </div>
-        <div class="rh-param-head">
-            <span>${mode === 'workflow' ? tr('canvas.rhWorkflowParams') : tr('canvas.rhParams')}</span>
-            <span>${fields.length}</span>
-        </div>
-        <div class="rh-param-list"></div>
-        <div class="gen-run-row">
-            <button class="gen-btn rh-run ${node.running ? 'running' : ''}" ${node.running ? 'disabled' : ''}><i data-lucide="workflow" class="w-4 h-4"></i>${node.running ? tr('canvas.rhRunning') : tr('canvas.rhRun')}</button>
-            ${cascadeBtnHtml(node)}
-        </div>
-        ${retryBarHtml(node)}
-    `;
-    const entrySelect = wrap.querySelector('.rh-entry-select');
-    if(entrySelect) entrySelect.onchange = e => {
-        const parsed = parseRunningHubEntryKey(e.target.value);
-        const ref = parsed ? runningHubAllEntries().find(item => item.kind === parsed.kind && item.id === parsed.id) : null;
-        if(ref) applyRhEntrySelection(node, ref);
-        node.rhParams = {};
-        node.rhRandomValues = {};
-        render();
-        scheduleSave();
-    };
-    const paymentSelect = wrap.querySelector('.rh-payment-select');
-    if(paymentSelect) paymentSelect.onchange = e => {
-        node.rhPayment = e.target.value === 'wallet' ? 'wallet' : 'free';
-        scheduleSave();
-    };
-    const machineSelect = wrap.querySelector('.rh-machine-select');
-    if(machineSelect) machineSelect.onchange = e => {
-        node.instanceType = e.target.value === 'plus' ? 'plus' : '';
-        scheduleSave();
-    };
-    renderRhPromptFields(wrap.querySelector('.rh-prompt-list'), node, fields);
-    renderRhInputs(wrap.querySelector('.rh-input-list'), node, media);
-    renderRhParams(wrap.querySelector('.rh-param-list'), node, fields, media);
-    wrap.querySelector('.rh-run').onclick = e => { e.stopPropagation(); runCanvasGenerate(node.id); };
-    bindCascadeButtons(wrap, node.id);
-    refreshIcons();
-    return wrap;
-}
-function renderRhInputs(list, node, media){
-    if(!list) return;
-    const refs = media.refs || [];
-    if(!refs.length){
-        list.innerHTML = `<div class="text-[11px] text-gray-300 py-2">${tr('canvas.groupEmpty')}</div>`;
-        return;
-    }
-    list.innerHTML = '';
-    refs.forEach((ref, i) => {
-        const kind = mediaKindForRef(ref);
-        const item = document.createElement('div');
-        item.className = 'input-item rh-input-item';
-        item.innerHTML = `<span class="input-index">${i + 1}</span>${rhMediaPreviewHtml(ref, kind)}<span class="input-label">${escapeHtml(nodeTitleForMedia({mediaKind:kind}))}</span>`;
-        list.appendChild(item);
-    });
-}
-function renderRhPromptFields(container, node, fields){
-    if(!container) return;
-    const prompts = (fields || []).filter(field => rhFieldRole(field) === 'prompt');
-    if(!prompts.length){
-        container.innerHTML = '';
-        return;
-    }
-    container.innerHTML = prompts.map(field => {
-        const key = rhParamKey(field.nodeId, field.fieldName);
-        const label = field.label || field.fieldName || 'Prompt';
-        const value = rhFieldValue(node, field, rhMediaSources(node));
-        return `<label class="field rh-prompt-field">
-            <div class="setting-title">${escapeHtml(label)}</div>
-            <textarea class="setting-input rh-param-input" data-rh-param="${escapeAttr(key)}" data-rh-role="prompt">${escapeHtml(value)}</textarea>
-        </label>`;
-    }).join('');
-    bindRhParamControls(container, node);
-}
-function renderRhParams(container, node, fields, media){
-    if(!container) return;
-    const params = (fields || []).filter(field => {
-        const role = rhFieldRole(field);
-        return !['image','video','audio','prompt'].includes(role);
-    });
-    if(!params.length){
-        container.innerHTML = `<div class="rh-empty">${tr('canvas.rhNoParams')}</div>`;
-        return;
-    }
-    container.innerHTML = params.map((field, i) => {
-        const key = rhParamKey(field.nodeId, field.fieldName);
-        const kind = rhFieldRole(field);
-        const options = rhExtractFieldOptions(field);
-        const value = rhFieldValue(node, field, media);
-        const label = field.label || field.fieldName || `Field ${i + 1}`;
-        const valueText = String(value ?? '');
-        const wide = kind === 'text' && (String(label).length > 18 || valueText.length > 28);
-        return renderRhSettingField(node, field, key, kind, label, value, options, wide);
-    }).join('');
-    bindRhParamControls(container, node);
-}
-function renderRhSettingField(node, field, key, kind, label, value, options, wide=false){
-    const safeLabel = escapeHtml(label);
-    if(kind === 'boolean'){
-        const active = String(value).toLowerCase() === 'true';
-        return `<div class="gen-settings-row rh-param-row ${wide ? 'wide' : ''}">
-            <button type="button" class="setting-check ${active ? 'active' : ''}" data-rh-param="${escapeAttr(key)}" data-rh-type="boolean"><span class="check-dot"></span>${safeLabel}</button>
-        </div>`;
-    }
-    if(kind === 'slider'){
-        const min = Number.isFinite(Number(field.min)) ? Number(field.min) : 0;
-        const max = Number.isFinite(Number(field.max)) && Number(field.max) > min ? Number(field.max) : 1;
-        const step = Number.isFinite(Number(field.step)) && Number(field.step) > 0 ? Number(field.step) : 0.01;
-        const numericValue = Number.isFinite(Number(value)) ? Number(value) : min;
-        return `<div class="gen-settings-row rh-param-row ${wide ? 'wide' : ''}">
-            <label class="field" style="flex:1">
-                <div class="setting-title" style="display:flex;justify-content:space-between"><span>${safeLabel}</span><span class="rh-param-val">${escapeHtml(numericValue)}</span></div>
-                <input type="range" class="canvas-range rh-param-input" data-rh-param="${escapeAttr(key)}" data-rh-type="slider" min="${escapeAttr(min)}" max="${escapeAttr(max)}" step="${escapeAttr(step)}" value="${escapeAttr(numericValue)}">
-            </label>
-        </div>`;
-    }
-    if(options?.length){
-        return `<div class="gen-settings-row rh-param-row ${wide ? 'wide' : ''}">
-            <label class="field"><div class="setting-title">${safeLabel}</div><select class="select-lite rh-param-input" data-rh-param="${escapeAttr(key)}" data-rh-type="select" style="width:100%">${options.map(opt => `<option value="${escapeAttr(opt)}" ${String(value) === String(opt) ? 'selected' : ''}>${escapeHtml(opt)}</option>`).join('')}</select></label>
-        </div>`;
-    }
-    if(rhRandomEnabled(field)){
-        const active = rhRandomActive(node, key);
-        return `<div class="gen-settings-row rh-param-row ${wide ? 'wide' : ''}">
-            <div class="random-field">
-                <label class="field"><div class="setting-title">${safeLabel}</div><input class="setting-input rh-param-input" type="number" data-rh-param="${escapeAttr(key)}" data-rh-type="number" value="${escapeAttr(value)}" ${active ? 'disabled' : ''}></label>
-                <button class="tool-btn random-btn ${active ? 'active' : ''}" type="button" data-rh-random="${escapeAttr(key)}" title="${active ? '随机已开启，点击关闭' : '随机已关闭，点击开启'}"><i data-lucide="dice-5" class="w-4 h-4"></i></button>
-            </div>
-        </div>`;
-    }
-    const inputType = kind === 'number' ? 'number' : 'text';
-    return `<div class="gen-settings-row rh-param-row ${wide ? 'wide' : ''}">
-        <label class="field"><div class="setting-title">${safeLabel}</div><input class="setting-input rh-param-input" type="${inputType}" data-rh-param="${escapeAttr(key)}" data-rh-type="${escapeAttr(kind)}" value="${escapeAttr(value)}"></label>
-    </div>`;
-}
-function bindRhParamControls(container, node){
-    container.querySelectorAll('button[data-rh-param]').forEach(btn => {
-        btn.onmousedown = e => e.stopPropagation();
-        btn.onclick = e => {
-            e.stopPropagation();
-            const key = btn.dataset.rhParam;
-            node.rhParams = node.rhParams || {};
-            const field = rhActiveFields(node).find(f => rhParamKey(f.nodeId, f.fieldName) === key);
-            const cur = node.rhParams[key] || {};
-            const on = String(rhFieldValue(node, field)).toLowerCase() === 'true';
-            node.rhParams[key] = {...cur, value:String(!on)};
-            render();
-            scheduleSave();
-        };
-    });
-    container.querySelectorAll('input[data-rh-param], select[data-rh-param], textarea[data-rh-param]').forEach(control => {
-        control.onmousedown = e => e.stopPropagation();
-        control.onclick = e => e.stopPropagation();
-        control.oninput = control.onchange = e => {
-            const key = control.dataset.rhParam;
-            node.rhParams = node.rhParams || {};
-            const cur = node.rhParams[key] || {};
-            node.rhParams[key] = {...cur, value:e.target.value};
-            const val = control.closest('.field')?.querySelector('.rh-param-val');
-            if(val) val.textContent = e.target.value;
-            scheduleSave();
-        };
-    });
-    container.querySelectorAll('[data-rh-random]').forEach(btn => {
-        btn.onmousedown = e => e.stopPropagation();
-        btn.onclick = e => {
-            e.stopPropagation();
-            toggleRhRandom(node.id, btn.dataset.rhRandom);
-        };
-    });
-}
-async function rhFetchAppInfo(nodeId, showAlert=true){
-    const node = nodes.find(n => n.id === nodeId);
-    if(!node) return;
-    if(!String(node.webappId || '').trim()){
-        if(showAlert) alert(tr('canvas.rhNeedWebappId'));
-        return false;
-    }
-    node.rhFetching = true;
-    refreshNodes([node.id]);
-    try {
-        const res = await fetch(`/api/runninghub/app-info?webappId=${encodeURIComponent(node.webappId.trim())}`);
-        const data = await res.json();
-        if(!res.ok || data.success === false) throw new Error(data.detail || data.error || tr('canvas.rhFailed'));
-        node.rhAppInfo = data.data || {};
-        node.rhParams = node.rhParams || {};
-        (node.rhAppInfo.nodeInfoList || []).forEach(field => {
-            const key = rhParamKey(field.nodeId, field.fieldName);
-            if(!node.rhParams[key]) node.rhParams[key] = {value:rhDefaultValue(field)};
-        });
-        node.runStatus = '';
-        node.runError = '';
-        scheduleSave();
-        return true;
-    } catch(err) {
-        if(showAlert) alert(err.message || tr('canvas.rhFailed'));
-        return false;
-    } finally {
-        node.rhFetching = false;
-        refreshNodes([node.id]);
-    }
-}
-async function rhFetchWorkflowInfo(nodeId, showAlert=true){
-    const node = nodes.find(n => n.id === nodeId);
-    if(!node) return false;
-    if(!String(node.workflowId || '').trim()){
-        if(showAlert) alert(tr('canvas.rhNeedWorkflowId'));
-        return false;
-    }
-    node.rhFetching = true;
-    refreshNodes([node.id]);
-    try {
-        const saved = await ensureRunningHubWorkflow(node.workflowId.trim());
-        const res = await fetch(`/api/runninghub/workflow-info?workflowId=${encodeURIComponent(node.workflowId.trim())}`);
-        const data = await res.json();
-        if(!res.ok || data.success === false) throw new Error(data.detail || data.error || tr('canvas.rhFailed'));
-        const info = data.data || {};
-        const savedFields = Array.isArray(saved?.fields) ? saved.fields : [];
-        const mergedFields = savedFields.length
-            ? savedFields
-            : Array.isArray(info.nodeInfoList) ? info.nodeInfoList : [];
-        node.rhWorkflowInfo = {
-            workflowId:node.workflowId.trim(),
-            nodeInfoList:mergedFields,
-            raw:info.raw || null
-        };
-        node.rhParams = node.rhParams || {};
-        (node.rhWorkflowInfo.nodeInfoList || []).forEach(field => {
-            const key = rhParamKey(field.nodeId, field.fieldName);
-            if(!node.rhParams[key]) node.rhParams[key] = {value:rhDefaultValue(field)};
-        });
-        node.runStatus = '';
-        node.runError = '';
-        scheduleSave();
-        return true;
-    } catch(err) {
-        if(showAlert) alert(err.message || tr('canvas.rhFailed'));
-        return false;
-    } finally {
-        node.rhFetching = false;
-        refreshNodes([node.id]);
-    }
-}
-async function rhImportWorkflowJson(nodeId, file){
-    const node = nodes.find(n => n.id === nodeId);
-    if(!node || !file) return;
-    try {
-        const text = await file.text();
-        const json = JSON.parse(text);
-        const nodeInfoList = rhWorkflowNodeInfoList(json);
-        if(!nodeInfoList.length) throw new Error(tr('canvas.rhWorkflowJsonInvalid'));
-        node.rhMode = 'workflow';
-        node.rhWorkflowInfo = {fileName:file.name || 'api.json', nodeInfoList};
-        node.rhParams = node.rhParams || {};
-        nodeInfoList.forEach(field => {
-            const key = rhParamKey(field.nodeId, field.fieldName);
-            if(!node.rhParams[key]) node.rhParams[key] = {value:rhDefaultValue(field)};
-        });
-        node.runStatus = '';
-        node.runError = '';
-        render();
-        scheduleSave();
-    } catch(err) {
-        alert(err.message || tr('canvas.rhWorkflowJsonInvalid'));
-    }
-}
-async function rhUploadValueIfNeeded(value, node=null){
-    const text = String(value || '').trim();
-    if(!text) return '';
-    if(!/^https?:\/\//i.test(text) && !text.startsWith('/output/') && !text.startsWith('/assets/')) return text;
-    const res = await fetch('/api/runninghub/upload-asset', {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({url:text, useWallet:rhUseWallet(node)})
-    });
-    const data = await res.json();
-    if(!res.ok || data.success === false) throw new Error(data.detail || data.error || tr('canvas.rhUploadFailed'));
-    return data.data?.fileName || text;
-}
-async function rhBuildNodeInfoList(node, media){
-    const fields = rhActiveFields(node);
-    const result = [];
-    const indexes = rhFieldIndexes(fields);
-    for(const field of fields){
-        const kind = rhFieldKind(field);
-        const key = rhParamKey(field.nodeId, field.fieldName);
-        if(rhCurrentKind(node) === 'workflow' && field.sourceFromUpstream === false && !['image','video','audio'].includes(kind)) continue;
-        if(rhCurrentKind(node) === 'workflow' && kind === 'image'){
-            const idx = indexes[key] || 0;
-            const hasInput = Boolean(media.image?.[idx]?.url);
-            if(field.required !== true && !hasInput) continue;
-        }
-        let value = rhFieldValue(node, field, media);
-        if(['image','video','audio'].includes(kind)) value = await rhUploadValueIfNeeded(value, node);
-        if(['number','slider'].includes(kind) && String(value ?? '').trim() !== '' && !Number.isNaN(Number(value))) value = Number(value);
-        result.push({nodeId:field.nodeId, fieldName:field.fieldName, fieldValue:value});
-    }
-    return result;
-}
-async function runRhNode(nodeId, opts={}){
-    const node = nodes.find(n => n.id === nodeId);
-    if(!node || (node.running && !opts.cascade)) return;
-    const cascadeTargetId = cascadeTargetIdFromOptions(opts);
-    ensureRhNodeSelection(node);
-    const mode = rhCurrentKind(node);
-    node.rhRandomValues = {};
-    if(mode === 'workflow' && !String(node.workflowId || '').trim()){ alert(tr('canvas.rhNeedWorkflowId')); return; }
-    if(mode === 'app' && !String(node.webappId || '').trim()){ alert(tr('canvas.rhNeedWebappId')); return; }
-    const selectedEntry = rhCurrentEntry(node);
-    if(!selectedEntry){
-        alert(mode === 'workflow' ? '请先在 API 设置里添加 RunningHub 工作流' : '请先在 API 设置里添加 RunningHub 应用');
-        return;
-    }
-    if(mode === 'workflow') await ensureRunningHubWorkflowConfigForNode(node);
-    if(!rhActiveFields(node).length){
-        alert(mode === 'workflow' ? '请先在 API 设置里编辑并保存这个 RunningHub 工作流参数' : '请先在 API 设置里编辑并保存这个 RunningHub 应用参数');
-        return;
-    }
-    const media = rhMediaSources(node);
-    let out = outputForNode(node, 500);
-    const pendingId = uid('p');
-    const run = runSnapshot(node, media.prompt || 'RunningHub', media.refs);
-    run.taskLabel = 'RunningHub';
-    if(out) out._pending = [...(out._pending || []), makePendingForRun(pendingId, run, node, {refs:media.refs, cascadeTargetId})];
-    if(!opts.cascade) node.running = true;
-    refreshRunNodes(node, out);
-    try {
-        const nodeInfoList = await rhBuildNodeInfoList(node, media);
-        const workflowExtras = mode === 'workflow' ? await rhBuildWorkflowRequestExtras(node, media, nodeInfoList) : {};
-        const endpoint = mode === 'workflow' ? '/api/runninghub/workflow-submit' : '/api/runninghub/submit';
-        const body = mode === 'workflow'
-            ? {workflowId:node.workflowId.trim(), nodeInfoList, useWallet:rhUseWallet(node), ...workflowExtras}
-            : {webappId:node.webappId.trim(), nodeInfoList, instanceType:node.instanceType || '', useWallet:rhUseWallet(node)};
-        const submit = await cascadeFetch(endpoint, {
-            method:'POST',
-            headers:{'Content-Type':'application/json'},
-            body:JSON.stringify(body)
-        }, {cascadeTargetId}).then(async r => {
-            const data = await r.json();
-            if(!r.ok || data.success === false) throw new Error(data.detail || data.error || tr('canvas.rhFailed'));
-            return data.data || data;
-        });
-        const taskId = submit.taskId;
-        if(!taskId) throw new Error(tr('canvas.rhNoTaskId'));
-        run.request = {task_id:taskId, webappId:node.webappId, workflowId:node.workflowId, backend:'runninghub', mode};
-        let result = null;
-        for(let i = 0; i < 720; i++){
-            if(cascadeTargetId) ensureCascadeActive(cascadeTargetId);
-            await sleep(2500);
-            const data = await cascadeFetch(`/api/runninghub/query?taskId=${encodeURIComponent(taskId)}`, {}, {cascadeTargetId}).then(async r => {
-                const json = await r.json();
-                if(!r.ok || json.success === false) throw new Error(json.detail || json.error || tr('canvas.rhFailed'));
-                return json.data || json;
-            });
-            if(data.status === 'SUCCESS'){
-                result = data;
-                break;
-            }
-            if(data.status === 'FAILED') throw new Error(data.failReason || tr('canvas.rhFailed'));
-        }
-        if(!result) throw new Error(tr('canvas.rhTimeout'));
-        const outputs = result.urls || [];
-        if(!outputs.length) throw new Error(tr('canvas.rhOutputsEmpty'));
-        const meta = collectRunMeta(out, pendingId);
-        if(out) out._pending = (out._pending || []).filter(p => p.id !== pendingId);
-        appendOutputImages(out, outputs, media.refs[0], [meta]);
-        mergeGeneratedOutputs(node, outputs, Boolean(opts.cascade));
-        addGenerationLog({run, outputs, runMs:meta.runMs || 0});
-        node.runStatus = 'done';
-        node.runError = '';
-        refreshRunNodes(node, out);
-        scheduleSave();
-    } catch(err) {
-        const meta = collectRunMeta(out, pendingId);
-        addGenerationLog({run, outputs:[], runMs:meta.runMs || 0, error:err.message || String(err)});
-        if(out) out._pending = (out._pending || []).filter(p => p.id !== pendingId);
-        if(isCascadeAbortError(err)){
-            if(opts.cascade) throw err;
-            return;
-        }
-        node.runStatus = 'failed';
-        node.runError = err.message || String(err);
-        refreshRunNodes(node, out);
-        if(opts.cascade) throw err;
-        alert(err.message || tr('canvas.rhFailed'));
-    } finally {
-        node.running = false;
-        refreshRunNodes(node, out);
-    }
-}
-function renderComfySettings(container, node){
-    const mode = node.mode || 'text';
-    if(mode === 'text'){
-        container.innerHTML = `
-            <div class="gen-settings-row">
-                <label class="field"><div class="setting-title">${tr('canvas.width')}</div><input class="setting-input" data-field="width" type="number" min="64" step="64" value="${Number(node.width || 1024)}"></label>
-                <label class="field"><div class="setting-title">${tr('canvas.height')}</div><input class="setting-input" data-field="height" type="number" min="64" step="64" value="${Number(node.height || 1024)}"></label>
-            </div>
-        `;
-    } else if(mode === 'enhance'){
-        const strength = Number(node.enhanceStrength ?? 0.5);
-        container.innerHTML = `
-            <div class="gen-settings-row">
-                <label class="field" style="flex:1">
-                    <div class="setting-title" style="display:flex;justify-content:space-between">
-                        <span>${tr('studio.enhancementStrength')}</span><span class="enhance-strength-val">${strength.toFixed(2)}</span>
-                    </div>
-                    <input type="range" class="canvas-range enhance-strength-slider" data-field="enhanceStrength" min="0.1" max="1.0" step="0.05" value="${strength}">
-                </label>
-            </div>
-            <div class="gen-settings-row">
-                <button type="button" class="setting-check ${node.enhanceUpscale ? 'active' : ''}" data-toggle-field="enhanceUpscale"><span class="check-dot"></span>${tr('studio.superResolution')}</button>
-                <select class="select-lite ${node.enhanceUpscale ? '' : 'opacity-40 cursor-not-allowed'}" data-field="enhanceUpscaleRes" ${node.enhanceUpscale ? '' : 'disabled'}><option value="2048">2X (2048)</option><option value="4096">4X (4096)</option></select>
-            </div>
-        `;
-        container.querySelector('[data-field="enhanceUpscaleRes"]').value = String(node.enhanceUpscaleRes || 2048);
-    } else if(mode === 'edit'){
-        container.innerHTML = `
-            <div class="gen-settings-row">
-                <button type="button" class="setting-check ${node.editUpscale ? 'active' : ''}" data-toggle-field="editUpscale"><span class="check-dot"></span>${tr('studio.superResolution')}</button>
-                <select class="select-lite ${node.editUpscale ? '' : 'opacity-40 cursor-not-allowed'}" data-field="editUpscaleRes" ${node.editUpscale ? '' : 'disabled'}><option value="2048">2X (2048)</option><option value="4096">4X (4096)</option></select>
-            </div>
-        `;
-        container.querySelector('[data-field="editUpscaleRes"]').value = String(node.editUpscaleRes || 2048);
-    } else if(mode === 'custom'){
-        const selected = validComfyWorkflowName(node.comfyWorkflow || comfyWorkflows[0]?.name || '');
-        if(node.comfyWorkflow && node.comfyWorkflow !== selected) node.comfyWorkflow = selected;
-        const data = currentComfyWorkflow(node);
-        const fields = data?.config?.fields || [];
-        const settingFields = fields.filter(f => comfyFieldKind(f) === 'setting');
-        container.innerHTML = `
-            <div class="gen-settings-row">
-                <select class="select-lite comfy-workflow-select" data-field="comfyWorkflow" style="width:100%">${comfyWorkflowOptions(selected)}</select>
-            </div>
-            ${!selected ? `<div class="text-[11px] text-slate-400">${tr('canvas.comfyNoWorkflow')}</div>` : (!data ? `<div class="text-[11px] text-slate-400">${tr('canvas.comfyLoadingWorkflow')}</div>` : '')}
-            ${data ? settingFields.map(f => renderComfyCustomField(node, f)).join('') || `<div class="text-[11px] text-slate-400">${tr('canvas.comfyNoExtraParams')}</div>` : ''}
-        `;
-        if(selected && !data) ensureComfyWorkflow(selected).then(() => render());
-    } else {
-        container.innerHTML = '';
-    }
-    container.querySelectorAll('[data-toggle-field]').forEach(btn => {
-        btn.onmousedown = e => e.stopPropagation();
-        btn.onclick = e => {
-            e.stopPropagation();
-            const field = btn.dataset.toggleField;
-            node[field] = !node[field];
-            render();
-            scheduleSave();
-        };
-    });
-    container.querySelectorAll('button[data-comfy-param]').forEach(btn => {
-        btn.onmousedown = e => e.stopPropagation();
-        btn.onclick = e => updateComfyField(node, btn, e);
-    });
-    container.querySelectorAll('button[data-comfy-random]').forEach(btn => {
-        btn.onmousedown = e => e.stopPropagation();
-        btn.onclick = e => {
-            e.stopPropagation();
-            toggleComfyRandom(node.id, btn.dataset.comfyRandom);
-        };
-    });
-    container.querySelectorAll('input, select, textarea').forEach(input => {
-        input.onmousedown = e => e.stopPropagation();
-        input.onclick = e => e.stopPropagation();
-        if(input.classList.contains('model-select')) return;
-        input.onchange = e => updateComfyField(node, input, e);
-        input.oninput = e => updateComfyField(node, input, e);
-    });
-}
-function renderComfyCustomField(node, f){
-    const value = comfyParamValue(node, f);
-    const label = escapeHtml(f.name || f.input);
-    if(f.type === 'boolean'){
-        return `<div class="gen-settings-row">
-            <button type="button" class="setting-check ${value ? 'active' : ''}" data-comfy-param="${escapeHtml(f.id)}" data-comfy-type="boolean"><span class="check-dot"></span>${label}</button>
-        </div>`;
-    }
-    if(f.type === 'slider'){
-        const min = f.min ?? 0, max = f.max ?? 10, step = f.step ?? 1;
-        return `<div class="gen-settings-row">
-            <label class="field" style="flex:1">
-                <div class="setting-title" style="display:flex;justify-content:space-between"><span>${label}</span><span class="comfy-param-val">${escapeHtml(value)}</span></div>
-                <input type="range" class="canvas-range" data-comfy-param="${escapeHtml(f.id)}" data-comfy-type="slider" min="${min}" max="${max}" step="${step}" value="${escapeHtml(value)}">
-            </label>
-        </div>`;
-    }
-    if(f.type === 'dropdown'){
-        const opts = (f.options || []).map(o => `<option value="${escapeHtml(o)}" ${String(value) === String(o) ? 'selected' : ''}>${escapeHtml(o)}</option>`).join('');
-        return `<div class="gen-settings-row">
-            <label class="field" style="flex:1"><div class="setting-title">${label}</div><select class="select-lite" data-comfy-param="${escapeHtml(f.id)}" data-comfy-type="dropdown" style="width:100%">${opts || '<option value="">(鏃犻€夐」)</option>'}</select></label>
-        </div>`;
-    }
-    if(f.type === 'textarea'){
-        return `<div class="gen-settings-row">
-            <label class="field" style="flex:1"><div class="setting-title">${label}</div><textarea class="setting-input" data-comfy-param="${escapeHtml(f.id)}" data-comfy-type="textarea" style="height:66px;padding-top:8px;resize:vertical">${escapeHtml(value)}</textarea></label>
-        </div>`;
-    }
-    const type = f.type === 'number' ? 'number' : 'text';
-    if(comfyRandomEnabled(f)){
-        const active = comfyRandomActive(node, f.id);
-        return `<div class="gen-settings-row">
-            <div class="random-field">
-                <label class="field"><div class="setting-title">${label}</div><input class="setting-input" type="number" data-comfy-param="${escapeHtml(f.id)}" data-comfy-type="number" value="${escapeHtml(value)}"></label>
-                <button class="tool-btn random-btn ${active ? 'active' : ''}" type="button" data-comfy-random="${escapeHtml(f.id)}" title="${active ? '随机已开启，点击关闭' : '随机已关闭，点击开启'}" aria-label="${active ? '随机已开启，点击关闭' : '随机已关闭，点击开启'}"><i data-lucide="dice-5" class="w-4 h-4"></i></button>
-            </div>
-        </div>`;
-    }
-    return `<div class="gen-settings-row">
-        <label class="field" style="flex:1"><div class="setting-title">${label}</div><input class="setting-input" type="${type}" data-comfy-param="${escapeHtml(f.id)}" data-comfy-type="${escapeHtml(f.type || 'text')}" value="${escapeHtml(value)}"></label>
-    </div>`;
-}
-function updateComfyField(node, input, event){
-    event?.stopPropagation();
-    const paramId = input.dataset.comfyParam;
-    if(paramId){
-        node.comfyParams = node.comfyParams || {};
-        const field = comfyFields(node).find(f => f.id === paramId);
-        const type = input.dataset.comfyType || field?.type || 'text';
-        if(type === 'boolean') node.comfyParams[paramId] = !Boolean(node.comfyParams[paramId] ?? field?.default ?? false);
-        else if(type === 'number' || type === 'slider') node.comfyParams[paramId] = Number(input.value) || 0;
-        else node.comfyParams[paramId] = input.value;
-        const val = input.closest('.field')?.querySelector('.comfy-param-val');
-        if(val) val.textContent = node.comfyParams[paramId];
-        if(type === 'boolean') render();
-        scheduleSave();
-        return;
-    }
-    const field = input.dataset.field;
-    if(!field) return;
-    if(field === 'comfyWorkflow'){
-        node.comfyWorkflow = validComfyWorkflowName(input.value);
-        node.comfyParams = {};
-        ensureComfyWorkflow(node.comfyWorkflow).then(() => render());
-        scheduleSave();
-        return;
-    }
-    if(input.type === 'checkbox') {
-        node[field] = input.checked;
-        if(field === 'enhanceUpscale') render();
-    }
-    else if(field === 'enhanceStrength') {
-        node[field] = Number(input.value) || 0.5;
-        const val = input.closest('.field')?.querySelector('.enhance-strength-val');
-        if(val) val.textContent = node[field].toFixed(2);
-    }
-    else if(['width','height','enhanceUpscaleRes','editUpscaleRes','count'].includes(field)) node[field] = Number(input.value) || 1;
-    else node[field] = input.value;
-    scheduleSave();
-}
-
-const CANVAS_GENERATOR_TYPES = ['generator','msgen','video','rh'];
-const CANVAS_IMAGE_OUTPUT_TYPES = ['generator','msgen','rh'];
-const CANVAS_MEDIA_OUTPUT_TYPES = ['generator','msgen','video','rh'];
+const CANVAS_GENERATOR_TYPES = ['generator','msgen','video'];
+const CANVAS_IMAGE_OUTPUT_TYPES = ['generator','msgen'];
+const CANVAS_MEDIA_OUTPUT_TYPES = ['generator','msgen','video'];
 function hasExplicitOutputConnection(nodeId){
     return connections.some(c => {
         if(c.from !== nodeId) return false;
@@ -8999,12 +7820,6 @@ function refreshGeneratorInputViews(){
         if(gen.type === 'generator') renderImageInputList(el.querySelector('.input-list'), gen, imageInputs);
         if(gen.type === 'msgen') renderImageInputList(el.querySelector('.ms-img-list'), gen, imageInputs);
         if(gen.type === 'video') renderVideoImageInputs(el.querySelector('.video-img-list'), gen, imageInputs);
-        if(gen.type === 'rh'){
-            const media = rhMediaSources(gen);
-            renderRhPromptFields(el.querySelector('.rh-prompt-list'), gen, rhActiveFields(gen));
-            renderRhInputs(el.querySelector('.rh-input-list'), gen, media);
-            renderRhParams(el.querySelector('.rh-param-list'), gen, rhActiveFields(gen), media);
-        }
     });
 }
 async function runGenerator(genId, opts={}){
@@ -9223,33 +8038,6 @@ async function runVideoNode(nodeId, opts={}){
         refreshRunNodes(node, out);
     }
 }
-async function uploadCanvasUrlToComfy(url){
-    throw new Error(tr('canvas.comfyNoWorkflow'));
-}
-async function comfyNameForRef(ref){
-    if(ref.comfy_name) return ref.comfy_name;
-    if(!ref.url) throw new Error(langIsEn() ? 'Missing input image' : '缂哄皯杈撳叆鍥剧墖');
-    return uploadCanvasUrlToComfy(ref.url);
-}
-async function runComfyUpscale(imageUrl, resolution, options={}){
-    if(!imageUrl) throw new Error(actionFailed('studio.superResolution', langIsEn() ? 'missing input image' : '缂哄皯杈撳叆鍥剧墖'));
-    const nextInput = await uploadCanvasUrlToComfy(imageUrl);
-    const upscale = await runQueuedComfyGenerate({
-        workflow_json:'upscale.json',
-        params:{
-            "15": { image:nextInput },
-            "172": { seed:Math.floor(Math.random() * 4294967295), resolution:Number(resolution || 2048) }
-        },
-        type:'enhance',
-        client_id:CLIENT_ID
-    }, options);
-    if(upscale.error) throw new Error(actionFailed('studio.superResolution', upscale.error));
-    if(!upscale.images?.length) throw new Error(noReturnedImage('studio.superResolution'));
-    return upscale.images || [];
-}
-function comfyResultOutputs(result){
-    return resultMediaUrls(result);
-}
 function resultMediaUrls(result){
     const urls = [];
     const add = value => {
@@ -9281,246 +8069,6 @@ function resultMediaUrls(result){
         const url = outputUrlValue(item);
         return url && !seen.has(url) && seen.add(url);
     });
-}
-function ltxDirectorSyncSeconds(node){
-    const fps = Math.max(1, Number(node?.frameRate) || 24);
-    node.durationSeconds = Math.round((Number(node.durationFrames) || 120) / fps * 1000) / 1000;
-}
-function ltxParseTimeline(node){
-    try {
-        const t = JSON.parse(node?.ltxTimelineData || '{}');
-        return {
-            segments: Array.isArray(t.segments) ? t.segments : [],
-            audioSegments: Array.isArray(t.audioSegments) ? t.audioSegments : []
-        };
-    } catch(e) {
-        return {segments: [], audioSegments: []};
-    }
-}
-function ltxRefreshTimelineEditor(node){
-    if(!node?._ltxEditor || typeof window.LTXParseInitial !== 'function') return;
-    node._ltxEditor.timeline = window.LTXParseInitial(node.ltxTimelineData || '{}');
-    node._ltxEditor.loadImages?.();
-    node._ltxEditor.commitChanges?.(true);
-    node._ltxEditor.render?.();
-}
-function ltxSyncConnectedImagesToTimeline(node){
-    if(!node || node.type !== 'ltxDirector') return;
-    const hadTimeline = Boolean(node.ltxTimelineData);
-    const sources = orderedSources(node, generatorSources(node));
-    const imageInputs = sources.filter(src => imageRefsOnly(src.refs || []).length);
-    const timeline = ltxParseTimeline(node);
-    const fps = Math.max(1, Number(node.frameRate) || 24);
-    const defaultLen = Math.max(6, fps);
-    const manual = (timeline.segments || []).filter(s => !s.canvasSourceId);
-    const existingAuto = new Map((timeline.segments || []).filter(s => s.canvasSourceId).map(s => [s.canvasSourceId, s]));
-    const autoSegs = [];
-    let cursor = 0;
-    for(const src of imageInputs){
-        const ref = imageRefsOnly(src.refs || [])[0];
-        const url = ref?.url;
-        if(!url) continue;
-        let seg = existingAuto.get(src.id);
-        if(seg){
-            if(seg.imageB64 !== url){
-                seg.imageB64 = url;
-                seg.imageFile = null;
-                delete seg.imgObj;
-            }
-            if(!seg.length || seg.length < 1) seg.length = defaultLen;
-        } else {
-            seg = {
-                id:uid('ltxseg'),
-                start:cursor,
-                length:defaultLen,
-                prompt:src.prompt || '',
-                type:'image',
-                imageB64:url,
-                canvasSourceId:src.id,
-                guideStrength:1
-            };
-        }
-        seg.start = cursor;
-        cursor += Math.max(1, Number(seg.length) || defaultLen);
-        autoSegs.push(seg);
-    }
-    let nextStart = cursor;
-    const reflowedManual = [...manual].sort((a, b) => (Number(a.start) || 0) - (Number(b.start) || 0));
-    for(const seg of reflowedManual){
-        seg.start = nextStart;
-        nextStart += Math.max(1, Number(seg.length) || defaultLen);
-    }
-    const allSegs = [...autoSegs, ...reflowedManual];
-    const maxEnd = allSegs.reduce((m, s) => Math.max(m, (Number(s.start) || 0) + (Number(s.length) || 0)), 0);
-    if(maxEnd > (Number(node.durationFrames) || 0)){
-        node.durationFrames = Math.ceil(maxEnd);
-        ltxDirectorSyncSeconds(node);
-    }
-    const prevTimeline = node.ltxTimelineData;
-    node.ltxTimelineData = JSON.stringify({segments: allSegs, audioSegments: timeline.audioSegments || []});
-    ltxRefreshTimelineEditor(node);
-    if(hadTimeline && node.ltxTimelineData !== prevTimeline) scheduleSave();
-}
-function bindLTXParamsRow(container, node){
-    const row = container.querySelector('[data-ltx-params]');
-    if(!row) return;
-    const fps = () => Math.max(1, Number(node.frameRate) || 24);
-    const bindNum = (sel, apply) => {
-        const inp = row.querySelector(sel);
-        if(!inp) return;
-        inp.onmousedown = e => e.stopPropagation();
-        inp.onclick = e => e.stopPropagation();
-        inp.onchange = () => {
-            apply(inp);
-            ltxDirectorSyncSeconds(node);
-            if(node._ltxEditor){
-                node._ltxEditor.commitChanges?.(true);
-                node._ltxEditor.render?.();
-            }
-            scheduleSave();
-        };
-    };
-    const sec = row.querySelector('[data-ltx-duration-seconds]');
-    const frames = row.querySelector('[data-ltx-duration-frames]');
-    const rate = row.querySelector('[data-ltx-frame-rate]');
-    const width = row.querySelector('[data-ltx-width]');
-    const height = row.querySelector('[data-ltx-height]');
-    if(sec) sec.value = Number(node.durationSeconds) || 5;
-    if(frames) frames.value = Number(node.durationFrames) || 120;
-    if(rate) rate.value = Number(node.frameRate) || 24;
-    if(width) width.value = Number(node.customWidth) || 0;
-    if(height) height.value = Number(node.customHeight) || 0;
-    bindNum('[data-ltx-duration-seconds]', inp => {
-        const v = Math.max(0.1, Math.min(1000, parseFloat(inp.value) || node.durationSeconds || 5));
-        node.durationSeconds = Math.round(v * 1000) / 1000;
-        node.durationFrames = Math.max(1, Math.round(node.durationSeconds * fps()));
-        inp.value = node.durationSeconds;
-        if(frames) frames.value = node.durationFrames;
-    });
-    bindNum('[data-ltx-duration-frames]', inp => {
-        node.durationFrames = Math.max(1, Math.min(10000, parseInt(inp.value, 10) || 120));
-        if(sec) sec.value = Math.round((node.durationFrames / fps()) * 1000) / 1000;
-        inp.value = node.durationFrames;
-    });
-    bindNum('[data-ltx-frame-rate]', inp => {
-        node.frameRate = Math.max(1, Math.min(240, parseInt(inp.value, 10) || 24));
-        if(sec) sec.value = Math.round((node.durationFrames / fps()) * 1000) / 1000;
-    });
-    bindNum('[data-ltx-width]', inp => {
-        node.customWidth = Math.max(0, Math.min(8192, parseInt(inp.value, 10) || 0));
-        inp.value = node.customWidth;
-    });
-    bindNum('[data-ltx-height]', inp => {
-        node.customHeight = Math.max(0, Math.min(8192, parseInt(inp.value, 10) || 0));
-        inp.value = node.customHeight;
-    });
-}
-function ltxFlushTimelineToNode(node){
-    if(!node || node.type !== 'ltxDirector') return;
-    if(node._ltxEditor && typeof node._ltxEditor.commitChanges === 'function'){
-        node._ltxEditor.commitChanges(true);
-    }
-}
-function ltxBuildContiguousRelay(node, globalPromptFallback=''){
-    ltxFlushTimelineToNode(node);
-    const durationFrames = Math.max(1, Number(node.durationFrames) || 120);
-    const fallback = (globalPromptFallback || node.globalPrompt || '').trim() || '.';
-    let sortedSegments = [];
-    try {
-        const t = JSON.parse(node.ltxTimelineData || '{}');
-        sortedSegments = [...(t.segments || [])].sort((a, b) => (Number(a.start) || 0) - (Number(b.start) || 0));
-    } catch(e) {}
-    const contiguousLengths = [];
-    const contiguousPrompts = [];
-    let currentCursor = 0;
-    let pendingGap = 0;
-    for(const seg of sortedSegments){
-        const start = Number(seg.start) || 0;
-        const length = Math.max(1, Number(seg.length) || 1);
-        if(start >= durationFrames) break;
-        if(start > currentCursor){
-            const gapLength = Math.min(start, durationFrames) - currentCursor;
-            if(contiguousLengths.length > 0) contiguousLengths[contiguousLengths.length - 1] += gapLength;
-            else pendingGap += gapLength;
-        }
-        const clippedEnd = Math.min(start + length, durationFrames);
-        const clippedLength = clippedEnd - start;
-        contiguousLengths.push(clippedLength + pendingGap);
-        const prompt = (seg.prompt || '').trim();
-        contiguousPrompts.push(prompt || fallback);
-        if(!prompt) seg.prompt = fallback;
-        pendingGap = 0;
-        currentCursor = start + length;
-    }
-    const clampedCursor = Math.min(currentCursor, durationFrames);
-    if(contiguousLengths.length > 0 && clampedCursor < durationFrames){
-        contiguousLengths[contiguousLengths.length - 1] += durationFrames - clampedCursor;
-    }
-    if(!contiguousLengths.length){
-        contiguousLengths.push(durationFrames);
-        contiguousPrompts.push(fallback);
-    }
-    const guideStrength = sortedSegments
-        .filter(s => s.type !== 'text')
-        .map(s => (s.guideStrength !== undefined ? s.guideStrength : 1.0).toFixed(2))
-        .join(',');
-    return {
-        local_prompts:contiguousPrompts.join(' | '),
-        segment_lengths:contiguousLengths.join(','),
-        guide_strength:guideStrength,
-        sortedSegments
-    };
-}
-async function ltxDirectorBuildTimelinePayload(node, globalPromptFallback=''){
-    ltxDirectorSyncSeconds(node);
-    let timeline = {segments: [], audioSegments: []};
-    try { timeline = JSON.parse(node.ltxTimelineData || '{}'); } catch(e) {}
-    const relay = ltxBuildContiguousRelay(node, globalPromptFallback);
-    const segments = [...relay.sortedSegments];
-    for(const seg of segments){
-        if(seg.type === 'image' && !seg.imageFile){
-            const url = seg.imageB64 || '';
-            if(url){
-                const fullUrl = url.startsWith('http') ? url : (location.origin + (url.startsWith('/') ? url : '/' + url));
-                seg.imageFile = await uploadCanvasUrlToComfy(fullUrl);
-            }
-        }
-        if(seg.imgObj) delete seg.imgObj;
-    }
-    const timelineJson = JSON.stringify({segments, audioSegments: timeline.audioSegments || []});
-    node.ltxLocalPrompts = relay.local_prompts;
-    node.ltxSegmentLengths = relay.segment_lengths;
-    node.ltxGuideStrength = relay.guide_strength;
-    node.ltxTimelineData = timelineJson;
-    return {
-        global_prompt:(globalPromptFallback || node.globalPrompt || '').trim(),
-        duration_frames:Number(node.durationFrames) || 120,
-        duration_seconds:Number(node.durationSeconds) || 5,
-        timeline_data:timelineJson,
-        local_prompts:relay.local_prompts,
-        segment_lengths:relay.segment_lengths,
-        guide_strength:relay.guide_strength,
-        epsilon:Number(node.epsilon) || 0.001,
-        frame_rate:Number(node.frameRate) || 24,
-        use_custom_audio:Boolean(node.useCustomAudio),
-        display_mode:node.displayMode || 'seconds',
-        custom_width:Math.max(0, Number(node.customWidth) || 0),
-        custom_height:Math.max(0, Number(node.customHeight) || 0),
-        resize_method:'maintain aspect ratio',
-        divisible_by:Math.max(1, Number(node.divisibleBy) || 32),
-        img_compression:Number(node.imgCompression) ?? 18,
-        timeline_ui:''
-    };
-}
-function ltxDirectorTimelineSegments(node){
-    ltxFlushTimelineToNode(node);
-    if(node?._ltxEditor?.timeline?.segments) return node._ltxEditor.timeline.segments;
-    try {
-        const t = JSON.parse(node.ltxTimelineData || '{}');
-        return t.segments || [];
-    } catch(e) {
-        return [];
-    }
 }
 function clearStuckGeneratorRunning(node){
     if(!node || !node.running) return;
@@ -9694,337 +8242,6 @@ async function cascadeFetch(input, init={}, options={}){
         ctx.controllers.delete(controller);
     }
 }
-function updateLTXNodeElementSize(node){
-    const el = document.querySelector(`.node[data-id="${CSS.escape(node.id)}"]`);
-    if(!el) return;
-    if(node.w) el.style.width = `${node.w}px`;
-    if(node.h) el.style.height = `${node.h}px`;
-    refreshGeometryAfterLayout();
-}
-function renderLTXDirectorBody(node){
-    if(typeof window.ltxMigrateLegacySegments === 'function') window.ltxMigrateLegacySegments(node);
-    else if(typeof ltxMigrateLegacySegments === 'function') ltxMigrateLegacySegments(node);
-    ltxDirectorSyncSeconds(node);
-    if(!node.ltxTimelineData){
-        const len = Math.max(1, Number(node.durationFrames) || 120);
-        node.ltxTimelineData = JSON.stringify({
-            segments:[{id:uid('ltxseg'), start:0, length:len, prompt:'', type:'text'}],
-            audioSegments:[]
-        });
-    }
-
-    const wrap = document.createElement('div');
-    wrap.className = 'ltx-director-body';
-    const sources = orderedSources(node, generatorSources(node));
-    const promptInputs = sources.filter(src => src.prompt && !src.refs?.length);
-    const imageInputs = sources
-        .map(src => ({...src, refs:imageRefsOnly(src.refs || [])}))
-        .filter(src => src.refs?.length);
-
-    wrap.innerHTML = `
-        <div class="prompt-list"></div>
-        <div class="ltx-params-row" data-ltx-params>
-            <label class="field"><span class="setting-title">${tr('canvas.ltxDurationSec')}</span><input class="setting-input" data-ltx-duration-seconds type="number" min="0.1" max="1000" step="0.01"></label>
-            <label class="field"><span class="setting-title">${tr('canvas.ltxDurationFrames')}</span><input class="setting-input" data-ltx-duration-frames type="number" min="1" max="10000" step="1"></label>
-            <label class="field"><span class="setting-title">${tr('canvas.ltxFps')}</span><input class="setting-input" data-ltx-frame-rate type="number" min="1" max="240" step="1"></label>
-            <label class="field"><span class="setting-title">${tr('canvas.width')}</span><input class="setting-input" data-ltx-width type="number" min="0" max="8192" step="32" title="0 = auto"></label>
-            <label class="field"><span class="setting-title">${tr('canvas.height')}</span><input class="setting-input" data-ltx-height type="number" min="0" max="8192" step="32" title="0 = auto"></label>
-        </div>
-        <div class="ltx-director-timeline-host" data-ltx-timeline-host></div>
-        <div class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mt-1">${tr('canvas.ltxLinkedImages')} 路 ${imageInputs.length}</div>
-        <div class="input-list mt-1"></div>
-        <div class="gen-run-row">
-            <button class="comfy-run ltx-run ${node.running ? 'running' : ''}" ${node.running ? 'disabled' : ''}><i data-lucide="film" class="w-4 h-4"></i>${node.running ? tr('canvas.ltxRunning') : tr('canvas.ltxRun')}</button>
-            ${cascadeBtnHtml(node)}
-        </div>
-        ${retryBarHtml(node)}
-    `;
-
-    renderPromptPreview(wrap.querySelector('.prompt-list'), promptInputs);
-    bindLTXParamsRow(wrap, node);
-    ltxSyncConnectedImagesToTimeline(node);
-    renderComfyImages(wrap.querySelector('.input-list'), node, imageInputs);
-
-    const host = wrap.querySelector('[data-ltx-timeline-host]');
-    if(host && window.CanvasLTXTimelineEditor){
-        if(node._ltxEditor && node._ltxEditor.wrapper){
-            host.appendChild(node._ltxEditor.wrapper);
-            node._ltxEditor.container = host;
-            node._ltxEditor._onCanvasCommit = () => scheduleSave();
-            node._ltxEditor._onCanvasResize = () => { updateLTXNodeElementSize(node); scheduleSave(); };
-        } else {
-            destroyLTXEditor(node);
-            try {
-                const editor = new window.CanvasLTXTimelineEditor(node, host, null);
-                editor._onCanvasCommit = () => scheduleSave();
-                editor._onCanvasResize = () => { updateLTXNodeElementSize(node); scheduleSave(); };
-                node._ltxEditor = editor;
-            } catch(err) {
-                console.error('LTX timeline editor init failed', err);
-                host.innerHTML = `<div class="text-[11px] text-red-500 p-2">${escapeHtml(tr('canvas.ltxTimelineLoadFailed'))}</div>`;
-            }
-        }
-    } else if(host) {
-        host.innerHTML = `<div class="text-[11px] text-red-500 p-2">${escapeHtml(tr('canvas.ltxTimelineScriptMissing'))}</div>`;
-    }
-
-    const runBtn = wrap.querySelector('.ltx-run');
-    if(runBtn){
-        runBtn.onmousedown = e => e.stopPropagation();
-        runBtn.onclick = e => {
-            e.stopPropagation();
-            e.preventDefault();
-            runCanvasGenerate(node.id);
-        };
-    }
-    bindCascadeButtons(wrap, node.id);
-    return wrap;
-}
-async function runLTXDirectorNode(nodeId, opts={}){
-    const node = nodes.find(n => n.id === nodeId);
-    if(!node || node.type !== 'ltxDirector') return;
-    const cascadeTargetId = cascadeTargetIdFromOptions(opts);
-    clearStuckGeneratorRunning(node);
-    if(node.running && !opts.cascade) return;
-    ltxFlushTimelineToNode(node);
-    const sources = orderedSources(node, generatorSources(node));
-    const upstreamPrompt = sources.map(s => s.prompt).filter(Boolean).join('\n\n');
-    const globalPrompt = [node.globalPrompt, upstreamPrompt].filter(Boolean).join('\n\n').trim();
-    const segments = ltxDirectorTimelineSegments(node);
-    const hasSegPrompt = segments.some(s => (s.prompt || '').trim());
-    const hasImageSeg = segments.some(s => s.type === 'image' && (s.imageFile || s.imageB64));
-    if(!globalPrompt && !hasSegPrompt && !hasImageSeg){
-        const msg = tr('canvas.needPromptOrImage');
-        setStatus(msg);
-        showErrorModal(msg, tr('canvas.ltxFailed'));
-        return;
-    }
-    if(segments.some(s => s.type === 'image' && !s.imageFile && !s.imageB64)){
-        const msg = tr('canvas.ltxImageSegNeedRef');
-        setStatus(msg);
-        showErrorModal(msg, tr('canvas.ltxFailed'));
-        return;
-    }
-    ltxDirectorSyncSeconds(node);
-    let out = outputForNode(node, 520);
-    const pendingId = uid('p');
-    const refs = sources.flatMap(s => s.refs || []);
-    const run = runSnapshot(node, globalPrompt || segments.map(s => s.prompt).join(' | '), refs);
-    run.taskLabel = tr('canvas.ltxDirector');
-    if(out) out._pending = [...(out._pending || []), makePendingForRun(pendingId, run, node, {refs, cascadeTargetId})];
-    if(!opts.cascade){
-        node.running = true;
-        refreshRunNodes(node, out);
-        setStatus(tr('canvas.ltxRunning'));
-    } else {
-        refreshRunNodes(node, out);
-    }
-    try {
-        const directorInputs = await ltxDirectorBuildTimelinePayload(node, globalPrompt);
-        const params = {
-            [LTX_DIRECTOR_WF_NODE]:directorInputs,
-            [LTX_DIRECTOR_SEED_NODE]:{noise_seed:Number(node.noiseSeed ?? 12)}
-        };
-        const result = await runQueuedComfyGenerate({
-            prompt:globalPrompt,
-            workflow_json:LTX_DIRECTOR_WORKFLOW,
-            params,
-            type:'ltx-director',
-            client_id:CLIENT_ID
-        }, {cascadeTargetId});
-        run.request = requestMetaFromResult(result);
-        if(result.error) throw new Error(result.error);
-        const outputs = comfyResultOutputs(result);
-        if(!outputs.length) throw new Error(tr('canvas.ltxNoOutput'));
-        const meta = collectRunMeta(out, pendingId);
-        if(out) out._pending = (out._pending || []).filter(p => p.id !== pendingId);
-        appendOutputImages(out, outputs, refs[0], [meta]);
-        mergeGeneratedOutputs(node, outputs, Boolean(opts.cascade));
-        addGenerationLog({run, outputs, runMs:meta.runMs || 0});
-        node.runStatus = 'done';
-        node.runError = '';
-        refreshRunNodes(node, out);
-        scheduleSave();
-    } catch(err) {
-        const meta = collectRunMeta(out, pendingId);
-        if(out) out._pending = (out._pending || []).filter(p => p.id !== pendingId);
-        addGenerationLog({run, outputs:[], runMs:meta.runMs || 0, error:err.message || String(err)});
-        if(isCascadeAbortError(err)){
-            if(opts.cascade) throw err;
-            return;
-        }
-        node.runStatus = 'failed';
-        node.runError = err.message || String(err);
-        refreshRunNodes(node, out);
-        if(opts.cascade) throw err;
-        showErrorModal(err.message || tr('canvas.ltxFailed'), tr('canvas.ltxFailed'));
-    } finally {
-        if(!opts.cascade){
-            node.running = false;
-            refreshRunNodes(node, out);
-        }
-    }
-}
-async function runComfyNode(nodeId, opts={}){
-    const node = nodes.find(n => n.id === nodeId);
-    if(!node || (node.running && !opts.cascade)) return;
-    const cascadeTargetId = cascadeTargetIdFromOptions(opts);
-    const sources = orderedSources(node, generatorSources(node));
-    const prompt = sources.map(s => s.prompt).filter(Boolean).join('\n\n');
-    const allRefs = sources.flatMap(s => s.refs || []);
-    const refs = imageRefsOnly(allRefs);
-    const mode = node.mode || 'text';
-    const customImageFields = mode === 'custom' ? comfyFields(node, 'image') : [];
-    const customVideoFields = mode === 'custom' ? comfyFields(node, 'video') : [];
-    const customAudioFields = mode === 'custom' ? comfyFields(node, 'audio') : [];
-    const customPromptFields = mode === 'custom' ? comfyFields(node, 'prompt') : [];
-    if((mode === 'text' || (mode === 'custom' && customPromptFields.length)) && !prompt){ alert(tr('canvas.needPrompt')); return; }
-    if((mode !== 'text' && mode !== 'custom' && !refs.length) || (mode === 'custom' && refs.length < customImageFields.length)){ alert(tr('canvas.needImage')); return; }
-    if(mode === 'custom' && videoRefsOnly(allRefs).length < customVideoFields.length){ alert(tr('canvas.comfyNoWorkflow')); return; }
-    if(mode === 'custom' && audioRefsOnly(allRefs).length < customAudioFields.length){ alert(tr('canvas.comfyNoWorkflow')); return; }
-    let out = outputForNode(node, 480);
-    const pendingId = uid('p');
-    const run = runSnapshot(node, prompt, refs);
-    run.taskLabel = comfyRunLabel(node);
-    const requestSize = mode === 'text' ? {width:Number(node.width || 1024), height:Number(node.height || 1024)} : null;
-    if(out) out._pending = [...(out._pending||[]), makePendingForRun(pendingId, run, node, {refs, requestSize, cascadeTargetId})];
-    if(!opts.cascade){
-        node.running = true;
-        refreshRunNodes(node, out);
-        setTimeout(() => { node.running = false; refreshRunNodes(node, out); }, 2000);
-    }
-    else refreshRunNodes(node, out);
-    try {
-        let images = [];
-        if(mode === 'text'){
-            run.taskLabel = tr('canvas.comfyText');
-            const result = await runQueuedComfyGenerate({
-                prompt,
-                width:Number(node.width || 1024),
-                height:Number(node.height || 1024),
-                workflow_json:'Z-Image.json',
-                type:'zimage',
-                client_id:CLIENT_ID
-            }, {cascadeTargetId});
-            run.request = requestMetaFromResult(result);
-            images = comfyResultOutputs(result);
-        } else if(mode === 'enhance'){
-            run.taskLabel = tr('canvas.comfyEnhance');
-            const inputName = await comfyNameForRef(refs[0]);
-            const enhance = await runQueuedComfyGenerate({
-                workflow_json:'Z-Image-Enhance.json',
-                params:{
-                    "15": { image:inputName },
-                    "204": { value:Number(node.enhanceStrength ?? 0.5) }
-                },
-                type:'enhance',
-                client_id:CLIENT_ID
-            }, {cascadeTargetId});
-            run.request = requestMetaFromResult(enhance);
-            if(enhance.error) throw new Error(actionFailed('canvas.comfyEnhance', enhance.error));
-            if(!enhance.images?.length) throw new Error(noReturnedImage('canvas.comfyEnhance'));
-            if(node.enhanceUpscale){
-                images = await runComfyUpscale(enhance.images?.[0], node.enhanceUpscaleRes || 2048, {cascadeTargetId});
-            } else {
-                images = enhance.images || [];
-            }
-        } else if(mode === 'custom'){
-            const workflowName = validComfyWorkflowName(node.comfyWorkflow || comfyWorkflows[0]?.name || '');
-            run.taskLabel = workflowName || tr('canvas.comfyCustom');
-            if(node.comfyWorkflow && node.comfyWorkflow !== workflowName) node.comfyWorkflow = workflowName;
-            const wf = await ensureComfyWorkflow(workflowName);
-            if(!workflowName || !wf) throw new Error(tr('canvas.comfyNoWorkflow'));
-            const fields = wf?.config?.fields || [];
-            const params = {};
-            const imageFields = fields.filter(f => comfyFieldKind(f) === 'image');
-            const videoFields = fields.filter(f => comfyFieldKind(f) === 'video');
-            const audioFields = fields.filter(f => comfyFieldKind(f) === 'audio');
-            const promptFields = fields.filter(f => comfyFieldKind(f) === 'prompt');
-            const settingFields = fields.filter(f => comfyFieldKind(f) === 'setting');
-            const assignMediaFields = async (mediaFields, mediaRefs) => {
-                const names = [];
-                for(const ref of mediaRefs.slice(0, mediaFields.length)) names.push(await comfyNameForRef(ref));
-                mediaFields.forEach((f, i) => {
-                    if(!f.node || !f.input) return;
-                    params[f.node] = params[f.node] || {};
-                    params[f.node][f.input] = names[i] || '';
-                });
-            };
-            await assignMediaFields(imageFields, refs);
-            await assignMediaFields(videoFields, videoRefsOnly(allRefs));
-            await assignMediaFields(audioFields, audioRefsOnly(allRefs));
-            promptFields.forEach(f => {
-                if(!f.node || !f.input) return;
-                params[f.node] = params[f.node] || {};
-                params[f.node][f.input] = prompt;
-            });
-            settingFields.forEach(f => {
-                if(!f.node || !f.input) return;
-                params[f.node] = params[f.node] || {};
-                if(comfyRandomEnabled(f) && comfyRandomActive(node, f.id)){
-                    node.comfyParams = node.comfyParams || {};
-                    node.comfyParams[f.id] = comfyRandomValue(f);
-                }
-                params[f.node][f.input] = comfyParamValue(node, f);
-            });
-            const result = await runQueuedComfyGenerate({
-                prompt,
-                workflow_json:workflowName,
-                params,
-                type:'workflow-custom',
-                client_id:CLIENT_ID
-            }, {cascadeTargetId});
-            run.request = requestMetaFromResult(result);
-            if(result.error) throw new Error(actionFailed('canvas.comfyCustom', result.error));
-            images = comfyResultOutputs(result);
-            if(!images.length) throw new Error(noReturnedImage('canvas.comfyCustom'));
-        } else {
-            run.taskLabel = tr('canvas.comfyEdit');
-            const names = [];
-            for (const ref of refs.slice(0, 3)) names.push(await comfyNameForRef(ref));
-            const result = await runQueuedComfyGenerate({
-                prompt,
-                workflow_json:'Flux2-Klein.json',
-                type:'klein',
-                params:{
-                    "168": { text:prompt },
-                    "158": { noise_seed:Math.floor(Math.random() * 1000000) },
-                    "278": { image:names[0] || "" },
-                    "270": { image:names[1] || "" },
-                    "292": { image:names[2] || "" },
-                    "313": { value:Boolean(names[1]) },
-                    "314": { value:Boolean(names[2]) }
-                },
-                client_id:CLIENT_ID
-            }, {cascadeTargetId});
-            run.request = requestMetaFromResult(result);
-            if(result.error) throw new Error(actionFailed('canvas.comfyEdit', result.error));
-            if(!result.images?.length) throw new Error(noReturnedImage('canvas.comfyEdit'));
-            images = node.editUpscale ? await runComfyUpscale(result.images?.[0], node.editUpscaleRes || 2048, {cascadeTargetId}) : result.images || [];
-        }
-        const meta = collectRunMeta(out, pendingId);
-        if(out) out._pending = (out._pending||[]).filter(p => p.id !== pendingId);
-        appendOutputImages(out, images, refs[0], [meta]);
-        mergeGeneratedOutputs(node, images, Boolean(opts.cascade));
-        addGenerationLog({run, outputs:images, runMs:meta.runMs || 0});
-        node.runStatus = 'done'; node.runError = '';
-        refreshRunNodes(node, out);
-        scheduleSave();
-    } catch(err) {
-        const meta = collectRunMeta(out, pendingId);
-        addGenerationLog({run, outputs:[], runMs:meta.runMs || 0, error:err.message || String(err)});
-        if(out) out._pending = (out._pending||[]).filter(p => p.id !== pendingId);
-        if(isCascadeAbortError(err)){
-            refreshRunNodes(node, out);
-            if(opts.cascade) throw err;
-            return;
-        }
-        node.runStatus = 'failed'; node.runError = err.message || String(err);
-        refreshRunNodes(node, out);
-        if(opts.cascade) throw err;
-        alert(err.message || actionFailed('canvas.comfyGenerate'));
-    }
-}
 async function callCanvasLLM(node, message, messages=[], options={}){
     const llmProv = resolveChatProviderId(node.llmProvider || 'comfly');
     const model = resolveChatModel(node.model || node.llmMsModel, llmProv);
@@ -10161,7 +8378,6 @@ function runCascadeNodeByType(node, opts={}){
     if(node.type === 'msgen') return runMsGenNode(node.id, runOpts);
     if(node.type === 'llm') return runLLMNode(node.id, runOpts);
     if(node.type === 'video') return runVideoNode(node.id, runOpts);
-    if(node.type === 'rh') return runRhNode(node.id, runOpts);
     return Promise.resolve();
 }
 async function runCascadeNodeWithLoopContext(node, ctx, opts={}){
@@ -10193,7 +8409,7 @@ async function runLimitedCascadeRounds(rounds, limit, runner){
     return Promise.allSettled(workers);
 }
 function canvasRunTypes(){
-    return ['generator','msgen','llm','video','rh'];
+    return ['generator','msgen','llm','video'];
 }
 function canvasWorkflowEdges(){
     const runTypes = canvasRunTypes();
@@ -10433,7 +8649,6 @@ async function runOneCascadePass(order, options={}){
             else if(node.type === 'msgen') await runMsGenNode(id, {cascade:true, cascadeTargetId:targetId});
             else if(node.type === 'llm') await runLLMNode(id, {cascade:true, cascadeTargetId:targetId});
             else if(node.type === 'video') await runVideoNode(id, {cascade:true, cascadeTargetId:targetId});
-            else if(node.type === 'rh') await runRhNode(id, {cascade:true, cascadeTargetId:targetId});
             if(targetId) ensureCascadeActive(targetId);
             node.runStatus = 'done';
             refreshNodes([id]);
@@ -10497,7 +8712,6 @@ async function runLLMChat(nodeId){
 function deleteNode(id, event){
     event?.stopPropagation();
     pushUndo();
-    destroyLTXEditor(nodes.find(n => n.id === id));
     nodes = nodes.filter(n => n.id !== id);
     connections = connections.filter(c => c.from !== id && c.to !== id);
     selected.delete(id);
@@ -10594,18 +8808,9 @@ function runSnapshot(node, prompt, refs=[]){
         refs: (refs || []).map(ref => ({url:ref.url, name:ref.name || 'image'})).filter(ref => ref.url),
     };
 }
-function comfyRunLabel(node){
-    const mode = node?.mode || 'text';
-    if(mode === 'text') return tr('canvas.comfyText');
-    if(mode === 'enhance') return tr('canvas.comfyEnhance');
-    if(mode === 'edit') return tr('canvas.comfyEdit');
-    if(mode === 'custom') return node?.comfyWorkflow || tr('canvas.comfyCustom');
-    return tr('canvas.comfyGenerate');
-}
 function runTaskLabel(run){
     const node = run?.node || {};
     if(run?.taskLabel) return run.taskLabel;
-    if(run?.nodeType === 'comfy') return comfyRunLabel(node);
     if(run?.nodeType === 'generator') return node.model || 'API Image';
     if(run?.nodeType === 'video') return node.model || 'Video';
     if(run?.nodeType === 'msgen') return node.msCustomModel || node.msgenModel || 'Modelscope';
@@ -10618,7 +8823,6 @@ function requestMetaFromResult(result={}){
         provider_id: result.provider_id || result.params?.provider_id || '',
         backend: result.backend || '',
         prompt_id: result.prompt_id || '',
-        workflow_json: result.workflow_json || '',
         seed: result.seed || '',
     };
 }
@@ -10627,23 +8831,9 @@ function runPlatformLabel(run){
     if(run?.nodeType === 'generator') return providerById(node.apiProvider || 'comfly')?.name || node.apiProvider || 'API';
     if(run?.nodeType === 'msgen') return 'Modelscope';
     if(run?.nodeType === 'video') return providerById(node.apiProvider || 'comfly')?.name || node.apiProvider || 'Video';
-    if(run?.nodeType === 'comfy') return tr('canvas.comfyGenerate');
     return run?.nodeType || 'Generate';
 }
-function comfyLabelFromWorkflow(workflow){
-    const name = String(workflow || '').toLowerCase();
-    if(!name) return '';
-    if(name === 'z-image.json') return tr('canvas.comfyText');
-    if(name === 'z-image-enhance.json' || name === 'upscale.json') return tr('canvas.comfyEnhance');
-    if(name === 'flux2-klein.json') return tr('canvas.comfyEdit');
-    return workflow;
-}
 function logTaskLabel(log){
-    const req = log?.request || {};
-    if(log?.platform === 'ComfyUI'){
-        const byWorkflow = comfyLabelFromWorkflow(req.workflow_json || req.workflow);
-        if(byWorkflow) return byWorkflow;
-    }
     return log?.model || '-';
 }
 function addGenerationLog({run, outputs=[], runMs=0, error=''}) {
@@ -10683,10 +8873,9 @@ function renderCanvasLog(){
         const taskId = req.task_id || req.taskId || req.prompt_id || req.promptId || '';
         const requestId = req.request_id || req.requestId || req.id || '';
         const backend = req.backend || req.provider_id || req.providerId || '';
-        const workflow = req.workflow_json || req.workflow || '';
         const taskLabel = logTaskLabel(log);
         const idText = taskId || requestId || '';
-        const backendText = workflow || backend || '';
+        const backendText = backend || '';
         const subParts = [
             date,
             `${langIsEn() ? 'outputs' : '杈撳嚭'} ${(log.outputs || []).length}`,
@@ -10735,18 +8924,6 @@ function renderCanvasLog(){
     bindCanvasLogCopy('[data-error]', 'error');
     refreshIcons();
 }
-async function importWorkflowAssetUrl(url, name='workflow'){
-    if(!canvas || !url) return;
-    try {
-        const res = await fetch(url, {cache:'no-store'});
-        if(!res.ok) throw new Error('读取工作流资产失败');
-        const blob = await res.blob();
-        const fileName = name && /\.(json|zip)$/i.test(name) ? name : (url.split('/').pop()?.split('?')[0] || `${name || 'workflow'}.zip`);
-        await importWorkflowFile(new File([blob], fileName, {type:blob.type || 'application/octet-stream'}));
-    } catch(err) {
-        showErrorModal(err.message || '导入工作流资产失败', '导入工作流');
-    }
-}
 function openCanvasLog(event){
     event?.preventDefault?.();
     event?.stopPropagation?.();
@@ -10780,15 +8957,13 @@ function makePendingForRun(id, run, node, options={}, task={}){
 }
 function mergeGeneratedOutputs(node, outputs, append=false){
     if(!node) return;
-    const keepGeneratedMedia = ['rh','video'].includes(node.type);
+    const keepGeneratedMedia = ['video'].includes(node.type);
     const clean = (outputs || []).map(item => {
         const url = outputUrlValue(item);
         if(!url) return null;
         const kind = node.type === 'video'
             ? 'video'
-            : ['rh'].includes(node.type) && isVideoUrl(url)
-                ? 'video'
-                : mediaKindForOutputItem(item);
+            : mediaKindForOutputItem(item);
         if(!keepGeneratedMedia && kind !== 'image') return null;
         return kind === 'image' ? url : {url, kind};
     }).filter(Boolean);
@@ -10835,16 +9010,6 @@ async function createCanvasImageTask(payload, options={}){
     }, options);
     if(!res.ok) throw new Error(await responseErrorMessage(res, tr('canvas.generationFailed')));
     return res.json();
-}
-async function createCanvasComfyTask(payload, options={}){
-    throw new Error(tr('canvas.comfyNoWorkflow'));
-}
-async function waitCanvasComfyTaskResult(taskId, options={}){
-    throw new Error(tr('canvas.comfyNoWorkflow'));
-}
-async function runQueuedComfyGenerate(payload, options={}){
-    const task = await createCanvasComfyTask(payload, options);
-    return waitCanvasComfyTaskResult(task.task_id, options);
 }
 function extractUpstreamTaskId(text){
     const match = String(text || '').match(/(?:task_id|taskId|task id)\s*[:=]\s*([A-Za-z0-9_.:-]+)/i);
@@ -11307,43 +9472,9 @@ promptTemplatePanel?.addEventListener('click', event => {
     }
 });
 canvasAssetToggle?.addEventListener('click', () => toggleCanvasAssetLibrary());
-workflowTransferToggle?.addEventListener('click', () => {
-    if(workflowTransferModal?.classList.contains('open')) closeWorkflowTransferModal();
-    else openWorkflowTransferModal();
-});
 canvasLogToggle?.addEventListener('click', event => {
     event.preventDefault();
     openCanvasLog();
-});
-workflowImportInput?.addEventListener('change', event => {
-    const file = event.target.files?.[0];
-    if(file) importWorkflowFile(file);
-    event.target.value = '';
-});
-workflowImportDropZone?.addEventListener('click', () => workflowImportInput?.click());
-workflowImportDropZone?.addEventListener('dragenter', event => {
-    event.preventDefault();
-    event.stopPropagation();
-    workflowImportDropZone.classList.add('drag-over');
-});
-workflowImportDropZone?.addEventListener('dragover', event => {
-    event.preventDefault();
-    event.stopPropagation();
-    event.dataTransfer.dropEffect = 'copy';
-    workflowImportDropZone.classList.add('drag-over');
-});
-workflowImportDropZone?.addEventListener('dragleave', event => {
-    event.preventDefault();
-    event.stopPropagation();
-    if(!workflowImportDropZone.contains(event.relatedTarget)) workflowImportDropZone.classList.remove('drag-over');
-});
-workflowImportDropZone?.addEventListener('drop', event => {
-    event.preventDefault();
-    event.stopPropagation();
-    workflowImportDropZone.classList.remove('drag-over');
-    const file = [...(event.dataTransfer?.files || [])].find(item => /\.(json|zip)$/i.test(item.name || ''));
-    if(file) importWorkflowFile(file);
-    else setStatus('请拖入 JSON 或 ZIP 工作流文件');
 });
 canvasAssetCloseBtn?.addEventListener('click', () => toggleCanvasAssetLibrary(false));
 canvasAssetLibrarySelect?.addEventListener('change', () => {
@@ -11378,30 +9509,6 @@ canvasAssetPanel?.addEventListener('wheel', event => {
     scroller.scrollTop += event.deltaY;
     scroller.scrollLeft += event.deltaX;
 }, {passive:false, capture:true});
-workflowTransferModal?.addEventListener('wheel', event => {
-    event.stopPropagation();
-}, {passive:true, capture:true});
-workflowTransferModal?.addEventListener('dragover', event => {
-    event.preventDefault();
-    event.stopPropagation();
-    if(workflowImportDropZone){
-        event.dataTransfer.dropEffect = 'copy';
-        workflowImportDropZone.classList.add('drag-over');
-    }
-});
-workflowTransferModal?.addEventListener('dragleave', event => {
-    event.preventDefault();
-    event.stopPropagation();
-    if(!workflowTransferModal.contains(event.relatedTarget)) workflowImportDropZone?.classList.remove('drag-over');
-});
-workflowTransferModal?.addEventListener('drop', event => {
-    event.preventDefault();
-    event.stopPropagation();
-    workflowImportDropZone?.classList.remove('drag-over');
-    const file = [...(event.dataTransfer?.files || [])].find(item => /\.(json|zip)$/i.test(item.name || ''));
-    if(file) importWorkflowFile(file);
-    else setStatus('请拖入 JSON 或 ZIP 工作流文件');
-});
 function hasCanvasAssetSaveDrop(dataTransfer){
     return hasOutputImageDrag(dataTransfer) || hasImageDropData(dataTransfer);
 }
@@ -11459,12 +9566,6 @@ assetManagerModal?.addEventListener('change', event => {
         else managerSelectedPromptIds.delete(promptCheck.dataset.managerPromptCheck);
         shouldRender = true;
     }
-    const workflowCheck = event.target.closest?.('[data-manager-workflow-check]');
-    if(workflowCheck){
-        if(workflowCheck.checked) managerSelectedWorkflowIds.add(workflowCheck.dataset.managerWorkflowCheck);
-        else managerSelectedWorkflowIds.delete(workflowCheck.dataset.managerWorkflowCheck);
-        shouldRender = true;
-    }
     if(shouldRender) renderAssetManager();
 });
 assetManagerModal?.addEventListener('click', async event => {
@@ -11472,32 +9573,8 @@ assetManagerModal?.addEventListener('click', async event => {
     if(assetLib){ activeCanvasAssetLibraryId = assetLib.dataset.managerAssetLib || ''; activeCanvasAssetCategoryId = ''; managerSelectedAssetIds.clear(); renderAssetManager(); return; }
     const assetCat = event.target.closest?.('[data-manager-asset-cat]');
     if(assetCat){ activeCanvasAssetCategoryId = assetCat.dataset.managerAssetCat || ''; managerSelectedAssetIds.clear(); renderAssetManager(); return; }
-    const workflowLib = event.target.closest?.('[data-manager-workflow-lib]');
-    if(workflowLib){ activeCanvasAssetLibraryId = workflowLib.dataset.managerWorkflowLib || ''; activeCanvasWorkflowCategoryId = ''; managerSelectedWorkflowIds.clear(); renderAssetManager(); return; }
-    const workflowCat = event.target.closest?.('[data-manager-workflow-cat]');
-    if(workflowCat){ activeCanvasWorkflowCategoryId = workflowCat.dataset.managerWorkflowCat || ''; managerSelectedWorkflowIds.clear(); renderAssetManager(); return; }
     const promptLib = event.target.closest?.('[data-manager-prompt-lib]');
     if(promptLib){ activePromptLibraryId = promptLib.dataset.managerPromptLib || 'system'; managerSelectedPromptIds.clear(); renderAssetManager(); return; }
-    const workflowRename = event.target.closest?.('[data-manager-workflow-rename]');
-    if(workflowRename){
-        const itemId = workflowRename.dataset.managerWorkflowRename || '';
-        const item = (activeCanvasWorkflowCategory()?.items || []).find(entry => entry.id === itemId);
-        const name = window.prompt('工作流名称', item?.name || '');
-        if(!item || !String(name || '').trim()) return;
-        const data = await fetch(`/api/asset-library/items/${encodeURIComponent(item.id)}`, {method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name})}).then(r => r.json());
-        canvasAssetLibrary = data.library || canvasAssetLibrary;
-        renderAssetManager(); renderCanvasAssetLibrary(); return;
-    }
-    const workflowRemove = event.target.closest?.('[data-manager-workflow-remove]');
-    if(workflowRemove){
-        const itemId = workflowRemove.dataset.managerWorkflowRemove || '';
-        const item = (activeCanvasWorkflowCategory()?.items || []).find(entry => entry.id === itemId);
-        if(!item || !window.confirm(`删除工作流“${item.name || 'workflow'}”？`)) return;
-        const data = await fetch(`/api/asset-library/items/${encodeURIComponent(item.id)}`, {method:'DELETE'}).then(r => r.json());
-        canvasAssetLibrary = data.library || canvasAssetLibrary;
-        managerSelectedWorkflowIds.delete(item.id);
-        renderAssetManager(); renderCanvasAssetLibrary(); return;
-    }
     const assetRename = event.target.closest?.('[data-manager-asset-rename]');
     if(assetRename){
         const itemId = assetRename.dataset.managerAssetRename || '';
@@ -11602,32 +9679,6 @@ assetManagerModal?.addEventListener('click', async event => {
         const data = await fetch('/api/asset-library/items/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({library_id:activeCanvasAssetLibraryId, ids:[...managerSelectedAssetIds]})}).then(r => r.json());
         canvasAssetLibrary = data.library || canvasAssetLibrary;
         managerSelectedAssetIds.clear();
-        renderAssetManager(); renderCanvasAssetLibrary(); return;
-    }
-    if(event.target.closest?.('[data-manager-workflow-export]')){
-        const items = (activeCanvasWorkflowCategory()?.items || []).filter(item => managerSelectedWorkflowIds.has(item.id));
-        if(items.length === 1) {
-            const item = items[0];
-            downloadUrl(item.url, `${item.name || 'workflow'}${String(item.url).toLowerCase().endsWith('.json') ? '.json' : '.zip'}`);
-        } else if(items.length > 1) {
-            const res = await fetch('/api/canvas-assets/download', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({filename:'workflows.zip', items:items.map(item => ({url:item.url, name:item.name || 'workflow'}))})});
-            if(res.ok) downloadBlob(await res.blob(), 'workflows.zip');
-        }
-        return;
-    }
-    if(event.target.closest?.('[data-manager-workflow-delete]')){
-        if(!managerSelectedWorkflowIds.size) return;
-        const data = await fetch('/api/asset-library/items/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({library_id:activeCanvasAssetLibraryId, ids:[...managerSelectedWorkflowIds]})}).then(r => r.json());
-        canvasAssetLibrary = data.library || canvasAssetLibrary;
-        managerSelectedWorkflowIds.clear();
-        renderAssetManager(); renderCanvasAssetLibrary(); return;
-    }
-    if(event.target.closest?.('[data-manager-workflow-cat-new]')){
-        const name = window.prompt('工作流分组名称', '工作流');
-        if(!String(name || '').trim()) return;
-        const data = await fetch('/api/asset-library/categories', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({library_id:activeCanvasAssetLibraryId, name, type:'workflow'})}).then(r => r.json());
-        canvasAssetLibrary = data.library || canvasAssetLibrary;
-        activeCanvasWorkflowCategoryId = data.category?.id || activeCanvasWorkflowCategoryId;
         renderAssetManager(); renderCanvasAssetLibrary(); return;
     }
     if(event.target.closest?.('[data-manager-prompt-lib-new]')){
@@ -11961,7 +10012,6 @@ function finishSelection(){
     window.onmousemove = null;
     window.onmouseup = null;
     render();
-    if(workflowTransferModal?.classList.contains('open')) updateWorkflowTransferMeta();
 }
 function renderSelectionHub(){
     selectionHub.innerHTML = '';
@@ -12015,6 +10065,7 @@ function performUndo(){
     const state = undoStack.pop();
     nodes = state.nodes;
     connections = state.connections;
+    migrateDeprecatedCanvasGenerationNodes(nodes);
     selected.clear();
     render();
     scheduleSave();
@@ -12074,32 +10125,6 @@ function pasteNodes(){
     render();
     scheduleSave();
 }
-function selectedWorkflowPayload(){
-    const ids = new Set([...selected].filter(id => nodes.some(n => n.id === id)));
-    const pickedNodes = [...ids].map(id => nodes.find(n => n.id === id)).filter(Boolean);
-    const pickedConnections = connections.filter(c => ids.has(c.from) && ids.has(c.to)).map(c => ({...c}));
-    return {
-        format:'infinite-canvas-workflow',
-        version:1,
-        exported_at:Date.now(),
-        nodes:serializableCanvasNodes(pickedNodes),
-        connections:pickedConnections
-    };
-}
-function workflowFilename(ext){
-    const title = (canvas?.title || 'canvas-workflow').replace(/[\\/:*?"<>|]+/g, '_').slice(0, 48) || 'canvas-workflow';
-    const stamp = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15);
-    return `${title}-${stamp}.${ext}`;
-}
-function downloadBlob(blob, filename){
-    const link = document.createElement('a');
-    link.href = URL.createObjectURL(blob);
-    link.download = filename;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    setTimeout(() => URL.revokeObjectURL(link.href), 1200);
-}
 function downloadUrl(url, filename='download'){
     if(!url) return Promise.resolve(false);
     const raw = canvasOriginalMediaUrl(url);
@@ -12114,194 +10139,6 @@ function downloadUrl(url, filename='download'){
     link.click();
     link.remove();
     return Promise.resolve(true);
-}
-function openWorkflowTransferModal(){
-    if(!canvas){ setStatus(tr('canvas.needCanvas')); return; }
-    if(canvasAssetLibraryOpen) toggleCanvasAssetLibrary(false);
-    updateWorkflowTransferMeta();
-    workflowTransferModal?.classList.add('open');
-    workflowTransferToggle?.classList.add('active');
-    refreshIcons();
-}
-function closeWorkflowTransferModal(){
-    workflowTransferModal?.classList.remove('open');
-    workflowTransferToggle?.classList.remove('active');
-    workflowImportDropZone?.classList.remove('drag-over');
-}
-function updateWorkflowTransferMeta(){
-    const payload = selectedWorkflowPayload();
-    const nodeCount = payload.nodes.length;
-    const connCount = payload.connections.length;
-    workflowExportMeta?.classList.remove('busy', 'success');
-    if(workflowExportMeta) workflowExportMeta.textContent = nodeCount ? `已选择 ${nodeCount} 个节点，${connCount} 条连线` : '未选择节点，请先框选要导出的组件';
-    if(workflowTransferSub) workflowTransferSub.textContent = nodeCount ? '导出当前框选内容，或把工作流导入到当前画布' : '请先框选节点再导出；导入会追加到当前画布';
-}
-function setWorkflowLibraryExportState(state='idle', text='瀵煎嚭鍒拌祫浜у簱'){
-    if(!workflowExportLibraryBtn) return;
-    workflowExportLibraryBtn.disabled = state === 'busy';
-    workflowExportLibraryBtn.classList.toggle('busy', state === 'busy');
-    workflowExportLibraryBtn.classList.toggle('success', state === 'success');
-    const icon = state === 'busy' ? 'loader-2' : state === 'success' ? 'check' : 'library-big';
-    workflowExportLibraryBtn.innerHTML = `<i data-lucide="${icon}" class="w-4 h-4"></i><span>${escapeHtml(text)}</span>`;
-    refreshIcons();
-}
-async function exportSelectedWorkflow(includeResources=false){
-    if(!canvas) return;
-    const payload = selectedWorkflowPayload();
-    if(!payload.nodes.length){
-        if(workflowExportMeta) workflowExportMeta.textContent = '未选择节点，请先框选要导出的组件';
-        if(workflowTransferSub) workflowTransferSub.textContent = '请先框选节点再导出；导入会追加到当前画布';
-        setStatus('未选择节点，请先框选要导出的组件');
-        return;
-    }
-    try {
-        if(!includeResources){
-            const filename = workflowFilename('json');
-            downloadBlob(new Blob([JSON.stringify(payload, null, 2)], {type:'application/json'}), filename);
-            setStatus('宸插鍑哄伐浣滄祦 JSON');
-            return;
-        }
-        const filename = workflowFilename('zip');
-        const res = await fetch('/api/canvas-workflows/export', {
-            method:'POST',
-            headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({...payload, include_resources:true, filename})
-        });
-        if(!res.ok) throw new Error(await responseErrorMessage(res, '导出工作流失败'));
-        const blob = await res.blob();
-        downloadBlob(blob, filename);
-        setStatus('宸插鍑哄寘鍚祫婧愮殑宸ヤ綔娴佸寘');
-    } catch(err) {
-        showErrorModal(err.message || '导出工作流失败', '导出工作流');
-    }
-}
-function defaultWorkflowAssetTarget(){
-    const libs = canvasAssetLibraries();
-    let lib = activeCanvasAssetLibrary() || libs[0] || null;
-    if(!lib) return {libraryId:'', categoryId:''};
-    let cat = (lib.categories || []).find(item => String(item.type || '').toLowerCase() === 'workflow');
-    if(!cat){
-        lib = libs.find(item => (item.categories || []).some(cat => String(cat.type || '').toLowerCase() === 'workflow')) || lib;
-        cat = (lib.categories || []).find(item => String(item.type || '').toLowerCase() === 'workflow');
-    }
-    return {libraryId:lib?.id || '', categoryId:cat?.id || ''};
-}
-async function exportSelectedWorkflowToLibrary(){
-    if(!canvas) return;
-    const payload = selectedWorkflowPayload();
-    if(!payload.nodes.length){
-        if(workflowExportMeta) workflowExportMeta.textContent = '未选择节点，请先框选要导出的组件';
-        setStatus('未选择节点，请先框选要导出的组件');
-        return;
-    }
-    try {
-        setWorkflowLibraryExportState('busy', '导出中...');
-        if(workflowExportMeta){
-            workflowExportMeta.classList.remove('success');
-            workflowExportMeta.classList.add('busy');
-            workflowExportMeta.textContent = '姝ｅ湪瀵煎嚭鍒拌祫浜у簱...';
-        }
-        if(workflowTransferSub) workflowTransferSub.textContent = '正在保存工作流到资产库';
-        setStatus('正在导出工作流到资产库...');
-        if(!canvasAssetLibrary?.libraries?.length) await loadCanvasAssetLibrary({renderPanel:false});
-        const filename = workflowFilename('zip');
-        const target = defaultWorkflowAssetTarget();
-        const res = await fetch('/api/canvas-workflows/export-to-library', {
-            method:'POST',
-            headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({...payload, include_resources:true, filename, name:filename.replace(/\.zip$/i, ''), library_id:target.libraryId, category_id:target.categoryId})
-        });
-        if(!res.ok) throw new Error(await responseErrorMessage(res, '瀵煎嚭鍒拌祫浜у簱澶辫触'));
-        const data = await res.json();
-        canvasAssetLibrary = data.library || canvasAssetLibrary;
-        activeCanvasAssetLibraryId = target.libraryId || canvasAssetLibrary.active_library_id || activeCanvasAssetLibraryId;
-        activeCanvasAssetCategoryId = data.item ? findCanvasAssetCategoryForItem(data.item.id)?.id || activeCanvasAssetCategoryId : activeCanvasAssetCategoryId;
-        renderCanvasAssetLibrary();
-        if(assetManagerModal?.classList.contains('open')) renderAssetManager();
-        const itemName = data.item?.name || '工作流';
-        if(workflowExportMeta){
-            workflowExportMeta.classList.remove('busy');
-            workflowExportMeta.classList.add('success');
-            workflowExportMeta.textContent = `已导出到资产库：${itemName}`;
-        }
-        if(workflowTransferSub) workflowTransferSub.textContent = '导出完成，可在资产库的工作流分组中查看';
-        setWorkflowLibraryExportState('success', '已导出');
-        setStatus(`已导出工作流到资产库：${itemName}`);
-        setTimeout(() => {
-            setWorkflowLibraryExportState('idle');
-            if(workflowTransferModal?.classList.contains('open')) updateWorkflowTransferMeta();
-        }, 1800);
-    } catch(err) {
-        setWorkflowLibraryExportState('idle');
-        workflowExportMeta?.classList.remove('busy', 'success');
-        showErrorModal(err.message || '导出到资产库失败', '导出工作流');
-    }
-}
-function findCanvasAssetCategoryForItem(itemId){
-    for(const lib of canvasAssetLibraries()){
-        for(const cat of lib.categories || []){
-            if((cat.items || []).some(item => item.id === itemId)) return cat;
-        }
-    }
-    return null;
-}
-function normalizeImportedWorkflow(data){
-    if(Array.isArray(data?.nodes)) return {nodes:data.nodes, connections:Array.isArray(data.connections) ? data.connections : []};
-    if(Array.isArray(data?.workflow?.nodes)) return {nodes:data.workflow.nodes, connections:Array.isArray(data.workflow.connections) ? data.workflow.connections : []};
-    return {nodes:[], connections:[]};
-}
-function insertWorkflowIntoCanvas(imported){
-    const srcNodes = (imported.nodes || []).filter(Boolean);
-    const srcConnections = (imported.connections || []).filter(Boolean);
-    if(!canvas || !srcNodes.length) throw new Error('宸ヤ綔娴佷腑娌℃湁鍙鍏ョ殑鑺傜偣');
-    pushUndo();
-    const minX = Math.min(...srcNodes.map(n => Number(n.x || 0)));
-    const minY = Math.min(...srcNodes.map(n => Number(n.y || 0)));
-    const target = lastMouseBoard && Number.isFinite(lastMouseBoard.x) ? lastMouseBoard : defaultPoint(0, 0);
-    const dx = target.x - minX;
-    const dy = target.y - minY;
-    const idMap = new Map();
-    const newNodes = srcNodes.map(n => {
-        const copy = JSON.parse(JSON.stringify(serializableCanvasNode(n)));
-        const oldId = copy.id || uid(copy.type || 'n');
-        copy.id = uid(copy.type || 'n');
-        copy.x = Number(copy.x || 0) + dx;
-        copy.y = Number(copy.y || 0) + dy;
-        copy.running = false;
-        idMap.set(oldId, copy.id);
-        return copy;
-    });
-    newNodes.forEach(node => {
-        if((node.type === 'group' || node.type === 'promptGroup') && Array.isArray(node.items)){
-            node.items = node.items.map(id => idMap.get(id) || id).filter(id => idMap.has(id) || nodes.some(n => n.id === id));
-        }
-    });
-    const newConnections = srcConnections
-        .map(c => ({...c, id:uid('c'), from:idMap.get(c.from), to:idMap.get(c.to)}))
-        .filter(c => c.from && c.to);
-    nodes.push(...newNodes);
-    connections.push(...newConnections);
-    selected.clear();
-    newNodes.forEach(n => selected.add(n.id));
-    sanitizeConnections();
-    syncGeneratorInputs();
-    render();
-    scheduleSave();
-    setStatus(`已导入 ${newNodes.length} 个节点`);
-}
-async function importWorkflowFile(file){
-    if(!canvas || !file) return;
-    try {
-        const form = new FormData();
-        form.append('file', file);
-        const res = await fetch('/api/canvas-workflows/import', {method:'POST', body:form});
-        if(!res.ok) throw new Error(await responseErrorMessage(res, '导入工作流失败'));
-        const data = await res.json();
-        insertWorkflowIntoCanvas(normalizeImportedWorkflow(data));
-        closeWorkflowTransferModal();
-    } catch(err) {
-        showErrorModal(err.message || '导入工作流失败', '导入工作流');
-    }
 }
 function startNodeDrag(e, node){
     if(e.button !== 0) return;
@@ -12370,7 +10207,6 @@ function onNodeDrag(e){
     });
     scheduleLinksRender();
     renderSelectionHub();
-    if(workflowTransferModal?.classList.contains('open')) updateWorkflowTransferMeta();
     scheduleMinimapRender();
 }
 function startNodeResize(e, node){
@@ -12746,7 +10582,6 @@ function refreshSelectionVisuals(){
     });
     renderLinks();
     renderSelectionHub();
-    if(workflowTransferModal?.classList.contains('open')) updateWorkflowTransferMeta();
     scheduleMinimapRender();
 }
 function pathEl(x1,y1,x2,y2,cls){
@@ -12884,7 +10719,7 @@ minimap?.addEventListener('mousedown', e => {
     };
 });
 function isZoomPreviewIgnoredTarget(target){
-    return !!target?.closest?.('#createMenu, #linkCreateMenu, #nodeInputMenu, #nodeOutputMenu, #imageNodeMenu, .minimap, #canvasAssetPanel, #assetManagerModal, #workflowTransferModal, #logModal, #promptTemplateModal, #imageEditModal, #outputLightbox');
+    return !!target?.closest?.('#createMenu, #linkCreateMenu, #nodeInputMenu, #nodeOutputMenu, #imageNodeMenu, .minimap, #canvasAssetPanel, #assetManagerModal, #logModal, #promptTemplateModal, #imageEditModal, #outputLightbox');
 }
 board.addEventListener('mousedown', e => {
     if(!zoomPreviewState || e.button !== 0) return;
@@ -13022,8 +10857,7 @@ board.addEventListener('drop', async e => {
         try {
             const payload = JSON.parse(e.dataTransfer.getData('application/x-canvas-asset') || '{}');
             if(payload?.url) {
-                if(String(payload.kind || '').toLowerCase() === 'workflow') await importWorkflowAssetUrl(payload.url, payload.name || 'workflow');
-                else createImageCardFromUrl(payload.url, screenToWorld(e.clientX, e.clientY), payload.name || 'asset');
+                createImageCardFromUrl(payload.url, screenToWorld(e.clientX, e.clientY), payload.name || 'asset');
             }
         } catch(err) {}
         return;
@@ -13074,7 +10908,6 @@ window.addEventListener('keydown', e => {
         && !promptTemplateModal?.classList.contains('open')
         && !outputLightbox.classList.contains('open')
         && !assetManagerModal?.classList.contains('open')
-        && !workflowTransferModal?.classList.contains('open')
         && !logModal?.classList.contains('open')){
         if(e.repeat) return;
         e.preventDefault();
@@ -13145,7 +10978,6 @@ function deleteSelectedNodes(){
         }
     };
     selected.forEach(collect);
-    toDelete.forEach(id => destroyLTXEditor(nodes.find(n => n.id === id)));
     nodes = nodes.filter(n => !toDelete.has(n.id));
     connections = connections.filter(c => !toDelete.has(c.from) && !toDelete.has(c.to));
     selected.clear();
@@ -13183,7 +11015,6 @@ window.onload = async () => {
     initOutputPreviewZoomEvents();
     applyViewport();
     await loadConfig();
-    pruneMissingComfyWorkflows();
     // 缂栬緫鍣ㄩ〉鍙礋璐ｆ墦寮€鍗曚釜鐢诲竷锛氬繀椤诲甫 ?id锛涙病鏈?id 灏卞洖鍒扮嫭绔嬬殑閫夌敾甯冮〉闈€?    const openId = new URLSearchParams(window.location.search).get('id');
     if(openId){
         await openCanvas(openId);

@@ -682,19 +682,6 @@ button[disabled], .primary[disabled], .primary-sm[disabled], .btn[disabled], .ic
   margin-bottom: 6px;
 }
 
-.workflow-box {
-  padding: 8px;
-  margin-bottom: 8px;
-  border: 1px solid var(--line);
-  border-radius: 13px;
-  background: var(--soft);
-}
-
-#genRhWorkflow {
-  width: 100%;
-  margin-bottom: 8px;
-}
-
 .gen-prompt {
   min-height: 62px;
   margin-bottom: 7px;

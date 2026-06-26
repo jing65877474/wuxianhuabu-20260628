@@ -37,7 +37,6 @@ html.studio-theme-dark body .provider-card.provider-card-banner { border-color:v
 body.studio-theme-dark .provider-card.provider-card-banner.active,
 html.studio-theme-dark body .provider-card.provider-card-banner.active { box-shadow:inset 0 0 0 1px rgba(255,255,255,.035); }
 .provider-card-banner img { height:22px; width:auto; max-width:100%; object-fit:contain; display:block; }
-.provider-card-banner .runninghub-icon { height:18px; max-width:132px; }
 .provider-card-banner .volcengine-icon { height:22px; max-width:132px; }
 .provider-card-banner .ms-icon-dark { display:none; }
 body.studio-theme-dark .provider-card-banner .ms-icon-light,
@@ -275,31 +274,11 @@ html.studio-theme-dark body .picker-sum-chip-empty { background:#e2e8f0 !importa
 .picker-foot { display:flex; align-items:center; justify-content:flex-end; gap:8px; padding:12px 20px; border-top:1px solid var(--line); }
 .ms-hint { display:none; margin-top:8px; color:var(--muted); font-size:11.5px; line-height:1.65; font-weight:600; }
 body.show-ms .ms-hint { display:block; }
-.runninghub-hint { display:none; margin-top:8px; color:var(--muted); font-size:11.5px; line-height:1.65; font-weight:600; }
-body.show-runninghub .runninghub-hint { display:block; }
-.runninghub-hint a { color:var(--text); font-weight:800; text-decoration:underline; text-underline-offset:3px; }
 .volcengine-hint { display:none; margin-top:8px; color:var(--muted); font-size:11.5px; line-height:1.65; font-weight:600; }
 body.show-volcengine-standalone .volcengine-hint { display:block; }
-.rh-key-stack { display:none; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
-body.show-runninghub .rh-key-stack { display:grid; }
 .volcengine-key-stack { display:none; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
 body.show-volcengine-standalone .volcengine-key-stack:not([hidden]) { display:grid; }
-.volcengine-key-stack .rh-key-item:first-child,
-.volcengine-key-stack .volcengine-project-card { grid-column:1/-1; }
 .volcengine-project-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }
-.rh-key-item { display:flex; flex-direction:column; gap:12px; padding:14px; border:1px solid var(--line); border-radius:14px; background:var(--soft); min-width:0; }
-body.studio-theme-dark .rh-key-item { border-color:var(--line-strong); background:rgba(255,255,255,.035); }
-.rh-key-head { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:start; gap:14px; }
-.rh-key-head > div:first-child { min-width:0; }
-.rh-key-title { color:var(--text); font-size:13px; line-height:1.2; font-weight:950; }
-.rh-key-desc { margin-top:4px; color:var(--muted); font-size:11px; line-height:1.45; font-weight:650; }
-.rh-key-links { display:flex; align-items:center; justify-content:flex-end; gap:7px; flex-wrap:wrap; color:var(--faint); font-size:11px; line-height:1.5; font-weight:800; }
-.rh-key-links a { height:30px; padding:0 11px; border:1px solid var(--line-strong); border-radius:9px; background:var(--panel); color:var(--text); display:inline-flex; align-items:center; gap:5px; font-size:11.5px; font-weight:900; text-decoration:none; box-shadow:0 2px 6px rgba(15,23,42,.06); transition:all .15s ease; }
-.rh-key-links a:hover { border-color:var(--text); transform:translateY(-1px); box-shadow:0 8px 18px rgba(15,23,42,.12); }
-.rh-key-links a svg { flex:0 0 auto; }
-body.show-runninghub .api-standard-key-row,
-body.show-runninghub .api-key-label,
-body.show-runninghub #keyHint { display:none !important; }
 body.show-jimeng .api-base-url-field,
 body.show-jimeng .api-key-field { display:none !important; }
 .jimeng-cli-panel { grid-column:1/-1; display:none; flex-direction:column; gap:12px; margin-top:2px; padding:14px; border:1px solid var(--line); border-radius:14px; background:var(--soft); }
@@ -319,9 +298,6 @@ body.show-jimeng .jimeng-cli-panel:not([hidden]) { display:flex; }
 .jimeng-help-toolbar select { height:38px; min-width:180px; border:1px solid var(--line); border-radius:10px; background:var(--panel); color:var(--text); padding:0 10px; font-weight:800; outline:none; }
 .jimeng-help-output { margin:0; padding:18px 20px; min-height:420px; max-height:62vh; overflow:auto; background:var(--soft); color:var(--text); font:12px/1.55 ui-monospace,Menlo,Consolas,monospace; white-space:pre-wrap; word-break:break-word; }
 body.show-volcengine .api-key-label { display:inline-flex !important; }
-.runninghub-config-block[hidden] { display:none !important; }
-.runninghub-config-block { display:none; gap:14px; }
-body.show-runninghub .runninghub-config-block { display:flex; }
 .rh-paste-row { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; align-items:center; }
 .rh-paste-input { width:100%; height:40px; border:1px solid var(--line); border-radius:11px; background:var(--panel); color:var(--text); outline:none; padding:0 12px; font-size:13px; font-weight:700; }
 .rh-paste-input:focus { border-color:var(--text); }
@@ -518,25 +494,6 @@ body.studio-theme-dark .rh-editor-gnode.cat-video rect { fill:#3a2413; stroke:#f
 body.studio-theme-dark .rh-editor-gnode.cat-audio rect { fill:#1a2845; stroke:#60a5fa; }
 .rh-editor-empty { padding:18px; border:1px dashed var(--line); border-radius:12px; color:var(--faint); text-align:center; font-size:12px; font-weight:750; }
 .ms-hint a { color:var(--text); font-weight:800; text-decoration:underline; text-underline-offset:3px; }
-/* MS 平台不需要协议选择 */
-body.show-ms #probeAsyncBtn,
-body.show-ms .advanced-endpoints,
-body.show-ms .protocol-selector-wrap,
-body.show-ms .image-request-mode-wrap,
-body.show-runninghub #testUrlBtn,
-body.show-runninghub #verifyResult,
-body.show-runninghub #modelsHead,
-body.show-runninghub .model-grid,
-body.show-runninghub #probeAsyncBtn,
-body.show-runninghub .advanced-endpoints,
-body.show-runninghub .protocol-selector-wrap,
-body.show-runninghub .image-request-mode-wrap,
-body.show-volcengine-standalone #probeAsyncBtn,
-body.show-volcengine-standalone .protocol-selector-wrap,
-body.show-volcengine-standalone .image-request-mode-wrap,
-body.show-jimeng #probeAsyncBtn,
-body.show-jimeng .advanced-endpoints,
-body.show-jimeng .image-request-mode-wrap { display:none !important; }
 .protocol-selector-wrap,
 .image-request-mode-wrap { height:36px; padding:0 4px; flex-shrink:0; background:var(--panel); }
 body.studio-theme-dark .protocol-selector-wrap,
@@ -832,24 +789,6 @@ html.studio-theme-dark body .field-frame {
     background:var(--api-soft-bg);
     border-color:var(--api-line-strong);
     box-shadow:none;
-}
-
-.key-panel,
-.advanced-endpoints,
-.rh-key-item,
-.rh-card-group,
-.lora-row,
-.recommend-note,
-.picker-summary {
-    border-color:var(--api-line);
-    background:var(--api-soft-bg);
-    border-radius:8px;
-}
-
-.rh-key-item,
-.lora-row,
-.rh-config-card {
-    box-shadow:0 1px 0 rgba(255,255,255,.58) inset;
 }
 
 .key-btn,
@@ -1225,20 +1164,6 @@ html.studio-theme-dark body .api-link-btn:hover {
     font-size:11.5px;
 }
 
-.key-panel,
-.advanced-endpoints,
-.rh-key-item,
-.rh-card-group,
-.lora-row,
-.recommend-note,
-.picker-summary,
-.model-row,
-.rh-config-card {
-    border-color:transparent;
-    background:var(--api-soft-bg);
-    box-shadow:none;
-}
-
 .field-frame,
 .rh-paste-input,
 .lora-field input,
@@ -1564,10 +1489,6 @@ html.studio-theme-dark body .provider-card:not(.active) {
     max-width:142px;
 }
 
-.provider-card-banner .runninghub-icon {
-    max-width:134px;
-}
-
 .provider-logo-fallback {
     display:none;
     min-width:0;
@@ -1688,10 +1609,6 @@ html.studio-theme-dark body .api-link-btn:hover {
 
 .provider-card-banner img {
     max-width:150px;
-}
-
-.provider-card-banner .runninghub-icon {
-    max-width:140px;
 }
 
 .provider-card-banner .provider-protocol-pill {
@@ -1923,10 +1840,6 @@ html.studio-theme-dark body .recommend-fill {
 .provider-card-banner img {
     max-width:138px;
     margin:0 auto;
-}
-
-.provider-card-banner .runninghub-icon {
-    max-width:130px;
 }
 
 .provider-card-banner .provider-protocol-pill {
@@ -2366,20 +2279,6 @@ body {
     background:var(--api-readable-panel);
 }
 
-.key-panel,
-.advanced-endpoints,
-.rh-key-item,
-.rh-card-group,
-.lora-row,
-.recommend-note,
-.picker-summary,
-.model-row,
-.rh-config-card,
-.provider-card:hover,
-.provider-card.active {
-    background:var(--api-readable-soft);
-}
-
 .field-frame,
 .rh-paste-input,
 .lora-field input,
@@ -2564,31 +2463,6 @@ html.studio-theme-dark body .provider-card.active .provider-mark,
 html.studio-theme-dark body .provider-card.active .provider-protocol-pill {
     background:var(--api-dark-raised) !important;
     color:var(--api-dark-text) !important;
-}
-
-body.studio-theme-dark .field-frame,
-body.studio-theme-dark .model-row,
-body.studio-theme-dark .key-panel,
-body.studio-theme-dark .advanced-endpoints,
-body.studio-theme-dark .rh-key-item,
-body.studio-theme-dark .rh-card-group,
-body.studio-theme-dark .lora-row,
-body.studio-theme-dark .rh-config-card,
-body.studio-theme-dark .recommend-card,
-body.studio-theme-dark .recommend-note,
-html.studio-theme-dark body .field-frame,
-html.studio-theme-dark body .model-row,
-html.studio-theme-dark body .key-panel,
-html.studio-theme-dark body .advanced-endpoints,
-html.studio-theme-dark body .rh-key-item,
-html.studio-theme-dark body .rh-card-group,
-html.studio-theme-dark body .lora-row,
-html.studio-theme-dark body .rh-config-card,
-html.studio-theme-dark body .recommend-card,
-html.studio-theme-dark body .recommend-note {
-    background:var(--api-dark-raised) !important;
-    border-color:var(--api-dark-line) !important;
-    color:var(--api-dark-text);
 }
 
 body.studio-theme-dark input,
@@ -2796,31 +2670,6 @@ html:not(.studio-theme-dark) body:not(.theme-dark) .provider-card.active .provid
     color:var(--api-light-text) !important;
 }
 
-body:not(.studio-theme-dark) .field-frame,
-body:not(.studio-theme-dark) .model-row,
-body:not(.studio-theme-dark) .key-panel,
-body:not(.studio-theme-dark) .advanced-endpoints,
-body:not(.studio-theme-dark) .rh-key-item,
-body:not(.studio-theme-dark) .rh-card-group,
-body:not(.studio-theme-dark) .lora-row,
-body:not(.studio-theme-dark) .rh-config-card,
-body:not(.studio-theme-dark) .recommend-card,
-body:not(.studio-theme-dark) .recommend-note,
-html:not(.studio-theme-dark) body:not(.theme-dark) .field-frame,
-html:not(.studio-theme-dark) body:not(.theme-dark) .model-row,
-html:not(.studio-theme-dark) body:not(.theme-dark) .key-panel,
-html:not(.studio-theme-dark) body:not(.theme-dark) .advanced-endpoints,
-html:not(.studio-theme-dark) body:not(.theme-dark) .rh-key-item,
-html:not(.studio-theme-dark) body:not(.theme-dark) .rh-card-group,
-html:not(.studio-theme-dark) body:not(.theme-dark) .lora-row,
-html:not(.studio-theme-dark) body:not(.theme-dark) .rh-config-card,
-html:not(.studio-theme-dark) body:not(.theme-dark) .recommend-card,
-html:not(.studio-theme-dark) body:not(.theme-dark) .recommend-note {
-    background:var(--api-light-raised) !important;
-    border-color:var(--api-light-line) !important;
-    color:var(--api-light-text);
-}
-
 body:not(.studio-theme-dark) .block-head,
 body:not(.studio-theme-dark) .recommend-actions,
 body:not(.studio-theme-dark) .picker-head,
@@ -2919,17 +2768,12 @@ html:not(.studio-theme-dark) body:not(.theme-dark) .recommend-tag {
     color:var(--api-light-muted) !important;
 }
 
-/* 去掉平台分割线，并强化 RunningHub 应用/工作流配置区层级 */
 .provider-card + .provider-card,
 body.studio-theme-dark .provider-card + .provider-card,
 html.studio-theme-dark body .provider-card + .provider-card,
 body:not(.studio-theme-dark) .provider-card + .provider-card,
 html:not(.studio-theme-dark) body:not(.theme-dark) .provider-card + .provider-card {
     border-top-color:transparent !important;
-}
-
-.runninghub-config-block {
-    background:var(--panel) !important;
 }
 
 .rh-paste-row {
@@ -3008,11 +2852,6 @@ html:not(.studio-theme-dark) body:not(.theme-dark) .provider-card + .provider-ca
     background:#ffffff;
     border-color:#d7dee8;
     color:#64748b;
-}
-
-body.studio-theme-dark .runninghub-config-block,
-html.studio-theme-dark body .runninghub-config-block {
-    background:var(--api-dark-panel) !important;
 }
 
 body.studio-theme-dark .rh-paste-row,
@@ -3320,13 +3159,6 @@ html.studio-theme-dark body .recommend-fill:hover {
     border-radius:18px;
     background:linear-gradient(180deg, #f6f9fd 0%, #eef3f8 100%);
     box-shadow:0 10px 24px rgba(15,23,42,.055);
-}
-
-body.show-provider-onboarding .content > .block,
-body.show-provider-onboarding .content > .model-grid,
-body.show-provider-onboarding .content > .models-toolbar,
-body.show-provider-onboarding .content > .runninghub-config-block {
-    display:none !important;
 }
 
 body.show-provider-onboarding .content-actions .save-btn,
@@ -3812,16 +3644,6 @@ body.show-provider-onboarding .content-actions .danger-btn {
     color:#15803d;
 }
 
-.onboarding-rh-key-actions {
-    margin-top:2px;
-}
-
-.onboarding-rh-key-actions .onboarding-key-btn {
-    height:34px;
-    padding:0 9px;
-    font-size:11px;
-}
-
 .onboarding-rh-source-panel,
 .onboarding-rh-submit-panel {
     min-height:210px;
@@ -3933,18 +3755,6 @@ body.show-provider-onboarding .content-actions .danger-btn {
 .onboarding-rh-arrow i {
     right:auto;
     bottom:-2px;
-}
-
-.onboarding-rh-key-entry {
-    grid-template-columns:minmax(0, 1fr) auto;
-    padding:0;
-    border:0;
-    background:transparent;
-}
-
-.onboarding-rh-key-entry .onboarding-save-btn {
-    width:70px;
-    padding:0 10px;
 }
 
 body.studio-theme-dark .provider-onboarding-card,
@@ -4317,21 +4127,6 @@ body.show-recommend-mode .api-link-btn {
 body.show-recommend-mode .provider-card.active {
     background:transparent !important;
     color:var(--muted) !important;
-}
-
-.onboarding-step-panel,
-.recommend-inline-card .recommend-card,
-.recommend-platform-setup,
-.key-panel,
-.rh-key-item,
-.recommend-tag,
-.recommend-cap-icons span,
-.onboarding-badge,
-.onboarding-step-label {
-    background:var(--soft) !important;
-    border-color:var(--line) !important;
-    color:var(--text) !important;
-    box-shadow:none !important;
 }
 
 .recommend-badge {
@@ -5146,7 +4941,6 @@ html.studio-theme-dark body .recommend-account-invite {
     font-size:0 !important;
 }
 
-/* 平台列表拖拽与 RunningHub 白天层级增强 */
 .sidebar {
     overflow:hidden !important;
 }
@@ -5190,12 +4984,6 @@ html.studio-theme-dark body .recommend-account-invite {
 .provider-card-drop-target {
     background:var(--soft) !important;
     box-shadow:inset 0 0 0 1px var(--line-strong) !important;
-}
-
-body:not(.studio-theme-dark) .runninghub-config-block,
-html:not(.studio-theme-dark) body:not(.theme-dark) .runninghub-config-block {
-    background:#ffffff !important;
-    border-color:#dfe7f1 !important;
 }
 
 body:not(.studio-theme-dark) .rh-paste-row,

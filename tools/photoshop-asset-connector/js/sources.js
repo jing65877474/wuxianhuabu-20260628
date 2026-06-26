@@ -38,12 +38,12 @@
       optionsB(aId) {
         return this.categoriesOf(aId).map((c) => ({
           id: c.id,
-          name: `${c.name || '分组'}${c.type === 'workflow' ? '（工作流）' : ''} · ${(c.items || []).length}`,
+          name: `${c.name || '分组'} · ${(c.items || []).length}`,
         }));
       },
       items(aId, bId) {
         const cat = this.categoriesOf(aId).find((c) => c.id === bId);
-        if (!cat || cat.type === 'workflow') return [];
+        if (!cat || cat.type !== 'image') return [];
         return (cat.items || []).map((it) => ({
           id: it.id, name: it.name || '未命名', url: it.url, kind: it.kind || 'image',
           search: `${it.name || ''} ${it.caption || ''} ${classificationText(it.classification)}`.toLowerCase(),

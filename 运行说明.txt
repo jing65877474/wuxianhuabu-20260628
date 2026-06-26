@@ -13,11 +13,9 @@ https://api.apimart.ai
 
 4. 想要免费生成就设置modelscope的key，还可以调用lora
 
-5. 想要使用本地comfyui，左下角可以设置comfyui选项，支持导入自定义的工作流
 
 
 
-===API/modelscope/comfyui，三种模式任意用一种都可以运行====
 
 注：如果运行还报错，可以搜索下载codex或者https://opencode.ai/zh/download，跟他说解决运行报错问题
 

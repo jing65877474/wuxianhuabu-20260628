@@ -92,7 +92,6 @@
         "online.count": { zh: "数量", en: "Count" },
         "online.modeApi": { zh: "API 生图", en: "API" },
         "online.modeModelscope": { zh: "ModelScope", en: "ModelScope" },
-        "online.modeRunningHub": { zh: "RunningHub", en: "RunningHub" },
         "online.modeVolcengine": { zh: "火山引擎", en: "Volcengine" },
         "online.modeJimeng": { zh: "即梦", en: "Jimeng" },
         "online.modeGemini": { zh: "Gemini", en: "Gemini" },

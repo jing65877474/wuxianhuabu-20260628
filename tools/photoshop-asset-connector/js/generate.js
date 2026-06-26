@@ -1,6 +1,5 @@
 /* 生成 Tab：顶部模式切换。
  *  - API平台：选平台 + 模型 → 参数按后端 /api/image-params 动态渲染 → /api/canvas-image-tasks 轮询。
- *  - RunningHub：选工作流 → 工作流暴露字段(cfg.fields enabled) → /api/runninghub/workflow-submit 轮询 /query。
  * 结果自动置入图层。参数全部从后端拉，不写死。 */
 (function () {
   const net = DX.net;
@@ -13,9 +12,6 @@
     apiBar: $('genApiBar'),
     provider: $('genProvider'),
     model: $('genModel'),
-    rhBar: $('genRhBar'),
-    rhWorkflow: $('genRhWorkflow'),
-    rhWallet: $('genRhWallet'),
     prompt: $('genPrompt'),
     params: $('genParams'),
     refsSection: $('genRefsSection'),
@@ -26,7 +22,7 @@
   };
 
   const g = {
-    mode: 'api',           // api | ms | rh
+    mode: 'api',           // api | ms
     providersLoaded: false,
     apiProviders: [],
     msProvider: null,
@@ -37,8 +33,6 @@
     randomActive: {},      // seed/noise 字段 key -> 是否每次运行随机
     refs: [],
     results: [],
-    rhWorkflows: [],
-    rhWorkflowId: '',
     jobs: 0,               // 进行中的生成任务数（支持队列/并行）
   };
 
@@ -83,32 +77,27 @@
     modeMem[g.mode] = {
       fields: g.fields, values: g.values, imgPreview: g.imgPreview, randomActive: g.randomActive,
       refs: g.refs.slice(), results: g.results.slice(),
-      rhWorkflowId: g.rhWorkflowId,
       providerVal: DX.ui.pickerValue(els.provider), modelVal: DX.ui.pickerValue(els.model),
     };
   }
   function setMode(mode) {
-    if (!['api', 'ms', 'rh'].includes(mode)) mode = 'api';
+    if (!['api', 'ms'].includes(mode)) mode = 'api';
     saveCurrentMode();                 // 先存当前模式
     g.mode = mode;
-    const apiLike = (mode === 'api' || mode === 'ms');
     els.modes.querySelectorAll('.seg').forEach((b) => b.classList.toggle('active', b.getAttribute('data-mode') === mode));
-    els.apiBar.classList.toggle('hidden', !apiLike);
+    els.apiBar.classList.toggle('hidden', false);
     els.provider.classList.toggle('hidden', mode !== 'api');
-    els.rhBar.classList.toggle('hidden', mode !== 'rh');
-    els.prompt.classList.toggle('hidden', !apiLike);
-    els.refsSection.classList.toggle('hidden', !apiLike);
+    els.prompt.classList.toggle('hidden', false);
+    els.refsSection.classList.toggle('hidden', false);
     const mem = modeMem[mode];
     els.params.innerHTML = '';
     g.fields = []; g.values = {}; g.imgPreview = {}; g.randomActive = (mem && mem.randomActive) ? mem.randomActive : {};
-    g.refs = (apiLike && mem && mem.refs) ? mem.refs.slice() : [];
+    g.refs = (mem && mem.refs) ? mem.refs.slice() : [];
     g.results = (mem && mem.results) ? mem.results.slice() : [];
-    g.rhWorkflowId = mem ? mem.rhWorkflowId : '';
     renderResults();
-    if (apiLike) renderRefs();
+    renderRefs();
     if (mode === 'api') loadApi(mem);
     else if (mode === 'ms') loadMs(mem);
-    else if (mode === 'rh') loadRhWorkflows(mem);
     updateRun();
   }
 
@@ -117,8 +106,7 @@
     if (g.providersLoaded || !state.connected) return;
     const data = await net.apiGet('/api/providers');
     const all = (data.providers || data.api_providers || []).filter((p) => Array.isArray(p.image_models) && p.image_models.length);
-    // API 模式排除 RunningHub 与 ModelScope（它们是独立模式）
-    g.apiProviders = all.filter((p) => p.protocol !== 'runninghub' && p.id !== 'runninghub' && p.id !== 'modelscope');
+    g.apiProviders = all.filter((p) => p.id !== 'modelscope');
     g.msProvider = all.find((p) => p.id === 'modelscope') || null;
     g.providersLoaded = true;
   }
@@ -218,50 +206,6 @@
     });
   }
 
-  /* ---------- RunningHub ---------- */
-  async function loadRhWorkflows(mem) {
-    setMsg('正在加载 RunningHub 工作流 …');
-    try {
-      const data = await net.apiGet('/api/runninghub/workflows');
-      g.rhWorkflows = data.workflows || [];
-      DX.ui.fillPicker(els.rhWorkflow, [{ value: '', label: '请选择工作流' }].concat(g.rhWorkflows.map((w) => ({ value: w.workflowId, label: w.title || w.workflowId }))), mem && mem.rhWorkflowId);
-      if (mem && mem.rhWorkflowId && mem.fields) {
-        g.rhWorkflowId = mem.rhWorkflowId; g.fields = mem.fields; g.values = mem.values; g.imgPreview = mem.imgPreview || {};
-        renderParams(); setMsg('');
-      } else {
-        g.rhWorkflowId = '';
-        setMsg(g.rhWorkflows.length ? '请选择一个工作流。' : '没有已保存的工作流，请先在网页端添加。', g.rhWorkflows.length ? '' : 'err');
-      }
-    } catch (err) { setMsg(`加载工作流失败：${err.message || err}`, 'err'); }
-    updateRun();
-  }
-  async function loadRhFields() {
-    const wid = DX.ui.pickerValue(els.rhWorkflow);
-    g.rhWorkflowId = wid;
-    g.fields = []; g.values = {}; g.imgPreview = {}; g.randomActive = {};
-    if (!wid) { els.params.innerHTML = ''; updateRun(); return; }
-    els.params.innerHTML = '<div class="gen-label">正在加载工作流参数 …</div>';
-    try {
-      const data = await net.apiGet(`/api/runninghub/workflows/${encodeURIComponent(wid)}`);
-      const exposed = ((data.workflow || {}).fields || []).filter((f) => f.enabled);
-      g.fields = exposed.map((f) => {
-        const t = String(f.fieldType || 'TEXT').toUpperCase();
-        const opts = (f.options || []).map((o) => (o && typeof o === 'object' ? o.value : o)).filter((o) => o != null && String(o) !== '');
-        const base = { key: `${f.nodeId}.${f.fieldName}`, label: f.label || f.fieldName, name: f.fieldName, rh: { nodeId: f.nodeId, fieldName: f.fieldName }, default: f.fieldValue, min: f.min, max: f.max, step: f.step, random_enabled: f.random_enabled === true };
-        if (t === 'IMAGE') return Object.assign(base, { type: 'image' });
-        if (opts.length) return Object.assign(base, { type: 'dropdown', options: opts.map((o) => ({ value: String(o), label: String(o) })), default: opts.map(String).indexOf(String(f.fieldValue)) >= 0 ? String(f.fieldValue) : String(opts[0]) });
-        if (t === 'BOOLEAN') return Object.assign(base, { type: 'bool', default: String(f.fieldValue).toLowerCase() === 'true' });
-        if (t === 'NUMBER') return Object.assign(base, { type: 'int' });
-        return Object.assign(base, { type: 'textarea' });
-      }).filter((f) => !isHiddenField(f));
-      initValues();
-      renderParams();
-      setMsg(g.fields.length ? '' : '该工作流未暴露可填参数，可直接生成。');
-    } catch (err) { g.fields = []; els.params.innerHTML = ''; setMsg(`加载工作流参数失败：${err.message || err}`, 'err'); }
-    updateRun();
-  }
-
-  /* ---------- 参数渲染（通用） ---------- */
   function initValues() {
     g.values = {};
     for (const f of g.fields) {
@@ -314,7 +258,7 @@
     if (f.type === 'image') {
       const prev = g.imgPreview[f.key];
       const thumb = prev ? `<div class="ref-tile"><img src="${escapeHtml(net.absUrl(prev))}" alt=""><div class="ref-num">1</div><div class="ref-x" data-imgclr="${fi}">×</div></div>` : '';
-      const add = `<div class="ref-add img-add" data-rhimg="${fi}" title="加当前画面"><div class="ref-add-plus">＋</div><div class="ref-add-cap">${prev ? '替换' : '加画面'}</div></div>`;
+      const add = `<div class="ref-add img-add" data-imgfield="${fi}" title="加当前画面"><div class="ref-add-plus">＋</div><div class="ref-add-cap">${prev ? '替换' : '加画面'}</div></div>`;
       return `<div class="field-stack">${lbl}<div class="gen-thumbs">${thumb}${add}</div></div>`;
     }
     const inputType = f.type === 'int' ? 'number' : 'text';
@@ -359,8 +303,8 @@
         renderParams();
       });
     });
-    els.params.querySelectorAll('[data-rhimg]').forEach((btn) => {
-      btn.addEventListener('click', () => setImageField(Number(btn.getAttribute('data-rhimg')), btn));
+    els.params.querySelectorAll('[data-imgfield]').forEach((btn) => {
+      btn.addEventListener('click', () => setImageField(Number(btn.getAttribute('data-imgfield')), btn));
     });
     els.params.querySelectorAll('[data-imgclr]').forEach((x) => x.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -397,7 +341,6 @@
     });
   }
 
-  // RunningHub 的图片字段：导出当前图层 → 上传 → 设为该字段输入
   async function setImageField(fi, btn) {
     if (!ps.hasDocument()) { setMsg('没有打开的文档。', 'err'); return; }
     const f = g.fields[fi];
@@ -407,14 +350,7 @@
       const { buffer, name } = await ps.exportCurrentPng();
       const url = await net.uploadInputBase64(buffer, name);   // 预览用
       g.imgPreview[f.key] = url;
-      if (g.mode === 'rh') {
-        const res = await net.apiSend('POST', '/api/runninghub/upload-asset', { url, useWallet: els.rhWallet.checked });
-        const fileName = res.data && res.data.fileName;
-        if (!fileName) throw new Error('RunningHub 未返回 fileName');
-        g.values[f.key] = fileName;
-      } else {
-        g.values[f.key] = url;
-      }
+      g.values[f.key] = url;
       renderParams();
       setMsg('已设置该字段的输入图。', 'ok');
     } catch (err) { setMsg(`设置图片失败：${err.message || err}`, 'err'); }
@@ -510,14 +446,12 @@
   /* ---------- 生成（非阻塞 + 队列：提交后台轮询，UI 仍可操作/再次生成） ---------- */
   function updateRun() {
     let ok = state.connected;
-    if (g.mode === 'api' || g.mode === 'ms') ok = ok && currentProvider() && DX.ui.pickerValue(els.model) && els.prompt.value.trim();
-    else if (g.mode === 'rh') ok = ok && g.rhWorkflowId;
+    ok = ok && currentProvider() && DX.ui.pickerValue(els.model) && els.prompt.value.trim();
     els.run.disabled = !ok;
   }
   function run() {
     let p;
-    if (g.mode === 'api' || g.mode === 'ms') p = runApi();
-    else if (g.mode === 'rh') p = runRh();
+    p = runApi();
     if (p && p.catch) p.catch((err) => setMsg(`生成失败：${err.message || err}`, 'err'));
   }
   async function runApi() {
@@ -530,15 +464,6 @@
     const res = await net.apiSend('POST', '/api/canvas-image-tasks', payload);
     if (!res.task_id) throw new Error('未返回任务 ID');
     pollCanvas(res.task_id);   // 不 await：后台轮询，UI 不锁
-  }
-  async function runRh() {
-    applyRandomSeeds();
-    const nodeInfoList = g.fields.filter((f) => f.rh).map((f) => ({ nodeId: f.rh.nodeId, fieldName: f.rh.fieldName, fieldValue: String(g.values[f.key] ?? '') }));
-    setMsg('正在提交 RunningHub 任务 …');
-    const res = await net.apiSend('POST', '/api/runninghub/workflow-submit', { workflowId: g.rhWorkflowId, nodeInfoList, useWallet: els.rhWallet.checked });
-    const taskId = res.data && res.data.taskId;
-    if (!taskId) throw new Error('未返回 taskId');
-    pollRh(taskId);
   }
   function pollCanvas(taskId) {
     jobStart();
@@ -560,29 +485,9 @@
     };
     tick();
   }
-  function pollRh(taskId) {
-    jobStart();
-    let n = 0;
-    const tick = async () => {
-      n += 1;
-      if (n > 240) { jobEnd('生成超时，请重试。', 'err'); return; }
-      let res;
-      try { res = await net.apiGet(`/api/runninghub/query?taskId=${encodeURIComponent(taskId)}`); }
-      catch (err) { jobEnd(`查询任务失败：${err.message || err}`, 'err'); return; }
-      const d = res.data || {};
-      const s = String(d.status || '').toUpperCase();
-      if (s === 'SUCCESS') { const items = appendResults(d.urls || [], 'rh'); const placed = await placeResults(items); jobEnd(`已生成并添加 ${placed} 张到图层。`, 'ok'); return; }
-      if (s === 'FAILED') { jobEnd(`生成失败：${d.failReason || '未知错误'}`, 'err'); return; }
-      setTimeout(tick, 2500);
-    };
-    tick();
-  }
-
-  /* ---------- 事件 ---------- */
   els.modes.querySelectorAll('.seg').forEach((b) => b.addEventListener('click', () => { if (state.connected) setMode(b.getAttribute('data-mode')); }));
   DX.ui.onPick(els.provider, () => { renderModels(); loadSchema(); });
   DX.ui.onPick(els.model, () => loadSchema());
-  DX.ui.onPick(els.rhWorkflow, loadRhFields);
   els.prompt.addEventListener('input', updateRun);
   els.run.addEventListener('click', run);
 
@@ -591,11 +496,9 @@
     reset() {
       g.providersLoaded = false; g.apiProviders = []; g.msProvider = null;
       g.fields = []; g.values = {}; g.imgPreview = {}; g.randomActive = {};
-      g.rhWorkflows = []; g.rhWorkflowId = '';
       g.refs = []; g.results = []; g.jobs = 0;
       for (const k in modeMem) delete modeMem[k];   // 换后端清空模式记忆，避免串台
       DX.ui.fillPicker(els.provider, []); DX.ui.fillPicker(els.model, []);
-      DX.ui.fillPicker(els.rhWorkflow, []);
       els.params.innerHTML = '';
       updateRun();
     },

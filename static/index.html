@@ -1283,11 +1283,11 @@
         </script>
 
         <main class="stage">
-            <iframe id="frame-online" data-src="/static/online.html?v=2026.06.22.1782126501" scrolling="yes"></iframe>
-            <iframe id="frame-gpt-chat" data-src="/static/gpt-chat.html?v=2026.06.22.1782379917" scrolling="yes"></iframe>
-            <iframe id="frame-canvas" data-src="/static/canvas-list.html?v=2026.06.22.1782351919" class="active" scrolling="yes"></iframe>
-            <iframe id="frame-asset-manager" data-src="/static/asset-manager.html?v=2026.06.22.1782110750" scrolling="yes"></iframe>
-            <iframe id="frame-api-settings" data-src="/static/api-settings.html?v=2026.06.22.1782189131" scrolling="yes"></iframe>
+            <iframe id="frame-online" data-src="/static/online.html?v=2026.06.22.1782470577" scrolling="yes"></iframe>
+            <iframe id="frame-gpt-chat" data-src="/static/gpt-chat.html?v=2026.06.22.1782470744" scrolling="yes"></iframe>
+            <iframe id="frame-canvas" data-src="/static/canvas-list.html?v=2026.06.22.1782470744" class="active" scrolling="yes"></iframe>
+            <iframe id="frame-asset-manager" data-src="/static/asset-manager.html?v=2026.06.22.1782470744" scrolling="yes"></iframe>
+            <iframe id="frame-api-settings" data-src="/static/api-settings.html?v=2026.06.22.1782470744" scrolling="yes"></iframe>
 
         </main>
     </div>
@@ -1510,7 +1510,7 @@
         }
 
         function forwardStudioApiChange(data) {
-            if(!data || !['providers-changed','workflows-changed'].includes(data.type)) return;
+            if(!data || data.type !== 'providers-changed') return;
             document.querySelectorAll('iframe').forEach(iframe => {
                 try {
                     if (iframe && iframe.contentWindow) iframe.contentWindow.postMessage(data, '*');
@@ -1539,27 +1539,6 @@
         }
         document.addEventListener('DOMContentLoaded', restoreActivePage, { once:true });
 
-        async function syncStatus() {
-            try {
-                const res = await fetch(`/api/queue_status?client_id=${CID}`);
-                const data = await res.json();
-                const monitor = document.getElementById('nano-monitor');
-                const queueVal = document.getElementById('queue-val');
-                const logoDot = document.getElementById('logo-dot');
-                const total = data.total || 0;
-                const pos = data.position || 0;
-                if (pos > 0) {
-                    monitor?.classList.add('is-busy');
-                    if (queueVal) queueVal.innerText = `${pos}/${total}`;
-                    if (logoDot) logoDot.style.backgroundColor = '#3b82f6';
-                } else {
-                    monitor?.classList.remove('is-busy');
-                    if (queueVal) queueVal.innerText = total > 0 ? total : '0';
-                    if (logoDot) logoDot.style.backgroundColor = 'var(--text)';
-                }
-            } catch (e) { }
-        }
-
         const host = window.location.host;
         if (host) {
             const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
@@ -1585,7 +1564,6 @@
                     });
                 }
             };
-            setInterval(syncStatus, 2000);
         }
 
         // --- 澶滈棿妯″紡 ---

@@ -1067,10 +1067,6 @@ input[type=range].smart-range::-webkit-slider-runnable-track { height:3px; borde
 input[type=range].smart-range::-webkit-slider-thumb { -webkit-appearance:none; width:14px; height:14px; border-radius:999px; background:var(--strong); cursor:pointer; margin-top:-5.5px; box-shadow:0 1px 4px rgba(15,23,42,.22); }
 .rh-slider-control:focus-within:not(:hover):not(.pinned) .smart-popover { opacity:0; visibility:hidden; pointer-events:none; transform:translate(-50%, 4px); }
 .theme-dark input[type=range].smart-range::-webkit-slider-runnable-track { background:#334155; }
-.comfy-popover { min-width:260px; }
-.comfy-popover .comfy-fields { display:flex; flex-wrap:wrap; gap:6px; }
-.comfy-popover .comfy-fields > * { flex:0 0 auto; max-width:220px; border-color:var(--line); background:var(--card); color:var(--text); }
-.comfy-popover .comfy-fields textarea { width:220px; height:60px; border-radius:10px; resize:none; }
 .dynamic-params textarea, .smart-popover textarea, .image-edit-tools textarea { resize:none; }
 .prompt-input { resize:none !important; }
 .ref-line { display:none; }
