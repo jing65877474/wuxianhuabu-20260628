@@ -5675,6 +5675,23 @@ function cloneSmartNode(node, dx=0, dy=0){
     delete copy.runTimerHidden;
     return copy;
 }
+function serializableSmartNode(node){
+    const base = JSON.parse(JSON.stringify(node || {}));
+    const copy = normalizeLegacySmartNode(base) || {};
+    if(Array.isArray(copy.images)){
+        copy.images = copy.images
+            .map(img => mediaItemForStorage(stripImageGenerationMeta(img)))
+            .filter(Boolean);
+    }
+    if(copy.runSettings) copy.runSettings = settingsForStorage(copy.runSettings);
+    copy.running = false;
+    copy.pending = 0;
+    copy.queued = false;
+    copy.jimengPending = null;
+    delete copy.pendingTasks;
+    delete copy._dom;
+    return copy;
+}
 function clipboardSelectionNodeIds(){
     const rootIds = selectedNodeIds();
     const copiedIds = [];
