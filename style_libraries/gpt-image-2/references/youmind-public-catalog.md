@@ -1,11 +1,104 @@
 # YouMind Public GPT Image 2 Case Catalog
 
-Supplemental public web source for `gpt-image-2-style-library`. Imported cases: **11050** of reported **11050**. Use `scripts/search_youmind_public.py` for focused retrieval.
+Supplemental public web source for `gpt-image-2-style-library`. Imported cases: **11143** of reported **11143**. Use `scripts/search_youmind_public.py` for focused retrieval.
 
 Source: https://youmind.com/zh-CN/gpt-image-2-prompts/explore?sortBy=views&sortOrder=desc
 
 | ID | Title | Category | Styles | Scenes | Published |
 |---|---|---|---|---|---|
+| youmind-26819 | Zareya 沙漠王国分镜脚本 | Posters & Typography | 3D render, cinematic, sci-fi | interface, map | 2026-06-25 |
+| youmind-26818 | 白斑河鲀科学图鉴 | Charts & Infographics | editorial, infographic, photorealistic | exploded view, map | 2026-06-25 |
+| youmind-26817 | 猪肉味噌汤粗略分镜故事板 | General Visual Inspiration | 3D render, cinematic, minimal, illustration |  | 2026-06-25 |
+| youmind-26816 | 粉笔涂鸦球场上的沉睡少女 | Photography & Portraits | photorealistic, illustration |  | 2026-06-24 |
+| youmind-26815 | 石墙后的女孩与金毛寻回犬 | Photography & Portraits | cinematic, photorealistic |  | 2026-06-25 |
+| youmind-26814 | 砂岩缝隙中的女孩与小狗 | Photography & Portraits | cinematic, photorealistic |  | 2026-06-25 |
+| youmind-26813 | 土耳其老奶奶倒茶 | Illustration & Characters | cinematic, photorealistic |  | 2026-06-25 |
+| youmind-26812 | 中式书法品牌形象海报 | Posters & Typography | minimal, editorial | interface, exploded view | 2026-06-26 |
+| youmind-26811 | 无面新艺术风格奇幻公主 | Illustration & Characters | illustration |  | 2026-06-25 |
+| youmind-26810 | 空灵蓝色奇幻时尚肖像 | Photography & Portraits | cinematic, photorealistic |  | 2026-06-25 |
+| youmind-26809 | 8K 宠物照片修复 | Photography & Portraits | cinematic, photorealistic | studio | 2026-06-25 |
+| youmind-26808 | 动漫女学生黑板引语 | Illustration & Characters | 3D render, cinematic, illustration |  | 2026-06-24 |
+| youmind-26807 | 黑龙太空步舞台 | Illustration & Characters | cinematic, photorealistic |  | 2026-06-25 |
+| youmind-26806 | 分屏 MR2 峠（Touge）驾驶 | Brand & Identity | cinematic, photorealistic | lifestyle | 2026-06-25 |
+| youmind-26805 | 深褐色动漫贵族与镜子 | Illustration & Characters | illustration |  | 2026-06-25 |
+| youmind-26804 | 狼人与小红帽 | UI & Interfaces | cinematic, illustration |  | 2026-06-25 |
+| youmind-26803 | 哥特式镜花动漫封面 | Posters & Typography | 3D render, illustration |  | 2026-06-25 |
+| youmind-26802 | 精致动漫角色设定图 | Illustration & Characters | illustration |  | 2026-06-24 |
+| youmind-26801 | 黑豹与女骑士肖像 | Posters & Typography | cinematic, photorealistic |  | 2026-06-25 |
+| youmind-26800 | 可爱布丁河畔问候 | Posters & Typography | 3D render |  | 2026-06-26 |
+| youmind-26799 | 波光粼粼的海滨动漫专辑封面 | Posters & Typography | illustration |  | 2026-06-24 |
+| youmind-26798 | 夏季动漫拼贴海报 | Posters & Typography | editorial, photorealistic, illustration, retro |  | 2026-06-25 |
+| youmind-26797 | 东京扭蛋街头时尚摄影 | Products & Commerce | photorealistic | commercial, map | 2026-06-25 |
+| youmind-26796 | 静谧报纸风时尚封面 | Posters & Typography | editorial, photorealistic, retro | studio | 2026-06-25 |
+| youmind-26795 | 赛博朋克风少女海报 | Posters & Typography | photorealistic, illustration, retro, sci-fi |  | 2026-06-25 |
+| youmind-26794 | 哥特风盗贼肖像（遮挡版） | Photography & Portraits | cinematic, photorealistic | studio | 2026-06-25 |
+| youmind-26793 | 宋瓷展览海报 | Posters & Typography | minimal, editorial | map | 2026-06-25 |
+| youmind-26792 | 洗衣机视角下的自助洗衣店人像 | Photography & Portraits | editorial, photorealistic, retro |  | 2026-06-25 |
+| youmind-26791 | 地铁里的汉服时尚人像 | Products & Commerce | cinematic, photorealistic | commercial | 2026-06-25 |
+| youmind-26790 | 夏季西瓜涂鸦拼贴画 | Posters & Typography | photorealistic, illustration | lifestyle, interface | 2026-06-25 |
+| youmind-26789 | 哥特大教堂战斗少女 | Illustration & Characters | cinematic, illustration |  | 2026-06-26 |
+| youmind-26788 | 蓝色涂鸦 OOTD 贴纸海报 | Posters & Typography | illustration |  | 2026-06-25 |
+| youmind-26787 | 深色聊天 UI 与失败的 4 图拼贴效果 | UI & Interfaces | minimal, photorealistic | interface | 2026-06-26 |
+| youmind-26786 | 哥特式花卉奇幻肖像 | Brand & Identity | cinematic, editorial, photorealistic |  | 2026-06-25 |
+| youmind-26785 | 中式婚礼邀请函海报 | Posters & Typography | minimal, editorial, photorealistic, retro |  | 2026-06-26 |
+| youmind-26784 | GPT Image 2 提示词宝藏海报 | Posters & Typography | 3D render, cinematic, minimal, editorial, infographic | interface | 2026-06-25 |
+| youmind-26783 | Amber Café 杂志社论 | Posters & Typography | cinematic, editorial, photorealistic, retro | lifestyle, interface, map | 2026-06-25 |
+| youmind-26782 | City Walk OOTD 旅行拼图 | Posters & Typography | photorealistic, illustration | lifestyle, exploded view, map | 2026-06-25 |
+| youmind-26781 | Black Static 黑色电影风格杂志封面 | Posters & Typography | cinematic, editorial |  | 2026-06-25 |
+| youmind-26780 | Ingrid 冰雪储藏室咖啡馆奇幻场景 | Products & Commerce | 3D render, cinematic, illustration | commercial, interface | 2026-06-25 |
+| youmind-26779 | 带有面部遮挡的抓拍派对照片 | Photography & Portraits | photorealistic, retro |  | 2026-06-25 |
+| youmind-26778 | 女孩与小狗在石墙后 | Illustration & Characters | cinematic, photorealistic |  | 2026-06-25 |
+| youmind-26777 | 排版肖像海报 | Posters & Typography | minimal, editorial, illustration |  | 2026-06-25 |
+| youmind-26776 | 双重曝光电影海报 | Posters & Typography | cinematic |  | 2026-06-25 |
+| youmind-26775 | 春日秘密手势花园场景 | General Visual Inspiration | cinematic, photorealistic |  | 2026-06-25 |
+| youmind-26774 | 收藏级玩具包装设计师 | Products & Commerce | 3D render, photorealistic |  | 2026-06-25 |
+| youmind-26773 | 半写实霓虹日系数字艺术 | Illustration & Characters | editorial, photorealistic, illustration |  | 2026-06-23 |
+| youmind-26772 | 城市拼贴动画风格人像 | Photography & Portraits | 3D render, editorial, photorealistic | map | 2026-06-26 |
+| youmind-26771 | 硬朗精致的男性肖像 | Products & Commerce | cinematic, editorial, photorealistic | commercial, map | 2026-06-25 |
+| youmind-26770 | Risograph 风格咖啡馆插画 | Posters & Typography | minimal, illustration, retro |  | 2026-06-26 |
+| youmind-26769 | 暗黑波普艺术混合媒介拼贴画 | Documents & Editorial | retro |  | 2026-06-25 |
+| youmind-26768 | 黑白西部牛仔女郎肖像 | UI & Interfaces | cinematic, minimal, photorealistic |  | 2026-06-25 |
+| youmind-26767 | 涂鸦墨水动画风格 | Illustration & Characters | illustration | map | 2026-06-25 |
+| youmind-26766 | 动漫角色薯片包装 | Products & Commerce | photorealistic, illustration |  | 2026-06-25 |
+| youmind-26765 | 异世界龙女的火焰商店 | Products & Commerce |  | map | 2026-06-25 |
+| youmind-26764 | 水彩剪影角色故事 | Illustration & Characters | minimal, illustration |  | 2026-06-25 |
+| youmind-26763 | 宏伟太空星云站 | Architecture & Spaces |  |  | 2026-06-25 |
+| youmind-26762 | 背光氛围感人像摄影 | Brand & Identity | cinematic, minimal, photorealistic | lifestyle, map | 2026-06-25 |
+| youmind-26761 | 月下竹林古风人像 | Posters & Typography | photorealistic |  | 2026-06-25 |
+| youmind-26760 | 复古快餐海报广告 | Products & Commerce | retro | commercial, exploded view | 2026-06-25 |
+| youmind-26759 | 梦幻田园风湖畔肖像 | Photography & Portraits | 3D render, cinematic, photorealistic, retro |  | 2026-06-25 |
+| youmind-26758 | 电影感郊区追逐场景 | Photography & Portraits | 3D render, cinematic, photorealistic | lifestyle | 2026-06-25 |
+| youmind-26757 | 优雅时尚花卉人像 | Photography & Portraits | cinematic, minimal, editorial, photorealistic, retro | studio, lifestyle | 2026-06-25 |
+| youmind-26756 | 柔和动态模糊艺术摄影 | Photography & Portraits | minimal, editorial, photorealistic |  | 2026-06-26 |
+| youmind-26755 | 现代孔版印刷风格咖啡馆海报 | Posters & Typography | minimal, illustration, retro |  | 2026-06-25 |
+| youmind-26754 | 排版墨迹肖像海报 | Posters & Typography | minimal, editorial, illustration |  | 2026-06-25 |
+| youmind-26753 | Risograph 风格运动艺术海报 | Posters & Typography | editorial |  | 2026-06-25 |
+| youmind-26752 | 极简马克笔涂鸦素描 | Illustration & Characters | minimal, illustration |  | 2026-06-25 |
+| youmind-26751 | 电影级奢华时尚人像 | Posters & Typography | cinematic, editorial, photorealistic, retro | lifestyle | 2026-06-25 |
+| youmind-26750 | 3D 分层剪纸艺术 | Illustration & Characters | 3D render, illustration |  | 2026-06-25 |
+| youmind-26749 | 电影感运动动漫角色海报 | Posters & Typography | 3D render, cinematic, editorial | exploded view | 2026-06-25 |
+| youmind-26748 | 3D 黏土风格阅读 App 插画 | UI & Interfaces | 3D render, minimal, illustration |  | 2026-06-25 |
+| youmind-26747 | FIFA 世界杯动漫海报 | Posters & Typography | minimal, editorial, illustration, retro |  | 2026-06-25 |
+| youmind-26746 | 复古世界杯像素精灵 | General Visual Inspiration | photorealistic, retro |  | 2026-06-25 |
+| youmind-26745 | 春日水彩阅读场景 | General Visual Inspiration | 3D render, illustration, retro |  | 2026-06-25 |
+| youmind-26744 | 异想天开的民间涂鸦插画 | Illustration & Characters | illustration | map | 2026-06-25 |
+| youmind-26743 | 深夜便利店音乐人摄影 | Posters & Typography | cinematic, editorial, photorealistic | lifestyle | 2026-06-25 |
+| youmind-26742 | 海军蓝微光质感下的精致波波头肖像 | General Visual Inspiration |  |  | 2026-06-25 |
+| youmind-26741 | 极简主义快餐广告 | Products & Commerce | minimal, editorial, photorealistic | studio, commercial | 2026-06-25 |
+| youmind-26740 | 先锋派紫色时尚大片 | Architecture & Spaces | minimal, editorial, photorealistic |  | 2026-06-25 |
+| youmind-26739 | 复古旅行排版海报 | Products & Commerce | minimal, editorial, retro | commercial, map | 2026-06-25 |
+| youmind-26738 | GQ 时尚杂志封面 | Products & Commerce | cinematic, editorial, photorealistic | lifestyle, commercial | 2026-06-25 |
+| youmind-26737 | 电影感黑白男性肖像 | Posters & Typography | cinematic, editorial, photorealistic |  | 2026-06-25 |
+| youmind-26736 | 黄金时刻城市天台时尚大片 | Photography & Portraits | photorealistic, retro | lifestyle, map | 2026-06-25 |
+| youmind-26735 | 手绘记号笔涂鸦风格 | General Visual Inspiration | editorial, illustration |  | 2026-06-25 |
+| youmind-26734 | 复古像素风头像 | Brand & Identity | retro |  | 2026-06-25 |
+| youmind-26733 | 沙漠黄金时刻杂志风人像 | Photography & Portraits | editorial |  | 2026-06-25 |
+| youmind-26732 | 俯视视角蜘蛛侠战衣肖像 | Photography & Portraits | cinematic, editorial, photorealistic |  | 2026-06-25 |
+| youmind-26731 | 漫画风格照片转换 | General Visual Inspiration |  |  | 2026-06-25 |
+| youmind-26730 | 立体主义轮廓肖像 | Illustration & Characters | 3D render, illustration |  | 2026-06-25 |
+| youmind-26729 | 现代极繁主义运动拼贴画 | Products & Commerce | cinematic, minimal, editorial | commercial | 2026-06-25 |
+| youmind-26728 | 暗黑奇幻角色海报 | Posters & Typography | cinematic |  | 2026-06-25 |
+| youmind-26727 | Lo-fi 风格卧室人像摄影 | Photography & Portraits | minimal, photorealistic |  | 2026-06-25 |
 | youmind-26717 | 屋顶上的动漫忍者少女 | Illustration & Characters | 3D render, cinematic |  | 2026-06-24 |
 | youmind-26716 | 魔法少女变身分镜脚本 | Brand & Identity | cinematic |  | 2026-06-24 |
 | youmind-26715 | 梦幻 Q 版镜面自拍室 | Posters & Typography | cinematic, editorial, photorealistic |  | 2026-06-24 |

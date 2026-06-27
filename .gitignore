@@ -5,6 +5,7 @@ output/
 API/
 history.json
 *.log
+*.rar
 server.log
 server.err.log
 _self_restart.bat
