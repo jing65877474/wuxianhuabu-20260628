@@ -35,12 +35,13 @@ function functionSource(name) {
 includesAll([
     "Person similarity: very low.",
     "Person similarity: low.",
-    "Person similarity: medium.",
-    "Person similarity: high.",
+    "Person similarity: medium does NOT mean same identity.",
+    "Person identity lock enabled only because the user explicitly requested the same person or the person reference weight is very high.",
     "model identity",
     "subject identity",
     "same person",
     "same model",
+    "smartTextExplicitlyRequestsSamePerson",
     "UPLOADED IMAGE ROLE MAP:",
     "MANDATORY PRODUCT-HAND INTERACTION:",
     "CAMERA-LOCKED VARIANT:",
@@ -148,6 +149,12 @@ check(
         !source.includes('min="100" max="100" value="100" disabled'),
     "Generated-image edit-base weight must default to 100 but remain manually adjustable."
 );
+includesAll([
+    "function smartTextExplicitlyRequestsSamePerson",
+    "Person identity lock enabled only because the user explicitly requested the same person or the person reference weight is very high.",
+    "same identity. Generate a different model/person",
+    "different hairline, and clearly different hairstyle"
+]);
 check(
     canvasListSource.includes("smart-canvas.html?id=${enc}&project=${project}&v=${Date.now()}"),
     "Opening a smart canvas must cache-bust its HTML so the generated-image prompt card cannot remain stale."
@@ -162,6 +169,7 @@ const styleUpload = new Function(
     "smartReferenceRoleIsProduct",
     "smartReferenceRoleIsCase",
     "smartReferenceLikelyContainsPerson",
+    "smartPromptExplicitlyRequestsSamePerson",
     "smartPosterCopyEnabledForGeneration",
     "smartPosterCopyDisabledForGeneration",
     `${functionSource("smartStyleReferenceShouldUpload")}; return smartStyleReferenceShouldUpload;`
@@ -169,14 +177,16 @@ const styleUpload = new Function(
     (ref) => ref?.role === "product_truth_reference" || ref?.role === "product_detail_reference",
     (ref) => ref?.role === "case_style_reference",
     (node, ref) => ref?.containsPerson === true,
+    (node) => node?.samePerson === true,
     (node) => node?.posterCopyEnabled === true,
     (node) => node?.posterCopyDisabled === true
 );
 
 const personReference = { role: "composition_reference", containsPerson: true };
 check(styleUpload({}, personReference, 65) === false, "A normal person reference below 85 must remain text-only.");
-check(styleUpload({ posterCopyEnabled: true }, personReference, 65) === true, "Poster-copy primary references must upload even below 85.");
-check(styleUpload({ posterCopyDisabled: true }, personReference, 65) === true, "Poster-copy disabled primary references must upload at 60+ so layout similarity is preserved.");
+check(styleUpload({ posterCopyEnabled: true }, personReference, 65) === false, "Poster-copy person references below 85 must stay text-only unless the user explicitly asks for the same person.");
+check(styleUpload({ posterCopyDisabled: true }, personReference, 65) === false, "Poster-copy disabled person references below 85 must stay text-only so the model changes face and hairstyle.");
+check(styleUpload({ samePerson: true, posterCopyEnabled: true }, personReference, 65) === true, "Explicit same-person requests may upload a person reference below 85.");
 check(styleUpload({}, personReference, 85) === true, "A normal person reference at 85 must upload.");
 check(styleUpload({}, { role: "product_truth_reference" }, 20) === true, "Product truth must upload at every style weight.");
 
@@ -187,6 +197,9 @@ var uniqueReferenceImages = (refs) => {
 var imageRefsOnly = (refs) => (refs || []).filter((ref) => ref && ref.url && (ref.kind || "image") === "image");
 var promptNodeReferenceWeight = (node) => Number(node?.referenceWeight ?? 65);
 var smartStyleReferenceShouldUpload = () => false;
+var smartPromptExplicitlyRequestsSamePerson = (node) => node?.samePerson === true;
+var smartPromptAllowsHumanByIntent = (node) => node?.allowHuman === true;
+var smartStyleMatchLikelyContainsPerson = (node) => node?.stylePerson === true;
 var inputNodesFor = () => [];
 var isSmartGroupNode = () => false;
 var isGeneratedImagePromptComposerNode = (node) => node?.type === "smart-image" && node?.generatedPromptInitialized === true;
@@ -211,7 +224,7 @@ const caseRef = {
 function route(refs, weight = 65, nodeExtras = {}) {
     const node = { id: "test-node", referenceWeight: weight, ...nodeExtras };
     const prioritized = smartPrioritizeGenerationReferences(refs);
-    const decorated = smartDecorateReferenceWeights(node, prioritized);
+    const decorated = smartDecorateReferenceWeights(node, prioritized, nodeExtras.prompt || "");
     return decorated.filter(smartReferenceUploadAllowed);
 }
 
@@ -219,15 +232,17 @@ const mediumPersonWithCase = route([primary, caseRef], 65);
 check(mediumPersonWithCase.length === 0, "A 65-weight person reference and its case image must both remain text-only.");
 
 const posterCopyPersonWithProduct = route([primary, product, caseRef], 65, { posterCopyEnabled: true });
-check(posterCopyPersonWithProduct.some((ref) => ref.role === "composition_reference" && ref.posterCopyReference && !ref.copyTextLock && ref.inputFidelity === "low"), "Poster-copy primary reference must upload as a lightweight text guide at medium weight.");
+check(!posterCopyPersonWithProduct.some((ref) => ref.role === "composition_reference" && smartReferenceUploadAllowed(ref)), "Poster-copy person reference below 85 must not upload as an identity image.");
+const samePersonPromptRefs = route([primary, product], 65, { posterCopyEnabled: true, prompt: "Keep the same person identity from the reference." });
+check(samePersonPromptRefs.some((ref) => ref.role === "composition_reference" && smartReferenceUploadAllowed(ref)), "An explicit same-person prompt may upload the person reference below 85.");
 check(posterCopyPersonWithProduct.some((ref) => ref.role === "product_truth_reference"), "Poster-copy mode must still keep product truth references.");
 const strictPosterCopy = route([primary], 85, { posterCopyEnabled: true });
 check(strictPosterCopy.some((ref) => ref.posterCopyReference && ref.copyTextLock && ref.inputFidelity === "high"), "Poster-copy text hard lock should be reserved for 85+ reference weight.");
 
 const posterCopyOffPersonWithProduct = route([primary, product, caseRef], 65, { type: "smart-prompt", posterCopyEnabled: false });
 check(
-    posterCopyOffPersonWithProduct.some((ref) => ref.role === "composition_reference" && ref.posterCopyDisabledReference && ref.copyTextRemovalOnly && ref.inputFidelity === "high"),
-    "Poster-copy disabled primary reference must upload as a high-fidelity layout reference at medium weight."
+    !posterCopyOffPersonWithProduct.some((ref) => ref.role === "composition_reference" && smartReferenceUploadAllowed(ref)),
+    "Poster-copy disabled person reference below 85 must not upload as a high-fidelity identity image."
 );
 
 const posterPromptUpstream = { id: "poster-prompt-upstream", type: "smart-prompt", posterCopyEnabled: true };
@@ -303,6 +318,13 @@ check(
 const nonPersonStyle = { url: "studio.png", kind: "image", role: "composition_reference", name: "clean studio reference" };
 check(route([nonPersonStyle], 65).length === 1, "A normal non-person style reference at 65 should upload.");
 check(
+    route([nonPersonStyle], 65, {
+        llmInstruction: "Generate a portrait with a woman using the product.",
+        styleMatch: { analysis: { positive_prompt: "beauty model face hair portrait" } }
+    }).length === 0,
+    "A low-weight style reference whose analysis is a human portrait must stay text-only when the user wants a different person."
+);
+check(
     route([nonPersonStyle], 65, { llmInstruction: "背景颜色配色改变一下" }).length === 0,
     "An explicit background/palette change must make a sub-85 style reference text-only."
 );
@@ -363,10 +385,10 @@ check(
 );
 inputNodesFor = () => [];
 
-check(smartPersonSimilarityInstruction(20).includes("very low"), "0-34 person tier changed.");
-check(smartPersonSimilarityInstruction(45).includes("low"), "35-59 person tier changed.");
-check(smartPersonSimilarityInstruction(65).includes("medium"), "60-84 person tier changed.");
-check(smartPersonSimilarityInstruction(90).includes("high"), "85+ person tier changed.");
+check(smartPersonSimilarityInstruction(20).includes("new unrelated model/person"), "0-34 person tier must force a new person.");
+check(smartPersonSimilarityInstruction(45).includes("clearly different person"), "35-59 person tier must force a clearly different person.");
+check(smartPersonSimilarityInstruction(65).includes("does NOT mean same identity"), "60-84 person tier must avoid same identity.");
+check(smartPersonSimilarityInstruction(90).includes("Person identity lock enabled"), "85+ person tier may preserve identity.");
 
 check(
     backendSource.includes('and image_reference_role(ref) != "case_style_reference"') &&

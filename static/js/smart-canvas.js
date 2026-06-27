@@ -13177,6 +13177,27 @@ function smartStyleMatchLikelyContainsPerson(node){
 function smartPromptExplicitlyRequestsHuman(node, prompt=''){
     return smartTextExplicitlyRequestsHuman([prompt, smartNodeUserIntentText(node)].filter(Boolean).join('\n\n'));
 }
+function smartPromptAllowsHumanByIntent(node, prompt=''){
+    const latest = smartLatestUserRequestText(node, prompt);
+    if(smartTextExplicitlyForbidsHuman(latest)) return false;
+    if(smartTextExplicitlyRequestsHuman(latest)) return true;
+    const intent = smartNodeUserIntentText(node);
+    if(smartTextExplicitlyForbidsHuman(intent)) return false;
+    if(smartTextExplicitlyRequestsHuman(intent)) return true;
+    return !smartTextExplicitlyForbidsHuman(prompt) && smartTextExplicitlyRequestsHuman(prompt);
+}
+function smartTextExplicitlyRequestsSamePerson(text=''){
+    const value = String(text || '');
+    if(!value.trim()) return false;
+    return /same\s+(?:person|model|face|character|subject)|preserve\s+(?:the\s+)?(?:person|model|face|character|subject)\s+identity|keep\s+(?:the\s+)?(?:same\s+)?(?:person|model|face|character|subject)\s+identity|identity\s+reference|\u540c\u4e00(?:\u4e2a)?(?:\u4eba|\u4eba\u7269|\u6a21\u7279|\u4e3b\u4f53)|(?:\u4eba\u7269|\u4eba\u50cf|\u6a21\u7279|\u8138|\u9762\u90e8|\u4e94\u5b98).{0,12}(?:\u4e00\u81f4|\u76f8\u540c|\u4e0d\u53d8|\u4fdd\u6301|\u8fd8\u539f)|(?:\u4fdd\u6301|\u8fd8\u539f).{0,12}(?:\u539f|\u540c\u4e00|\u8fd9\u4e2a).{0,8}(?:\u4eba|\u4eba\u7269|\u6a21\u7279|\u8138|\u9762\u90e8|\u4e94\u5b98)/i.test(value);
+}
+function smartPromptExplicitlyRequestsSamePerson(node, prompt=''){
+    return smartTextExplicitlyRequestsSamePerson([
+        smartLatestUserRequestText(node, prompt),
+        smartNodeUserIntentText(node),
+        prompt
+    ].filter(Boolean).join('\n\n'));
+}
 function smartRefsLikelyContainPerson(node, refs=[]){
     return imageRefsOnly(refs).some(ref => smartReferenceLikelyContainsPerson(node, ref));
 }
@@ -13228,6 +13249,7 @@ function smartReferenceLikelyContainsPerson(node, ref){
     if(smartReferenceRoleIsProduct(ref) || smartReferenceRoleIsCase(ref)) return false;
     if(ref?.containsPerson === true || ref?.hasPerson === true || ref?.personReference === true || ref?.humanReference === true) return true;
     if(ref?.containsPerson === false || ref?.hasPerson === false || ref?.personReference === false || ref?.humanReference === false) return false;
+    if(['composition_reference','primary_style_reference','primary_reference'].includes(ref?.role || '') && smartPromptAllowsHumanByIntent(node) && smartStyleMatchLikelyContainsPerson(node)) return true;
     const text = smartFlattenTextValues([
         ref?.subjectKind,
         ref?.mediaCategory,
@@ -13245,18 +13267,21 @@ function smartReferenceLikelyContainsPerson(node, ref){
     if(!text.trim() || smartTextExplicitlyForbidsHuman(text)) return false;
     return smartHumanPositivePattern().test(smartStripHumanAntiCopyClauses(text));
 }
-function smartStyleReferenceShouldUpload(node, ref, weight){
+function smartStyleReferenceShouldUpload(node, ref, weight, prompt=''){
     if(ref?.generatedEditBase || ref?.structureLock) return true;
     if(ref?.styleLock || ref?.referenceLock) return true;
     if(smartReferenceRoleIsProduct(ref)) return true;
     if(smartReferenceRoleIsCase(ref)) return false;
     const role = ref?.role || '';
     if(!['composition_reference','primary_style_reference','primary_reference'].includes(role)) return true;
-    if(smartPosterCopyEnabledForGeneration(node)) return true;
     const value = Math.max(0, Math.min(100, Math.round(Number(weight) || 0)));
+    const containsPerson = smartReferenceLikelyContainsPerson(node, ref);
+    const samePersonRequested = smartPromptExplicitlyRequestsSamePerson(node, prompt);
+    if(containsPerson && !samePersonRequested && value < 85) return false;
+    if(smartPosterCopyEnabledForGeneration(node)) return true;
     if(smartPosterCopyDisabledForGeneration(node) && value >= 60) return true;
-    if(smartReferenceLikelyContainsPerson(node, ref)){
-        return value >= 85;
+    if(containsPerson){
+        return samePersonRequested || value >= 85;
     }
     return value >= 60;
 }
@@ -13270,18 +13295,18 @@ function smartPosterCopySimilarityIntent(weight, fallback){
     if(value >= 60) return 'poster_copy_text_lock_balanced_visual';
     return 'poster_copy_text_lock_loose_visual';
 }
-function smartPersonSimilarityInstruction(weight=65){
+function smartPersonSimilarityInstruction(weight=65, samePersonRequested=false){
     const value = Math.max(0, Math.min(100, Math.round(Number(weight) || 0)));
-    if(value >= 85){
-        return 'Person similarity: high. The model may share the same general beauty type and facial proportions, but must not be an identical face or exact same person; change micro-features, expression, hair detail, and gaze enough to avoid duplication.';
+    if(samePersonRequested || value >= 85){
+        return 'Person identity lock enabled only because the user explicitly requested the same person or the person reference weight is very high. Keep the same recognizable model/person only in this mode, while still avoiding pixel-level copy; preserve face identity, broad hairstyle family, and styling category, but vary expression, pose, crop, hand placement, and scene details.';
     }
     if(value >= 60){
-        return 'Person similarity: medium. Use a different model/person with a similar commercial beauty category, styling level, age range, and mood. The face must be recognizably different: change face shape, eyes, lips, nose, hairline, hairstyle details, skin marks/moles, and gaze. Do not preserve exact facial identity or same-person likeness.';
+        return 'Person similarity: medium does NOT mean same identity. Generate a different model/person in the same commercial beauty category. The face must be recognizably different: change face shape, eye shape/spacing, lips, nose, jawline, cheek volume, hairline, hairstyle silhouette, hair length/parting, small skin marks, expression, and gaze. Do not preserve the reference face, same-person likeness, or exact hairstyle. If earlier prompt text describes the reference hair, bangs, buns, braids, face shape, eyes, lips, nose, or facial proportions, treat those words as general commercial beauty polish only, not identity locks.';
     }
     if(value >= 35){
-        return 'Person similarity: low. Generate a clearly different person. Keep only the campaign mood, styling category, lighting, and product interaction; do not copy the reference face or recognizable model identity.';
+        return 'Person similarity: low. Generate a clearly different person. Keep only campaign mood, styling level, lighting quality, and product interaction. Use a different face, different facial proportions, different hairline, and different hairstyle silhouette/parting/length; do not copy the reference face, recognizable model identity, or hairstyle. Override older prompt fragments that describe the original model hair, bangs, buns, braids, face shape, eyes, lips, nose, or facial proportions.';
     }
-    return 'Person similarity: very low. Treat the person in the reference as non-identity style inspiration only; create a new unrelated model/person.';
+    return 'Person similarity: very low. Treat the person in the reference as non-identity style inspiration only; create a new unrelated model/person with a different face, different facial structure, different hairline, and clearly different hairstyle. Do not preserve the reference model identity, same-person likeness, exact bangs/parting/bun/braid/length, or facial micro-features. Override older prompt fragments that describe the original model hair, bangs, buns, braids, face shape, eyes, lips, nose, or facial proportions.';
 }
 function smartFilterWeakCaseReferences(node, refs=[]){
     const images = imageRefsOnly(refs);
@@ -13368,7 +13393,7 @@ function smartReferenceRoleWeight(ref){
     if(ref?.role === 'case_style_reference') return 25;
     return 50;
 }
-function smartDecorateReferenceWeights(node, refs=[]){
+function smartDecorateReferenceWeights(node, refs=[], prompt=''){
     const styleWeight = promptNodeReferenceWeight(node);
     const latestChangesBackgroundPalette = smartLatestRequestChangesBackgroundPalette(node);
     const posterCopyLock = smartPosterCopyEnabledForGeneration(node);
@@ -13414,7 +13439,7 @@ function smartDecorateReferenceWeights(node, refs=[]){
                 && !ref?.referenceLock
                 && !posterCopyLock
                 ? false
-                : smartStyleReferenceShouldUpload(node, ref, styleWeight);
+                : smartStyleReferenceShouldUpload(node, ref, styleWeight, prompt);
             const styleIntent = styleWeight >= 85 ? 'strong_style_not_clone' : styleWeight >= 60 ? 'balanced_style' : 'loose_style';
             return {
                 ...ref,
@@ -13636,7 +13661,7 @@ function smartProductReplacementRolePrompt(refs=[], allowHuman=false){
         'Ignore every earlier phrase that calls the old reference object a hero product, generic product, serum bottle, dropper bottle, box, or alternate product shape.'
     ].join(' ');
 }
-function smartReferenceSimilarityRolePrompt(refs=[], allowHuman=false){
+function smartReferenceSimilarityRolePrompt(refs=[], allowHuman=false, node=null, prompt=''){
     const images = imageRefsOnly(refs);
     const editBaseRefs = images.filter(ref => ref?.generatedEditBase || ref?.structureLock);
     const styleRefs = images.filter(ref => ['composition_reference','primary_style_reference','primary_reference'].includes(ref?.role) && !(ref?.generatedEditBase || ref?.structureLock));
@@ -13669,6 +13694,7 @@ function smartReferenceSimilarityRolePrompt(refs=[], allowHuman=false){
             : styleWeight >= 60
                 ? 'balanced style guidance with clear new-shot variation'
                 : 'loose style inspiration';
+        const samePersonRequested = smartPromptExplicitlyRequestsSamePerson(node, prompt);
         parts.push(allowHuman
             ? `Style/reference similarity setting: ${styleWeight}/100 (${mode}). Use style references for mood, lighting quality, palette, beauty-ad polish, broad subject relationship, and approximate scale only.`
             : `Style/reference similarity setting: ${styleWeight}/100 (${mode}). Use style references for mood, lighting quality, palette, advertising polish, product/environment relationship, and approximate scale only.`);
@@ -13678,7 +13704,7 @@ function smartReferenceSimilarityRolePrompt(refs=[], allowHuman=false){
         if(styleWeight >= 60 && styleRefs.some(ref => ref?.posterCopyDisabledReference || ref?.copyTextRemovalOnly)){
             parts.push('Poster-copy disabled does not reduce visual similarity: preserve the uploaded poster composition family, subject/product placement, camera family, crop, palette, lighting, graphic panels, border/strip/badge positions, bottom sale-bar geometry, and commercial hierarchy. Remove only readable poster overlay copy; keep product/package labels.');
         }
-        if(allowHuman) parts.push(smartPersonSimilarityInstruction(styleWeight));
+        if(allowHuman) parts.push(smartPersonSimilarityInstruction(styleWeight, samePersonRequested));
         else parts.push('Human/body similarity is disabled: do not transfer any person, face, model, skin, hands, pose, hand placement, or body-part content from the reference or case library.');
         parts.push(allowHuman
             ? 'Never reproduce the reference image as a one-to-one copy. Always alter exact crop, pose, hand placement, expression, product position, and small layout details unless the user explicitly asks for exact duplication.'
@@ -13719,15 +13745,16 @@ function smartEditBaseStructureLockPrompt(refs=[], userPrompt=''){
         request ? `Latest edit request to apply within the locked source structure: ${request}` : ''
     ].filter(Boolean).join('\n');
 }
-function smartPersonIdentityOverridePrompt(refs=[], allowHuman=false){
+function smartPersonIdentityOverridePrompt(refs=[], allowHuman=false, node=null, prompt=''){
     if(!allowHuman) return '';
     const images = imageRefsOnly(refs);
     const styleRefs = images.filter(ref => ['composition_reference','primary_style_reference','primary_reference'].includes(ref?.role));
     if(!styleRefs.length) return '';
     const styleWeight = Math.max(...styleRefs.map(ref => smartReferenceRoleWeight(ref)));
+    const samePersonRequested = smartPromptExplicitlyRequestsSamePerson(node, prompt);
     return [
         'PERSON IDENTITY CONTROL:',
-        smartPersonSimilarityInstruction(styleWeight),
+        smartPersonSimilarityInstruction(styleWeight, samePersonRequested),
         'This person-identity rule overrides any earlier prompt phrase such as identity reference, model identity, subject identity, same person, same model, preserve face, or keep the original face. Product identity remains strict and is controlled only by product references.'
     ].join(' ');
 }
@@ -14529,7 +14556,7 @@ function buildPromptRequest(node, overrideDefaultImages=null, consumeDefault=fal
 const buildPromptRequestBase = buildPromptRequest;
 buildPromptRequest = function(node, overrideDefaultImages=null, consumeDefault=false, ctx=smartLoopContext){
     const request = buildPromptRequestBase(node, overrideDefaultImages, consumeDefault, ctx);
-    const refs = smartDecorateReferenceWeights(node, smartPrioritizeGenerationReferences(smartAssignReferenceRoles(node, request.refs || []), node));
+    const refs = smartDecorateReferenceWeights(node, smartPrioritizeGenerationReferences(smartAssignReferenceRoles(node, request.refs || []), node), request.prompt || request.displayPrompt || '');
     const allowHuman = smartGenerationAllowsHuman(node, refs, request.prompt || request.displayPrompt || '');
     const noHumanPrompt = smartNoHumanSubjectPrompt(allowHuman);
     const editBasePrompt = smartEditBaseStructureLockPrompt(refs, request.displayPrompt || request.prompt || '');
@@ -14544,8 +14571,8 @@ buildPromptRequest = function(node, overrideDefaultImages=null, consumeDefault=f
     const cleanRequestPrompt = smartLatestRequestChangesBackgroundPalette(node, rawCleanRequestPrompt)
         ? smartStripStaleBackgroundPaletteLocks(rawCleanRequestPrompt)
         : rawCleanRequestPrompt;
-    const similarityPrompt = smartReferenceSimilarityRolePrompt(refs, allowHuman);
-    const personOverridePrompt = smartPersonIdentityOverridePrompt(refs, allowHuman);
+    const similarityPrompt = smartReferenceSimilarityRolePrompt(refs, allowHuman, node, cleanRequestPrompt || request.displayPrompt || request.prompt || '');
+    const personOverridePrompt = smartPersonIdentityOverridePrompt(refs, allowHuman, node, cleanRequestPrompt || request.displayPrompt || request.prompt || '');
     const uploadedMapPrompt = smartUploadedReferenceMapPrompt(refs, allowHuman);
     const posterCopyLockPrompt = smartPosterCopyLockPrompt(node, refs);
     const posterCopyDisabledPrompt = smartPosterCopyDisabledPrompt(node, refs);
