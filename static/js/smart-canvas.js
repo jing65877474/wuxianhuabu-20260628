@@ -152,8 +152,11 @@ const activeSmartNodeSubmissions = new Set();
 const cancelledSmartTaskIds = new Set();
 const SMART_TASK_RETRY_STATUSES = new Set([429, 502, 503, 504]);
 const SMART_TASK_RETRY_DELAYS = [2000, 5000, 10000];
+const SMART_EMPTY_RUN_STUCK_TIMEOUT_MS = 45 * 60 * 1000;
+const SMART_EMPTY_RUN_WATCHDOG_INTERVAL_MS = 60 * 1000;
 const deletedSmartNodeTombstones = new Map();
 const smartNodeRunTokens = new Map();
+let smartEmptyRunWatchdogTimer = null;
 let lastImagePasteAt = 0;
 let lastNodePasteAt = 0;
 let suppressNodeClickUntil = 0;
@@ -4949,6 +4952,45 @@ function closeFailedEmptyRunNode(node){
     delete node.h;
     return true;
 }
+function stopFailedEmptyRunNode(node, reason=''){
+    if(!node || smartNodeHasDisplayResult(node)) return false;
+    const previousId = node.id;
+    cancelSmartNodeTasks(node);
+    node.lastRunError = String(reason || 'generation_failed').slice(0, 240);
+    const closed = closeFailedEmptyRunNode(node);
+    if(closed && !nodes.some(item => item.id === previousId)) return true;
+    node.runFinishedAt = nowMs();
+    if(!node.runStartedAt) node.runStartedAt = node.runFinishedAt;
+    node.runElapsedMs = Math.max(0, node.runFinishedAt - Number(node.runStartedAt || node.runFinishedAt));
+    node.runTimerHidden = true;
+    return closed;
+}
+function isStuckEmptyRunNode(node, now=nowMs()){
+    if(!node || node.type === 'smart-prompt' || smartNodeHasDisplayResult(node)) return false;
+    if(!(node.pending || node.running || node.queued || node.jimengPending || smartPendingTasks(node).length)) return false;
+    const startedAt = Number(node.runStartedAt || node.jimengPending?.startedAt || node.created_at || 0);
+    return Boolean(startedAt && now - startedAt > SMART_EMPTY_RUN_STUCK_TIMEOUT_MS);
+}
+function stopStuckEmptyRunNodes(reason='generation_timeout', options={}){
+    let changed = false;
+    const now = nowMs();
+    [...(nodes || [])].forEach(node => {
+        if(isStuckEmptyRunNode(node, now)){
+            if(stopFailedEmptyRunNode(node, reason)) changed = true;
+        }
+    });
+    if(changed){
+        if(options.renderNow !== false) render();
+        scheduleSave();
+    }
+    return changed;
+}
+function startEmptyRunWatchdog(){
+    if(smartEmptyRunWatchdogTimer) return;
+    smartEmptyRunWatchdogTimer = setInterval(() => {
+        stopStuckEmptyRunNodes('generation_timeout');
+    }, SMART_EMPTY_RUN_WATCHDOG_INTERVAL_MS);
+}
 function markSmartNodeComplete(node, meta=null){
     if(!node) return node;
     const keepHidden = node.runTimerHidden === true;
@@ -5668,6 +5710,7 @@ async function loadCanvas(){
         const recoveredLoopOutputs = recoverStuckLoopOutputsFromLogs();
         const hiddenCompletedTimers = hideCompletedRunTimers();
         const cleanedDetachedInputs = cleanupDetachedRunInputRefs();
+        const stoppedStuckEmptyRuns = stopStuckEmptyRunNodes('generation_timeout', {renderNow:false});
         viewport = {...viewport, ...(canvas.viewport || {})};
         viewport.scale = safeScale(viewport.scale);
         if(canvas.settings) settings = stripDeprecatedSmartGenerationSettings({...settings, ...canvas.settings});
@@ -5681,9 +5724,10 @@ async function loadCanvas(){
         applyViewport();
         render();
         const restoredProductRecognitions = schedulePendingLinkedProductRecognitions();
-        if(placeholderFiltered.removed.size || staleRunFiltered.removed.size || cleanedCaseStyleRefs || cleanedDetachedInputs || cleanedCompletedState || recoveredLoopOutputs || hiddenCompletedTimers || restoredProductRecognitions) scheduleSave();
+        if(placeholderFiltered.removed.size || staleRunFiltered.removed.size || cleanedCaseStyleRefs || cleanedDetachedInputs || cleanedCompletedState || recoveredLoopOutputs || hiddenCompletedTimers || restoredProductRecognitions || stoppedStuckEmptyRuns) scheduleSave();
         resumeSmartPendingTasks();
         resumeJimengPendingNodes();
+        startEmptyRunWatchdog();
         startCanvasMetaPoll();
     } catch(e) { toast(tr('smart.toastCanvasFail')); }
 }
@@ -7737,6 +7781,7 @@ function hideRunTimerForNode(node){
     return true;
 }
 function refreshRunTimerPills(){
+    stopStuckEmptyRunNodes('generation_timeout');
     const active = nodes.some(n => n.type !== 'smart-prompt' && !n.runTimerHidden && (n.pending || n.running || n.jimengPending || n.runFinishedAt));
     document.querySelectorAll('[data-run-timer]').forEach(el => {
         const node = nodes.find(n => n.id === el.dataset.runTimer);
@@ -8516,14 +8561,8 @@ function bindProductFactsPanelControls(el, node){
                     toast('产品事实已锁定，先解锁再重新识别');
                     return;
                 }
-                node.productFactsNeedsRefresh = true;
                 node.productFactsUserEdited = false;
-                delete node.productFacts;
-                delete node.productFactsPromptVersion;
-                delete node.productFactsReferenceSetHash;
-                delete node.productFactsRecognizedAt;
-                delete node.productFactsRecognitionModel;
-                delete node.productFactsRecognitionSource;
+                clearAutoProductFactsForRefresh(node);
                 scheduleSave();
                 render();
                 scheduleLinkedProductRecognition(node.id);
@@ -12665,7 +12704,7 @@ function connectInputNode(fromId, toId){
     to.inputNodeIds = Array.from(new Set([...(to.inputNodeIds || []), from.id]));
     addConnection(from.id, to.id, 'input');
     smartClearEmptyProductFactsBlocker(to);
-    scheduleLinkedProductRecognition(to.id);
+    refreshLinkedProductFactsAfterConnection(to.id);
     return true;
 }
 function upstreamNodesForKinds(node, kinds=['input']){
@@ -13465,7 +13504,7 @@ function smartFlattenTextValues(value, out=[], depth=0){
     return out;
 }
 function smartHumanNegativePattern(){
-    return /(?:no|without|exclude|remove|avoid|not include|do not include|do not add|do not generate)\s+(?:any\s+)?(?:person|people|human|model|face|hand|hands|finger|arm|body|limb|human body part)|(?:person|people|human|model|face|hand|hands|finger|arm|body|limb|human body part)[-\s]*free|product[-\s]*(?:only|solo)|object[-\s]*only|isolated product|still life|pure product|no-human|no human|不要(?:人物|人像|人|模特|手|手部|肢体|身体|脸|面部)|无(?:人物|人像|人|模特|手|手部|肢体|身体|脸|面部)|不(?:出现|需要|要|添加|生成)(?:人物|人像|人|模特|手|手部|肢体|身体|脸|面部)|纯产品|单品|产品单独|产品独立|静物|无人场景/i;
+    return /(?:no|without|exclude|remove|avoid|not include|do not include|do not add|do not generate)\s+(?:any\s+)?(?:person|people|human|model|face|hand|hands|finger|arm|body|limb|human body part)|(?:person|people|human|model|face|hand|hands|finger|arm|body|limb|human body part)[-\s]*free|product[-\s]*(?:only|solo)|object[-\s]*only|isolated product|still life|pure product|non[-\s]?human|humanless|no-human|no human|不要(?:人物|人像|人|模特|手|手部|肢体|身体|脸|面部)|无(?:人物|人像|人|模特|手|手部|肢体|身体|脸|面部)|(?:非|不是|并非)(?:人物|人像|真人|模特|人类|人体|人脸|脸|面部|手|手部|肢体|身体)|不(?:出现|需要|要|添加|生成)(?:人物|人像|人|模特|手|手部|肢体|身体|脸|面部)|纯产品|单品|产品单独|产品独立|静物|无人场景/i;
 }
 function smartHumanPositivePattern(){
     return /(?:^|[^a-z])(?:person|people|human|human model|model|woman|man|girl|boy|female|male|portrait|face|facial|hand|hands|finger|palm|arm|body|torso|shoulder|leg|limb|holding|hold|grip|wearing|consumer|lifestyle person)(?:[^a-z]|$)|人物|人像|真人|模特|女人|女性|男人|男性|女孩|男孩|消费者|生活方式人物|脸|面部|五官|手部|手指|掌心|手掌|手臂|胳膊|肢体|身体|肩膀|腿部|拿着|握着|托着|抓着|捧着|佩戴|穿着|手持产品|手拿|手里|手中/i;
@@ -13486,6 +13525,18 @@ function smartTextLikelyPartialHumanReference(text=''){
     const value = String(text || '');
     if(!value.trim()) return false;
     return smartPartialHumanReferencePattern().test(value);
+}
+function smartTextLikelyHumanPartOnlyReference(text=''){
+    const value = String(text || '');
+    if(!value.trim()) return false;
+    const stripped = smartStripHumanAntiCopyClauses(value);
+    if(smartTextLikelyPartialHumanReference(stripped)) return true;
+    const humanPart = /\b(?:face|facial|hand|hands|finger|fingers|palm|arm|arms|limb|limbs|leg|legs|foot|feet|shoulder|shoulders|skin|hair|body\s+part|body\s+parts)\b|脸|面部|五官|手|手部|手指|掌心|手掌|手臂|胳膊|肢体|四肢|腿|腿部|脚|肩膀|皮肤|头发|身体部位/i;
+    if(!humanPart.test(stripped)) return false;
+    if(smartTextExplicitlyRequestsFullHumanCompletion(stripped)) return false;
+    const fullSubject = /\b(?:person|people|human\s+model|model|woman|man|girl|boy|female|male|consumer|portrait)\b|人物|人像|真人|模特|女人|女性|男人|男性|女孩|男孩|消费者|肖像/i;
+    const ownedPart = /\b(?:woman|man|female|male|model|person|human)'?s\s+(?:face|hand|hands|finger|fingers|palm|arm|arms|limb|limbs|leg|legs|foot|feet|shoulder|skin|hair)\b/i;
+    return !fullSubject.test(stripped) || ownedPart.test(stripped);
 }
 function smartTextExplicitlyRequestsFullHumanCompletion(text=''){
     const value = String(text || '');
@@ -13509,12 +13560,13 @@ function smartStripHumanAntiCopyClauses(text){
 function smartTextExplicitlyForbidsHuman(text){
     const value = String(text || '');
     const cnNegative = /(?:\u4e0d\u8981|\u65e0|\u4e0d\u51fa\u73b0|\u7981\u6b62|\u53bb\u6389|\u6392\u9664|不要|无|不出现|禁止|去掉|排除).{0,12}(?:\u4eba\u7269|\u4eba\u50cf|\u771f\u4eba|\u6a21\u7279|\u4eba\u8138|\u8138|\u624b|\u624b\u90e8|\u80a2\u4f53|人物|人像|真人|模特|人脸|脸|手|手部|肢体)/i;
-    const cnHardNegative = /(?:(?:\u4e0d\u8981|\u4e0d\u9700\u8981|\u65e0\u9700|\u65e0\u987b|\u4e0d\u51fa\u73b0|\u7981\u6b62|\u4e0d\u80fd|\u4e0d\u5f97|\u4e0d\u51c6|\u53bb\u6389|\u79fb\u9664|\u5220\u9664|\u6392\u9664)(?:\u518d|\u51fa\u73b0|\u52a0\u5165|\u6dfb\u52a0|\u751f\u6210|\u5305\u542b|\u4f7f\u7528|\u6709)?(?:\u4efb\u4f55)?(?:\u4eba\u7269|\u4eba\u50cf|\u771f\u4eba|\u6a21\u7279|\u4eba\u8138|\u8138\u90e8|\u624b|\u624b\u90e8|\u80a2\u4f53|\u4eba\u4f53)|(?:\u65e0|\u6ca1\u6709)(?:\u4efb\u4f55)?(?:\u4eba\u7269|\u4eba\u50cf|\u771f\u4eba|\u6a21\u7279|\u4eba\u8138|\u8138\u90e8|\u624b|\u624b\u90e8|\u80a2\u4f53|\u4eba\u4f53)|(?:\u4e0d\u8981|\u4e0d\u80fd|\u4e0d\u51c6|\u7981\u6b62)(?:\u518d)?\u6709\u4eba|(?:\u4eba\u7269|\u4eba\u50cf|\u771f\u4eba|\u6a21\u7279|\u4eba\u8138|\u8138\u90e8|\u624b\u90e8|\u80a2\u4f53)(?:\u4e0d\u8981\u51fa\u73b0|\u4e0d\u51fa\u73b0|\u7981\u6b62\u51fa\u73b0|\u53bb\u6389|\u79fb\u9664|\u5220\u9664))/i;
-    return smartHumanNegativePattern().test(value) || cnHardNegative.test(value);
+    const cnHardNegative = /(?:(?:\u4e0d\u8981|\u4e0d\u9700\u8981|\u65e0\u9700|\u65e0\u987b|\u4e0d\u51fa\u73b0|\u7981\u6b62|\u4e0d\u80fd|\u4e0d\u5f97|\u4e0d\u51c6|\u53bb\u6389|\u79fb\u9664|\u5220\u9664|\u6392\u9664)(?:\u518d|\u51fa\u73b0|\u52a0\u5165|\u6dfb\u52a0|\u751f\u6210|\u5305\u542b|\u4f7f\u7528|\u6709)?(?:\u4efb\u4f55)?(?:\u4eba\u7269|\u4eba\u50cf|\u771f\u4eba|\u6a21\u7279|\u4eba\u8138|\u8138\u90e8|\u624b|\u624b\u90e8|\u80a2\u4f53|\u4eba\u4f53)|(?:\u65e0|\u6ca1\u6709)(?:\u4efb\u4f55)?(?:\u4eba\u7269|\u4eba\u50cf|\u771f\u4eba|\u6a21\u7279|\u4eba\u8138|\u8138\u90e8|\u624b|\u624b\u90e8|\u80a2\u4f53|\u4eba\u4f53)|(?:\u975e|\u4e0d\u662f|\u5e76\u975e)(?:\u4eba\u7269|\u4eba\u50cf|\u771f\u4eba|\u6a21\u7279|\u4eba\u8138|\u8138\u90e8|\u4eba\u4f53)|(?:\u4e0d\u8981|\u4e0d\u80fd|\u4e0d\u51c6|\u7981\u6b62)(?:\u518d)?\u6709\u4eba|(?:\u4eba\u7269|\u4eba\u50cf|\u771f\u4eba|\u6a21\u7279|\u4eba\u8138|\u8138\u90e8|\u624b\u90e8|\u80a2\u4f53)(?:\u4e0d\u8981\u51fa\u73b0|\u4e0d\u51fa\u73b0|\u7981\u6b62\u51fa\u73b0|\u53bb\u6389|\u79fb\u9664|\u5220\u9664))/i;
+    return smartHumanNegativePattern().test(value) || cnNegative.test(value) || cnHardNegative.test(value);
 }
 function smartTextExplicitlyRequestsHuman(text){
     const value = String(text || '');
     if(!value.trim()) return false;
+    if(smartTextExplicitlyForbidsHuman(value)) return false;
     const stripped = smartStripHumanAntiCopyClauses(value);
     if(smartTextHasProductStandingFalsePositive(stripped)) return false;
     if(/(?:\u4eba\u7269|\u4eba\u50cf|\u771f\u4eba|\u6a21\u7279|\u4eba\u8138|\u8138\u90e8|\u624b\u90e8|\u624b\u6301|\u62ff\u7740|\u63e1\u7740|\u4f7f\u7528\u573a\u666f|\u4f7f\u7528\u6548\u679c|\u4e0a\u8138|\u62a4\u7406\u573a\u666f|人物|人像|真人|模特|人脸|脸部|手部|手持|拿着|握着|使用场景|使用效果|上脸|护理场景)/i.test(stripped)) return true;
@@ -13706,7 +13758,8 @@ function smartReferenceLikelyContainsPartialHumanContent(node, ref){
     if(smartReferenceRoleIsProduct(ref) || smartReferenceRoleIsCase(ref)) return false;
     if(ref?.containsPartialHumanOnly === true || ref?.containsHandOnly === true || ref?.partialHumanReference === true) return true;
     if(ref?.containsPartialHumanOnly === false || ref?.containsHandOnly === false || ref?.partialHumanReference === false) return false;
-    return smartTextLikelyPartialHumanReference(smartReferencePartialHumanText(node, ref));
+    const text = smartReferencePartialHumanText(node, ref);
+    return smartTextLikelyPartialHumanReference(text) || smartTextLikelyHumanPartOnlyReference(text);
 }
 function smartRefsLikelyContainPartialHumanContent(node, refs=[]){
     return imageRefsOnly(refs).some(ref => smartReferenceLikelyContainsPartialHumanContent(node, ref));
@@ -13734,8 +13787,8 @@ function smartNoHumanSubjectPrompt(allowHuman=false, partialHuman=false, fullHum
         return [
             'PARTIAL HUMAN REFERENCE LOCK:',
             'The reference image contains only a partial human subject such as a hand, cropped face, arm, leg, or another incomplete body area.',
-            'Preserve exactly the visible partial human/body content from the reference. Do not complete it into a full person, full model, full face, full body, or full portrait.',
-            'Do not add missing head, torso, extra limbs, or full-body framing unless the latest user request explicitly asks for a complete human subject.',
+            'Preserve only the already-visible partial human/body content from the reference. Do not complete it into a full person, full model, full face, full body, or full portrait.',
+            'Do not add any missing head, hair, neck, torso, shoulders, arms, hands, fingers, legs, feet, skin area, extra limb, or full-body framing that is not already visible in the reference unless the latest user request explicitly asks for that exact missing body part.',
             'The partial human content should remain subordinate to the reference composition, copy layout, palette, lighting, product position, and commercial hierarchy.'
         ].join(' ');
     }
@@ -14607,7 +14660,7 @@ function smartProductReplacementStyleBridgePrompt(allowHuman=false){
 }
 const smartProductRecognitionCache = new Map();
 const smartLinkedProductRecognitionInFlight = new Map();
-const SMART_PRODUCT_RECOGNITION_PROMPT_VERSION = 'phase4-product-facts-v1';
+const SMART_PRODUCT_RECOGNITION_PROMPT_VERSION = 'phase4-product-facts-v2';
 function smartProductTruthRefs(refs=[]){
     return imageRefsOnly(refs).filter(ref => ref?.role === 'product_truth_reference' || ref?.role === 'product_detail_reference');
 }
@@ -14634,6 +14687,8 @@ function smartProductRecognitionMessage(refs=[]){
         'Focus only on visible product truth. Do not guess brand names, hidden/internal structure, accessories, or exact text that is not readable.',
         'If text/logo/parts are unclear, put them in uncertain. If multiple product views conflict, list conflicts.',
         'Separate confirmed visible facts from uncertainty. Product facts assist prompting and must not override explicit user instructions.',
+        'If any product is visible, do NOT return an all-empty JSON object. Unknown brand/model may stay empty, but category, main_colors, silhouette, must_preserve, forbidden_changes, and confidence must reflect visible evidence.',
+        'For a small appliance, beauty device, handheld tool, bottle, package, or electronic product, describe the visible shape, proportions, orientation-specific structural parts, control/button/display placement, cap/nozzle/opening geometry, material, finish, and dominant colors.',
         '',
         'Include exact product category, packaging/device format, silhouette, proportions, shell/body geometry, controls, ports, material, surface finish, dominant colors, logos/label blocks if legible, and what must not change.'
     ].join('\n');
@@ -14714,17 +14769,18 @@ function smartProductFactsForNode(node){
 }
 function smartClearEmptyProductFactsBlocker(node){
     if(!node) return false;
-    const hasFactsState = Boolean(node.productFacts || node.productFactsLocked || node.productFactsUserEdited || node.productFactsNeedsRefresh);
+    const hasFactsState = Boolean(node.productFacts || node.productFactsLocked || node.productFactsUserEdited || node.productFactsNeedsRefresh || node.productFactsRecognizing);
     if(!hasFactsState || smartProductFactsSummary(node.productFacts)) return false;
+    if(node.productFactsLocked || node.productFactsUserEdited || node.productFactsNeedsRefresh || node.productFactsRecognizing) return false;
+    const hasLinkedProductRefs = smartProductRecognitionRefsForNode(node).length > 0;
     delete node.productFacts;
-    delete node.productFactsLocked;
-    delete node.productFactsUserEdited;
-    delete node.productFactsNeedsRefresh;
     delete node.productFactsPromptVersion;
     delete node.productFactsReferenceSetHash;
     delete node.productFactsRecognizedAt;
     delete node.productFactsRecognitionModel;
     delete node.productFactsRecognitionSource;
+    delete node.productFactsRecognitionError;
+    if(hasLinkedProductRefs) node.productFactsNeedsRefresh = true;
     return true;
 }
 function smartNodeProductFactsMatchRefs(node, refs=[]){
@@ -14771,28 +14827,43 @@ function smartProductRecognitionPromptForNode(node, refs=[]){
 }
 function smartProductFactsStatus(node){
     const facts = smartProductFactsForNode(node);
-    if(!facts) return '';
+    if(!facts){
+        const pending = [];
+        if(node?.productFactsRecognizing) pending.push('recognizing');
+        if(node?.productFactsRecognitionError) pending.push('recognition failed');
+        if(node?.productFactsNeedsRefresh) pending.push('refresh queued');
+        if(node?.productFactsUserEdited) pending.push('edited');
+        if(node?.productFactsLocked) pending.push('locked');
+        return pending.join(' / ');
+    }
     const bits = [];
     bits.push(`confidence ${Math.round((Number(facts.confidence) || 0) * 100)}%`);
     if(facts.uncertain?.length) bits.push(`${facts.uncertain.length} uncertain`);
     if(facts.conflicts?.length) bits.push(`${facts.conflicts.length} conflicts`);
     if(node?.productFactsRecognizing) bits.push('recognizing');
+    if(node?.productFactsRecognitionError) bits.push('recognition failed');
     if(node?.productFactsUserEdited) bits.push('edited');
     if(node?.productFactsLocked) bits.push('locked');
     return bits.join(' / ');
 }
 function smartProductFactsPanelHtml(node){
+    if(!(isSmartImageNode(node) || node?.type === 'smart-prompt')) return '';
     const facts = smartProductFactsForNode(node);
-    const shouldShow = Boolean(facts || node?.productFactsLocked || node?.productFactsUserEdited || node?.productFactsNeedsRefresh || node?.productFactsRecognizing);
-    if(!shouldShow || !(isSmartImageNode(node) || node?.type === 'smart-prompt')) return '';
+    const hasLinkedProductRefs = smartProductRecognitionRefsForNode(node).length > 0;
+    const shouldShow = Boolean(facts || hasLinkedProductRefs || node?.productFactsLocked || node?.productFactsUserEdited || node?.productFactsNeedsRefresh || node?.productFactsRecognizing);
+    if(!shouldShow) return '';
     const value = facts ? JSON.stringify(facts, null, 2) : JSON.stringify(defaultSmartProductFacts(), null, 2);
     const locked = Boolean(node.productFactsLocked);
     const status = smartProductFactsStatus(node) || 'not recognized';
+    const errorHtml = node.productFactsRecognitionError
+        ? `<div class="smart-product-facts-error">${escapeHtml(String(node.productFactsRecognitionError).slice(0, 180))}</div>`
+        : '';
     return `<div class="smart-product-facts-panel" data-product-facts-panel>
         <div class="smart-product-facts-head">
             <span><i data-lucide="${locked ? 'lock' : 'scan-search'}"></i> Product facts</span>
             <small>${escapeHtml(status)}</small>
         </div>
+        ${errorHtml}
         <textarea data-product-facts-editor spellcheck="false" ${locked ? 'readonly' : ''}>${escapeHtml(value)}</textarea>
         <div class="smart-product-facts-actions">
             <button type="button" data-product-facts-action="save" ${locked ? 'disabled' : ''}>Save</button>
@@ -14811,8 +14882,8 @@ function applyRecognizedProductFactsToNode(node, facts){
 async function smartAnalyzeProductTruthRefs(refs=[], runSettings=settings){
     const productRefs = smartEvenlySampleReferences(smartProductTruthRefs(refs), 5);
     if(!productRefs.length) return {summary:'', facts:null, cacheHit:false, cacheKey:''};
-    const provider = resolveChatProviderId(runSettings?.provider_id || '');
-    const model = resolveChatModel('', provider);
+    const provider = resolveChatProviderId(runSettings?.productRecognitionProvider || runSettings?.llmProvider || runSettings?.provider_id || '');
+    const model = resolveChatModel(runSettings?.productRecognitionModel || runSettings?.llmModel || '', provider);
     const key = await smartProductRecognitionCacheKey(productRefs, model);
     if(key && smartProductRecognitionCache.has(key)) return {...smartProductRecognitionCache.get(key), cacheHit:true};
     const result = await fetch('/api/canvas-llm', {
@@ -14861,6 +14932,45 @@ function scheduleLinkedProductRecognition(nodeId){
         });
     }, 0);
 }
+function clearAutoProductFactsForRefresh(node){
+    if(!node || node.productFactsLocked || node.productFactsUserEdited) return false;
+    node.productFactsNeedsRefresh = true;
+    delete node.productFacts;
+    delete node.productFactsPromptVersion;
+    delete node.productFactsReferenceSetHash;
+    delete node.productFactsRecognizedAt;
+    delete node.productFactsRecognitionModel;
+    delete node.productFactsRecognitionSource;
+    delete node.productFactsRecognitionError;
+    return true;
+}
+function smartProductRecognitionRunSettingsForNode(node){
+    const base = isSmartRunnableNode(node) ? smartSettingsForNode(node) : settings;
+    if(node?.type === 'smart-prompt' || isGeneratedImagePromptComposerNode(node)){
+        const provider = resolveChatProviderId(node.llmProvider || base?.provider_id || '');
+        const model = resolveChatModel(node.llmModel || '', provider);
+        return {
+            ...(base || {}),
+            productRecognitionProvider:provider,
+            productRecognitionModel:model,
+            llmProvider:provider,
+            llmModel:model
+        };
+    }
+    return base;
+}
+function refreshLinkedProductFactsAfterConnection(nodeId){
+    const node = nodes.find(n => n.id === nodeId);
+    if(!node || node.productFactsLocked || node.productFactsUserEdited) return false;
+    const productRefs = smartProductRecognitionRefsForNode(node);
+    if(!productRefs.length){
+        scheduleLinkedProductRecognition(nodeId);
+        return false;
+    }
+    clearAutoProductFactsForRefresh(node);
+    scheduleLinkedProductRecognition(nodeId);
+    return true;
+}
 function schedulePendingLinkedProductRecognitions(){
     let changed = false;
     nodes.forEach(node => {
@@ -14893,14 +15003,15 @@ async function preAnalyzeLinkedProductReferences(nodeId){
     node.productFactsReferenceSetHash = hash;
     render();
     try {
-        const runSettings = isSmartRunnableNode(node) ? smartSettingsForNode(node) : settings;
+        const runSettings = smartProductRecognitionRunSettingsForNode(node);
         const recognized = await smartAnalyzeProductTruthRefs(productRefs, runSettings);
         const latestNode = nodes.find(n => n.id === nodeId);
         if(!latestNode || latestNode.productFactsLocked || latestNode.productFactsUserEdited) return;
         const latestRefs = smartEvenlySampleReferences(smartProductRecognitionRefsForNode(latestNode), 5);
         const latestHash = smartProductTruthReferenceSetHash(latestRefs);
         if(latestHash !== hash) return;
-        if(recognized?.facts){
+        const recognizedSummary = recognized?.summary || smartProductFactsSummary(recognized?.facts);
+        if(recognized?.facts && recognizedSummary){
             latestNode.productFacts = normalizeSmartProductFacts(recognized.facts);
             latestNode.productFactsRecognizedAt = Date.now();
             latestNode.productFactsPromptVersion = SMART_PRODUCT_RECOGNITION_PROMPT_VERSION;
@@ -14908,17 +15019,45 @@ async function preAnalyzeLinkedProductReferences(nodeId){
             latestNode.productFactsRecognitionModel = recognized.model || '';
             latestNode.productFactsRecognitionSource = 'linked_reference';
             latestNode.productFactsNeedsRefresh = false;
+            delete latestNode.productFactsRecognitionError;
             delete latestNode.promptBeforeGuard;
             delete latestNode.promptAfterGuard;
             delete latestNode.generationSpec;
             scheduleSave();
             render();
+        } else {
+            latestNode.productFacts = normalizeSmartProductFacts(recognized?.facts || {});
+            latestNode.productFactsReferenceSetHash = hash;
+            latestNode.productFactsRecognitionModel = recognized?.model || '';
+            latestNode.productFactsRecognitionSource = 'linked_reference_empty';
+            latestNode.productFactsRecognitionError = 'empty_result';
+            latestNode.productFactsNeedsRefresh = true;
+            scheduleSave();
+            render();
         }
+    } catch(err) {
+        const latestNode = nodes.find(n => n.id === nodeId);
+        if(latestNode && !latestNode.productFactsLocked && !latestNode.productFactsUserEdited){
+            latestNode.productFactsRecognitionError = String(err?.message || err || 'recognition_failed').slice(0, 240);
+            latestNode.productFactsNeedsRefresh = true;
+            scheduleSave();
+            render();
+        }
+        console.warn('Linked product recognition failed; continuing without pre-analysis.', err);
     } finally {
         smartLinkedProductRecognitionInFlight.delete(key);
         const latestNode = nodes.find(n => n.id === nodeId);
         if(latestNode?.productFactsRecognizing){
             delete latestNode.productFactsRecognizing;
+            let refreshStateRestored = false;
+            if(!smartProductFactsSummary(latestNode.productFacts)
+                && !latestNode.productFactsLocked
+                && !latestNode.productFactsUserEdited
+                && smartProductRecognitionRefsForNode(latestNode).length){
+                latestNode.productFactsNeedsRefresh = true;
+                refreshStateRestored = true;
+            }
+            if(refreshStateRestored) scheduleSave();
             render();
         }
     }
@@ -15489,6 +15628,7 @@ buildPromptRequest = function(node, overrideDefaultImages=null, consumeDefault=f
     const fullHumanRequested = smartPromptExplicitlyRequestsFullHumanCompletion(node, cleanRequestPrompt || request.displayPrompt || remappedRequestPrompt || '') || smartCurrentUserExplicitlyRequestsSamePerson(node, cleanRequestPrompt || request.displayPrompt || remappedRequestPrompt || '');
     const partialHumanRefs = smartRefsLikelyContainPartialHumanContent(node, refs);
     const noHumanPrompt = smartNoHumanSubjectPrompt(allowHuman, partialHumanRefs, fullHumanRequested);
+    const partialHumanReferencePrompt = smartPartialHumanReferenceLockPrompt(node, refs, cleanRequestPrompt || request.displayPrompt || remappedRequestPrompt || '');
     const personOverridePrompt = smartPersonIdentityOverridePrompt(refs, allowHuman, node, cleanRequestPrompt || request.displayPrompt || remappedRequestPrompt || '');
     const uploadedMapPrompt = smartUploadedReferenceMapPrompt(refs, allowHuman);
     const posterCopyLockPrompt = smartPosterCopyLockPrompt(node, refs);
@@ -15502,7 +15642,7 @@ buildPromptRequest = function(node, overrideDefaultImages=null, consumeDefault=f
         ? ''
         : smartProductRecognitionPromptForNode(node, refs);
     const roleParts = [
-        noHumanPrompt,
+        partialHumanReferencePrompt || noHumanPrompt,
         aspectRecomposePrompt,
         uploadedMapPrompt,
         latestProductIdentityPrompt,
@@ -17446,12 +17586,11 @@ async function runGeneration(){
         }
         pendingNode.pending = 0;
         if(branchNode){
-            nodes = nodes.filter(n => n.id !== branchNode.id);
-            canvas.connections = (canvas.connections || []).filter(c => c.from !== branchNode.id && c.to !== branchNode.id);
+            stopFailedEmptyRunNode(branchNode, e.message || tr('smart.errRunFailed'));
             selectedId = node.id;
         } else {
             if(!(pendingNode.images || []).length){
-                closeFailedEmptyRunNode(pendingNode);
+                stopFailedEmptyRunNode(pendingNode, e.message || tr('smart.errRunFailed'));
             } else {
                 clearSmartNodeBusyState(pendingNode);
             }
@@ -19145,7 +19284,7 @@ async function resumeSmartPendingNode(node){
                 delete node.pendingTasks;
                 node.running = false;
                 if(!(node.images || []).length){
-                    closeFailedEmptyRunNode(node);
+                    stopFailedEmptyRunNode(node, e.message || tr('smart.errRunFailed'));
                 }
             }
             failures.push(e);
