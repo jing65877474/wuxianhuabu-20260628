@@ -7233,6 +7233,24 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
             if image_refs:
                 body["image_urls"] = [reference_to_sized_data_url(ref) for ref in gpt_image_reference_subset(prompt, image_refs)]
             response = await client.post(gen_url, headers=api_headers(provider=provider, model=model), json=body)
+        elif image_refs and is_volcengine_seedream_model(model):
+            # Seedream/Doubao image references should be sent as generation references, not
+            # as /images/edits source canvases. Edits semantics can crop/clone the first
+            # poster reference when the requested output aspect ratio is different.
+            image_payload = [reference_to_sized_data_url(ref) for ref in gpt_image_reference_subset(prompt, image_refs)]
+            body = {
+                "model": model,
+                "prompt": prompt,
+                "size": normalize_volcengine_size(size, model),
+                "response_format": "url",
+            }
+            if image_payload:
+                body["image"] = image_payload
+            response = await client.post(gen_url, headers=api_headers(provider=provider, model=model), json=body)
+            if response.status_code >= 400 and image_payload:
+                body.pop("image", None)
+                body["image_urls"] = image_payload
+                response = await client.post(gen_url, headers=api_headers(provider=provider, model=model), json=body)
         elif is_gpt2 and not image_refs and not mask_refs:
             body = {"model": model, "prompt": prompt, "size": size}
             if quality:
@@ -10722,7 +10740,7 @@ Return only compact JSON with these keys:
   "summary": "short Chinese summary",
   "search_query": "concise English keywords for searching a style case library",
   "reference_summary": {
-    "product_truth": "what product/subject facts must stay true",
+    "product_truth": "visible product/subject observations from this style image only; not authoritative SKU truth and replaceable by any later linked product reference",
     "style_reference": "what visual style, mood and campaign type the image provides",
     "key_constraints": ["non-copy and preservation constraints"]
   },
@@ -10794,6 +10812,8 @@ Return only compact JSON with these keys:
 }
 Do not copy logos, watermarks, brand text, signatures, or exact copyrighted artwork.
 Do not reduce the image to a generic scene caption. Identify the structural anchors that make the image recognizable.
+The matched image is a style/composition reference by default, not a product-truth reference. If a product, accessory, package, device, person, or prop appears in the matched image, describe it as a style-reference subject/placeholder; do not call it authoritative, exact SKU, mandatory identity, or something that must remain.
+If a later product-detail/product-truth reference is linked downstream, it overrides every product category, color, material, functional claim, logo/label, and hero-product phrase from this style match.
 The layout_lock_prompt must be useful for image generation, but it must not lock the reference image aspect ratio or exact crop. The downstream selected output canvas/aspect ratio always has priority over the reference image shape.
 The lighting_material_lock_prompt must be explicit enough to preserve visible photographic evidence: background brightness, softbox direction, shadow softness, skin pore/dewy/matte balance, hair strand detail, fabric ribs, product box paper/plastic/gloss/matte finish, table reflectance and contact shadows.
 Use the case library only as supplement. Strong reference image structure beats generic search matches.
@@ -11245,6 +11265,49 @@ def style_search_query_from_analysis(analysis: Dict[str, Any]) -> str:
     joined = " ".join(dict.fromkeys(terms))
     return re.sub(r"\s+", " ", joined).strip()[:800] or "commercial editorial product photography"
 
+def complete_prompt_units(value: Any) -> List[str]:
+    units: List[str] = []
+    for raw_line in str(value or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        line = raw_line.strip()
+        if not line:
+            continue
+        if re.match(r"^(?:[A-Za-z][A-Za-z0-9 _/()-]{1,70}|[\u4e00-\u9fff][\u4e00-\u9fffA-Za-z0-9 _/（）()_-]{1,40})[:：]", line) or line.startswith(("{", "[")):
+            units.append(line)
+            continue
+        sentences = re.findall(r"[^.!?。！？；;\n]+(?:[。！？；]+|[.!?;]+(?:\s+|$)|$)", line)
+        units.extend(sentence.strip() for sentence in sentences if sentence.strip())
+    return units
+
+def compact_complete_prompt_text(value: Any, max_len: int) -> str:
+    text = str(value or "").strip()
+    limit = max(0, int(max_len or 0))
+    if not limit or len(text) <= limit:
+        return text
+    selected: List[str] = []
+    used = 0
+    for unit in complete_prompt_units(text):
+        separator_len = 1 if selected else 0
+        if used + separator_len + len(unit) > limit:
+            break
+        selected.append(unit)
+        used += separator_len + len(unit)
+    return "\n".join(selected).strip()
+
+def join_complete_prompt_parts(parts: List[str], max_len: int, separator: str = "; ") -> str:
+    selected: List[str] = []
+    used = 0
+    limit = max(0, int(max_len or 0))
+    for part in parts:
+        text = str(part or "").strip()
+        if not text:
+            continue
+        separator_len = len(separator) if selected else 0
+        if limit and used + separator_len + len(text) > limit:
+            continue
+        selected.append(text)
+        used += separator_len + len(text)
+    return separator.join(selected).strip()
+
 def compact_style_value(value: Any, max_len: int = 900) -> str:
     parts: List[str] = []
 
@@ -11266,8 +11329,112 @@ def compact_style_value(value: Any, max_len: int = 900) -> str:
         parts.append(f"{prefix}: {text}" if prefix else text)
 
     walk(value)
-    compact = "; ".join(dict.fromkeys(parts))
-    return compact[:max_len].strip()
+    return join_complete_prompt_parts(list(dict.fromkeys(parts)), max_len)
+
+STYLE_MATCH_PRODUCT_AUTHORITY_REPLACEMENTS = [
+    (re.compile(r"\bproduct_truth\b", re.I), "style_reference_subject"),
+    (re.compile(r"\bhero product\b", re.I), "style-reference hero object"),
+    (re.compile(r"\bhero\s+wrist[-\s]?accessor(?:y|ies)\b", re.I), "style-reference wrist-accessory placeholder"),
+    (re.compile(r"(?<!style-reference\s)\bwrist[-\s]?accessor(?:y|ies)\b", re.I), "style-reference wrist-accessory placeholder"),
+    (re.compile(r"(?<!style-reference\s)\bwrist[-\s]?weights?\b", re.I), "style-reference wrist-weight placeholder"),
+    (re.compile(r"\bProduct surface should read as\b", re.I), "Style-reference object surface (non-authoritative; replace with linked product material if provided) reads as"),
+    (re.compile(r"\bproduct surfaces\b", re.I), "style-reference object surfaces"),
+    (re.compile(r"\bproduct surface\b", re.I), "style-reference object surface"),
+    (re.compile(r"\bproduct prominent\b", re.I), "style-reference object prominent"),
+    (re.compile(r"\bproduct clearly visible\b", re.I), "style-reference object clearly visible"),
+    (re.compile(r"\bproduct placement logic\b", re.I), "style-reference object placement logic"),
+    (re.compile(r"\bauthoritative\s+(?:product|sku)(?:\s+truth|\s+identity)?\b", re.I), "style-reference subject context"),
+    (re.compile(r"\b(?:exact|strict)\s+SKU\s+(?:identity|truth)\b", re.I), "linked SKU identity when product references are provided"),
+    (re.compile(r"\bmust\s+stay\s+true\b", re.I), "is a style-reference observation only"),
+    (re.compile(r"\bmust\s+remain\s+the\s+visible\b", re.I), "is visible in the style reference as the"),
+    (re.compile(r"\bmust\s+remain\s+the\b", re.I), "is the style-reference"),
+]
+
+def style_match_downgrade_product_authority_text(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    text = value
+    for pattern, replacement in STYLE_MATCH_PRODUCT_AUTHORITY_REPLACEMENTS:
+        text = pattern.sub(replacement, text)
+    return text
+
+def style_match_downgrade_product_authority(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: style_match_downgrade_product_authority(sub) for key, sub in value.items()}
+    if isinstance(value, list):
+        return [style_match_downgrade_product_authority(item) for item in value]
+    return style_match_downgrade_product_authority_text(value)
+
+def style_match_style_only_analysis(analysis: Dict[str, Any]) -> Dict[str, Any]:
+    """Return an analysis copy safe for prompt-node storage and display.
+
+    Style matching may analyze a case/reference image that contains a product.
+    That product is only a style-reference subject; it must not become the
+    downstream product truth once the user links a real SKU/product reference.
+    """
+    data = copy.deepcopy(analysis or {})
+
+    ref_summary = data.get("reference_summary")
+    if isinstance(ref_summary, dict):
+        product_truth = ref_summary.pop("product_truth", "")
+        if product_truth:
+            ref_summary.setdefault(
+                "style_reference_subject",
+                f"Style-reference subject only, not authoritative product/SKU truth: {product_truth}",
+            )
+
+    shared = data.get("shared_style_anchor")
+    if isinstance(shared, dict):
+        product_truth = shared.pop("product_truth", "")
+        if product_truth:
+            shared.setdefault(
+                "reference_subject",
+                f"Style-reference subject only, replaceable by linked product truth: {product_truth}",
+            )
+
+    fingerprint = data.get("style_fingerprint")
+    if isinstance(fingerprint, dict):
+        subject = fingerprint.pop("subject", "")
+        if subject:
+            fingerprint.setdefault("reference_subject", f"Style-reference subject/scene only: {subject}")
+        composition = fingerprint.get("composition")
+        if isinstance(composition, dict):
+            hero_object = composition.pop("hero_object", "")
+            if hero_object:
+                composition.setdefault(
+                    "reference_hero_object",
+                    f"Style-reference hero object only; replace with linked product truth when provided: {hero_object}",
+                )
+        material = fingerprint.get("material")
+        if isinstance(material, dict):
+            product_surface = material.pop("product_surface", "")
+            if product_surface:
+                material.setdefault(
+                    "reference_subject_surface",
+                    f"Style/reference surface treatment only; do not override linked product material: {product_surface}",
+                )
+            packaging_finish = material.pop("packaging_finish", "")
+            if packaging_finish:
+                material.setdefault(
+                    "reference_packaging_finish",
+                    f"Style/reference packaging finish only; do not override linked product structure: {packaging_finish}",
+                )
+
+    for key in (
+        "summary",
+        "positive_prompt",
+        "prompt",
+        "layout_lock_prompt",
+        "composition_lock_prompt",
+        "reference_lock_prompt",
+        "lighting_material_lock_prompt",
+        "generation_guidance",
+        "negative_prompt",
+    ):
+        if isinstance(data.get(key), str):
+            data[key] = style_match_downgrade_product_authority_text(data[key])
+
+    return style_match_downgrade_product_authority(data)
 
 def style_analysis_section(title: str, value: Any, max_len: int = 900) -> str:
     text = compact_style_value(value, max_len=max_len)
@@ -11311,7 +11478,9 @@ def style_reference_lock_prompt(analysis: Dict[str, Any]) -> str:
 def style_lighting_material_lock_prompt(analysis: Dict[str, Any]) -> str:
     explicit = str(analysis.get("lighting_material_lock_prompt") or "").strip()
     if explicit:
-        return explicit[:1600]
+        compacted = compact_complete_prompt_text(explicit, 1600)
+        if compacted:
+            return compacted
     fp = analysis.get("style_fingerprint") if isinstance(analysis.get("style_fingerprint"), dict) else {}
     shared = analysis.get("shared_style_anchor") if isinstance(analysis.get("shared_style_anchor"), dict) else {}
     lighting = compact_style_value(fp.get("lighting") or shared.get("lighting"), max_len=420)
@@ -11433,7 +11602,9 @@ def style_product_surface_quality_guard_prompt() -> str:
         "Preserve intentional design details and true reference textures such as anti-slip raised dots, holes, seams, printed labels, leather grain, fabric fibers, wood grain, stone grain, brushed metal, and any explicitly requested aged/weathered/distressed texture."
     )
 
-def style_prompt_from_analysis(analysis: Dict[str, Any], cases: List[Dict[str, Any]]) -> str:
+def style_prompt_from_analysis(analysis: Dict[str, Any], cases: List[Dict[str, Any]], style_only: bool = False) -> str:
+    if style_only:
+        analysis = style_match_style_only_analysis(analysis)
     positive = str(analysis.get("positive_prompt") or analysis.get("prompt") or "").strip()
     if not positive and cases:
         positive = str(cases[0].get("prompt") or "").strip()
@@ -11450,12 +11621,14 @@ def style_prompt_from_analysis(analysis: Dict[str, Any], cases: List[Dict[str, A
     camera_control = str(analysis.get("_camera_control") or "").strip()
     if visual_override:
         prompt_parts = [
-            "Reference priority: the attached user reference remains the primary subject/product/style reference, while the latest user request has explicit control over the new background and color palette. Matched case-library material is secondary and may only improve commercial polish, texture, lighting quality, and finish.",
-            "LATEST BACKGROUND/PALETTE OVERRIDE: Do not preserve or restore the reference image's old background color, backdrop gradient, palette, wardrobe color coordination, or prop colors when they conflict with the latest user request. Keep only non-conflicting subject relationship, product truth, beauty-lighting quality, skin/material finish, and commercial polish.",
+            "STYLE MATCH ROLE: the attached matched image is the primary visual style/composition reference, not authoritative product/SKU truth. Product, accessory, package, device, person, prop, color, material, or hero-object wording extracted from it is replaceable by any linked product-truth/product-detail reference.",
+            "Reference priority: the attached user reference remains the primary visual style/composition reference, while the latest user request has explicit control over the new background and color palette. Matched case-library material is secondary and may only improve commercial polish, texture, lighting quality, and finish.",
+            "LATEST BACKGROUND/PALETTE OVERRIDE: Do not preserve or restore the reference image's old background color, backdrop gradient, palette, wardrobe color coordination, or prop colors when they conflict with the latest user request. Keep only non-conflicting subject relationship, beauty-lighting quality, skin/material finish, and commercial polish.",
         ]
     else:
         prompt_parts = [
-            "Reference priority: the attached user reference image is the primary reference. Any matched case-library image or case prompt is secondary and may only supplement finish, texture, lighting polish, and commercial advertising quality. Do not let case matches replace the reference lighting, background tone, material finish, skin treatment, or product surface quality.",
+            "STYLE MATCH ROLE: the attached matched image is the primary visual style/composition reference, not authoritative product/SKU truth. Product, accessory, package, device, person, prop, color, material, or hero-object wording extracted from it is replaceable by any linked product-truth/product-detail reference.",
+            "Reference priority: the attached user reference image is the primary visual style/composition reference. Any matched case-library image or case prompt is secondary and may only supplement finish, texture, lighting polish, and commercial advertising quality. Do not let case matches replace the reference lighting, background tone, material finish, skin treatment, or surface quality.",
             style_reference_lock_prompt(analysis),
             style_lighting_material_lock_prompt(analysis),
         ]
@@ -11604,11 +11777,25 @@ def strip_stale_rematch_variant_constraints(text: str, user_request: str) -> str
     clean = re.sub(r"[ \t]{2,}", " ", clean)
     return clean.strip()
 
+STALE_REFERENCE_SIMILARITY_RE = re.compile(
+    r"(?im)^\s*(?:Original reference similarity|Style/reference similarity setting|Reference similarity(?: weight)?|Person similarity)\s*:\s*(?:(?:\d{1,3}\s*/\s*100)|(?:very low|low|medium|high)\b).*$"
+)
+
+def strip_stale_reference_similarity_statements(text: str) -> str:
+    clean = STALE_REFERENCE_SIMILARITY_RE.sub("", str(text or ""))
+    clean = re.sub(
+        r"(?i)\s*(?:Original reference similarity|Style/reference similarity setting|Reference similarity(?: weight)?|Person similarity)\s*:\s*(?:(?:\d{1,3}\s*/\s*100)|(?:very low|low|medium|high)\b)[^.!?\n。！？]*(?:[.!?。！？]+|$)",
+        " ",
+        clean,
+    )
+    return re.sub(r"\n{3,}", "\n\n", clean).strip()
+
 def style_rematch_non_authoritative_prompt_context(current_prompt: str, user_request: str) -> str:
     clean = strip_poster_copy_control_blocks(str(current_prompt or ""))
+    clean = strip_stale_reference_similarity_statements(clean)
     clean = strip_prior_user_request_sections(clean)
     clean = strip_stale_rematch_variant_constraints(clean, user_request)
-    return clean[:9000].strip()
+    return compact_complete_prompt_text(clean, 9000)
 
 def sanitize_style_rematch_analysis_for_latest_request(analysis: Dict[str, Any], user_request: str) -> Dict[str, Any]:
     data = copy.deepcopy(analysis or {})
@@ -11616,7 +11803,9 @@ def sanitize_style_rematch_analysis_for_latest_request(analysis: Dict[str, Any],
     for key in ("summary", "positive_prompt", "prompt", "generation_guidance", "search_query"):
         value = data.get(key)
         if isinstance(value, str):
-            data[key] = strip_stale_rematch_variant_constraints(strip_prior_user_request_sections(value), user_request)
+            data[key] = strip_stale_reference_similarity_statements(
+                strip_stale_rematch_variant_constraints(strip_prior_user_request_sections(value), user_request)
+            )
     if not wants_variants:
         data.pop("variant_plan", None)
     return data
@@ -11641,7 +11830,9 @@ def merge_style_rematch_analysis(
         if isinstance(value, str) and value.strip():
             if key == "variant_plan" and not wants_variants:
                 continue
-            analysis[key] = strip_stale_rematch_variant_constraints(strip_prior_user_request_sections(value), user_request)
+            analysis[key] = strip_stale_reference_similarity_statements(
+                strip_stale_rematch_variant_constraints(strip_prior_user_request_sections(value), user_request)
+            )
     analysis["_rematched"] = True
     analysis["_camera_control"] = str(camera_control or "").strip()
     analysis["_latest_changes_background_palette"] = style_rematch_changes_background_palette(user_request)
@@ -11692,7 +11883,7 @@ async def rematch_style_prompt_with_llm(payload: StyleLibraryRematchPromptReques
         poster_copy_state,
         "If Poster copy is enabled, readable poster/ad copy in the primary reference is allowed and should be preserved when compatible. If disabled, visible readable text must be removed unless the latest user request explicitly typed exact text.",
         "If the latest request names the product/category (for example product is X, SKU is X, or this is a X), that product identity is authoritative and overrides conflicting product/category/function words in poster copy, old prompt context, style analysis, or case-library matches. Poster copy may keep hierarchy and compatible brand/promotion text, but incompatible old product claims must be rewritten, simplified, or omitted.",
-        f"Reference similarity weight: {max(0, min(100, int(payload.reference_weight or 65)))}/100",
+        f"Current effective reference similarity: {max(0, min(100, int(payload.reference_weight or 65)))}/100. Use only this current value; do not copy older Original reference similarity, Style/reference similarity setting, Reference similarity, or Person similarity control lines into the revised prompt.",
         "This is an independent rerun. The latest request must replace previous prompt demands, not append to them.",
         "Revise the prompt and create a fresh search_query for re-matching the style/case library."
     ])
@@ -11782,10 +11973,11 @@ async def style_library_match_image(payload: StyleLibraryMatchImageRequest):
     analysis, model = await analyze_image_for_style(payload)
     query = style_search_query_from_analysis(analysis)
     cases = await asyncio.to_thread(run_style_library_search, query, payload.limit, False)
-    prompt = style_prompt_from_analysis(analysis, cases)
+    style_only_analysis = style_match_style_only_analysis(analysis)
+    prompt = style_prompt_from_analysis(style_only_analysis, cases)
     return {
         "prompt": prompt,
-        "analysis": analysis,
+        "analysis": style_only_analysis,
         "query": query,
         "cases": cases,
         "model": model,

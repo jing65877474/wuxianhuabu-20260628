@@ -1035,11 +1035,12 @@ function smartGenerationDiagnosticsSnapshot(diag){
         request_id:diag?.request_id || diag?.meta?.request_id || ''
     };
 }
-function createSmartRunContext({node, prompt='', displayPrompt='', refs=[], runSettings=settings, kind='image'}={}){
+function createSmartRunContext({node, prompt='', displayPrompt='', refs=[], runSettings=settings, kind='image', similarityState=null}={}){
     const settingsSnapshot = cloneSmartSettings(runSettings || settings);
     const requestId = uid('smart_run');
     const refSnapshot = (refs || []).map(ref => ({...ref}));
     const promptText = String(prompt || '');
+    const resolvedSimilarity = smartNormalizeReferenceSimilarityState(similarityState, node, refSnapshot);
     const context = {
         requestId,
         canvasId:canvas?.id || '',
@@ -1054,6 +1055,12 @@ function createSmartRunContext({node, prompt='', displayPrompt='', refs=[], runS
         createdAt:Date.now(),
         promptHash:smartHashText(promptText),
         referenceSetHash:smartHashText(smartStableJson(refSnapshot.map(ref => ({url:ref.url || '', role:ref.role || '', weight:smartReferenceRoleWeight(ref), upload:ref.uploadReference !== false})))),
+        effectiveReferenceSimilarity:resolvedSimilarity.effectiveReferenceSimilarity,
+        similaritySource:resolvedSimilarity.similaritySource,
+        removedStaleSimilarityStatements:resolvedSimilarity.removedStaleSimilarityStatements,
+        similarityAppliedToUploadDecision:resolvedSimilarity.similarityAppliedToUploadDecision,
+        similarityPromptEmitted:resolvedSimilarity.similarityPromptEmitted,
+        similarityUnusedReason:resolvedSimilarity.similarityUnusedReason,
         compilerVersion:'phase4-smart-v1'
     };
     context.diagnostics = createSmartGenerationDiagnostics(requestId);
@@ -1063,13 +1070,15 @@ function smartReferenceLimitForRun(prompt, refs=[], runSettings=settings, kind='
     if(kind === 'image' && isApiLikeEngine(runSettings.engine)) return smartGenerationReferenceLimit(prompt, refs);
     return imageRefsOnly(refs).length;
 }
-function smartAnalyzeReferencePreflight({node, prompt='', refs=[], runSettings=settings, kind='image'}={}){
-    const imageRefs = imageRefsOnly(smartNormalizeReferenceManualControlsList(refs));
+function smartAnalyzeReferencePreflight({node, prompt='', refs=[], runSettings=settings, kind='image', similarityState=null}={}){
     const apiImageRun = kind === 'image' && isApiLikeEngine(runSettings.engine);
     const tracePrompt = apiImageRun
         ? [outputCanvasLockPrompt(runSettings), smartRelaxPromptForReferenceSimilarity(smartRelaxPromptForCameraControl(prompt))].filter(Boolean).join('\n\n')
         : String(prompt || '');
-    const selected = smartSelectGenerationReferenceUploads(imageRefs, tracePrompt, runSettings, kind);
+    const resolvedSimilarity = smartNormalizeReferenceSimilarityState(similarityState, node, refs);
+    const resolved = smartResolveFinalReferenceUploads(refs, tracePrompt, runSettings, kind);
+    const imageRefs = imageRefsOnly(resolved.references);
+    const selected = resolved.uploadReferences;
     const limit = smartReferenceUploadLimit(tracePrompt, imageRefs, runSettings, kind);
     const uploadKeys = new Set(selected.map(ref => smartReferenceUrlKey(ref?.url || ref?.sourceUrl || '')));
     const pinnedAllowed = imageRefs.filter(ref => smartReferenceIsPinnedUpload(ref) && smartReferenceUploadAllowed(ref));
@@ -1078,7 +1087,7 @@ function smartAnalyzeReferencePreflight({node, prompt='', refs=[], runSettings=s
     const productRefs = imageRefs.filter(ref => ref?.role === 'product_truth_reference' || ref?.role === 'product_detail_reference');
     const styleRefs = imageRefs.filter(ref => ['composition_reference','primary_style_reference','primary_reference'].includes(ref?.role));
     const textRefs = imageRefs.filter(ref => ref?.posterCopyReference || ref?.copyTextLock || smartReferenceRoleIsCase(ref));
-    const personRefs = imageRefs.filter(ref => ref?.containsPerson === true || ref?.hasPerson === true || ref?.personReference === true || ref?.humanReference === true);
+    const personRefs = imageRefs.filter(ref => smartReferenceLikelyContainsPerson(node, ref));
     const conflictHints = productRefs.length > 1 && new Set(productRefs.map(ref => String(ref.name || ref.url || '').replace(/\d+/g, '').slice(0, 24))).size > 1;
     const references = imageRefs.map((ref, index) => {
         const key = smartReferenceUrlKey(ref.url || ref.sourceUrl || '');
@@ -1092,14 +1101,19 @@ function smartAnalyzeReferencePreflight({node, prompt='', refs=[], runSettings=s
         else if(!uploadAllowed) reason = 'not_upload_allowed';
         else if(!upload) reason = 'over_reference_limit';
         return {
+            sourceReferenceId:ref.sourceReferenceId || smartReferenceSourceId(ref, index),
+            sourceNodeId:ref.sourceNodeId || ref.nodeId || '',
+            sourceIndex:smartReferenceSourceIndex(ref, index),
             index:index + 1,
             name:ref.name || `Image ${index + 1}`,
             role:ref.role || '',
+            roles:Array.isArray(ref.roles) ? ref.roles : [ref.role || ''].filter(Boolean),
             autoRole,
             userRole,
             roleLabel:smartReferenceRoleLabel(ref),
             enabled:ref.enabled !== false,
             upload,
+            ...(upload ? {uploadIndex:ref.uploadIndex || selected.findIndex(item => smartReferenceUrlKey(item?.url || item?.sourceUrl || '') === key) + 1} : {}),
             uploadAllowed,
             analysisOnly:Boolean(ref.textOnlyReference || ref.uploadReference === false),
             pinned:smartReferenceIsPinnedUpload(ref),
@@ -1117,6 +1131,12 @@ function smartAnalyzeReferencePreflight({node, prompt='', refs=[], runSettings=s
     });
     return {
         maxReferenceImages:limit,
+        effectiveReferenceSimilarity:resolvedSimilarity.effectiveReferenceSimilarity,
+        similaritySource:resolvedSimilarity.similaritySource,
+        removedStaleSimilarityStatements:resolvedSimilarity.removedStaleSimilarityStatements,
+        similarityAppliedToUploadDecision:resolvedSimilarity.similarityAppliedToUploadDecision,
+        similarityPromptEmitted:resolvedSimilarity.similarityPromptEmitted,
+        similarityUnusedReason:resolvedSimilarity.similarityUnusedReason || (styleRefs.length ? '' : 'no_style_or_composition_reference'),
         collectedReferenceCount:imageRefs.length,
         uploadReferenceCount:selected.length,
         analysisOnlyCount:references.filter(ref => ref.analysisOnly).length,
@@ -1133,14 +1153,24 @@ function smartAnalyzeReferencePreflight({node, prompt='', refs=[], runSettings=s
         hasCompositionStyleRisk:Boolean(styleRefs.length && productRefs.length && imageRefs.length > selected.length),
         references,
         uploadReferences:selected,
+        finalUploadMap:resolved.uploadMap,
         notUploadedReasons:references.filter(ref => !ref.upload).map(ref => ({index:ref.index, reason:ref.notUploadedReason || 'not_uploaded', role:ref.role || '', pinned:Boolean(ref.pinned)}))
     };
 }
 function smartGenerationSpecFromContext(ctx, preflight=null, productFacts=null){
     const runSettings = ctx?.settings || settings;
     const prompt = ctx?.userPrompt || '';
+    const resolvedSimilarity = smartNormalizeReferenceSimilarityState(ctx || preflight || null, null, ctx?.references || []);
+    const referenceStrength = resolvedSimilarity.effectiveReferenceSimilarity;
     return {
         task:{type:ctx?.kind || 'image', count:Math.max(1, Math.min(8, Number(runSettings.count || 1))), variant_mode:runSettings.variantMode || 'auto'},
+        reference_similarity:{
+            effectiveReferenceSimilarity:referenceStrength,
+            similaritySource:resolvedSimilarity.similaritySource,
+            similarityAppliedToUploadDecision:resolvedSimilarity.similarityAppliedToUploadDecision,
+            similarityPromptEmitted:resolvedSimilarity.similarityPromptEmitted,
+            unusedReason:resolvedSimilarity.similarityUnusedReason || (preflight?.hasStyleReference || preflight?.hasCompositionReference ? '' : 'no_style_or_composition_reference')
+        },
         product:{
             enabled:Boolean(preflight?.hasProductTruth || productFacts),
             facts:productFacts || {},
@@ -1150,9 +1180,9 @@ function smartGenerationSpecFromContext(ctx, preflight=null, productFacts=null){
             allowed_changes:smartLatestRequestChangesBackgroundPalette(null, prompt) ? ['background_palette'] : [],
             forbidden_changes:preflight?.hasProductTruth ? ['generic_product_substitution'] : []
         },
-        composition:{camera:smartCameraControlRequested(prompt) ? 'camera_controlled' : '', angle:'', framing:'', aspect_ratio:sizeForRun(runSettings), reference_strength:preflight?.hasCompositionReference ? 65 : 0},
+        composition:{camera:smartCameraControlRequested(prompt) ? 'camera_controlled' : '', angle:'', framing:'', aspect_ratio:sizeForRun(runSettings), reference_strength:preflight?.hasCompositionReference ? referenceStrength : 0},
         character:{enabled:smartGenerationAllowsHuman(null, ctx?.references || [], prompt), identity_lock:/same person|人物身份|identity/i.test(prompt), pose:'', hand_interaction:smartHumanInteractionPositivePattern().test(prompt) ? 'requested' : ''},
-        style:{description:'', reference_strength:preflight?.hasStyleReference ? 65 : 0},
+        style:{description:'', reference_strength:preflight?.hasStyleReference ? referenceStrength : 0},
         text:{preserve_source_text:Boolean(preflight?.hasTextReference), required_text:[], forbidden_text:[]},
         lighting:{description:''},
         references:(preflight?.references || []).map(ref => ({index:ref.index, role:ref.role, upload:ref.upload, reason:ref.notUploadedReason || ''})),
@@ -1160,13 +1190,14 @@ function smartGenerationSpecFromContext(ctx, preflight=null, productFacts=null){
         user_instruction:ctx?.displayPrompt || prompt
     };
 }
-function smartBuildGenerationTrace({node, prompt='', refs=[], runSettings=settings, kind='image'}={}){
+function smartBuildGenerationTrace({node, prompt='', refs=[], runSettings=settings, kind='image', similarityState=null}={}){
     const basePrompt = String(prompt || '');
     const apiImageRun = kind === 'image' && isApiLikeEngine(runSettings.engine);
     const tracePrompt = apiImageRun
         ? [outputCanvasLockPrompt(runSettings), smartRelaxPromptForReferenceSimilarity(smartRelaxPromptForCameraControl(basePrompt))].filter(Boolean).join('\n\n')
         : basePrompt;
-    const preflight = smartAnalyzeReferencePreflight({node, prompt:basePrompt, refs, runSettings, kind});
+    const resolvedSimilarity = smartNormalizeReferenceSimilarityState(similarityState, node, refs);
+    const preflight = smartAnalyzeReferencePreflight({node, prompt:basePrompt, refs, runSettings, kind, similarityState:resolvedSimilarity});
     const imageRefs = imageRefsOnly(refs);
     const allowHuman = smartGenerationAllowsHuman(node, refs, prompt);
     const productRefs = imageRefs.filter(ref => ref?.role === 'product_truth_reference' || ref?.role === 'product_detail_reference');
@@ -1186,6 +1217,12 @@ function smartBuildGenerationTrace({node, prompt='', refs=[], runSettings=settin
         promptLength:tracePrompt.length,
         estimatedPromptTokens:smartEstimateTokens(tracePrompt),
         promptPreview:tracePrompt.slice(0, 2200),
+        effectiveReferenceSimilarity:resolvedSimilarity.effectiveReferenceSimilarity,
+        similaritySource:resolvedSimilarity.similaritySource,
+        removedStaleSimilarityStatements:resolvedSimilarity.removedStaleSimilarityStatements,
+        similarityAppliedToUploadDecision:resolvedSimilarity.similarityAppliedToUploadDecision,
+        similarityPromptEmitted:resolvedSimilarity.similarityPromptEmitted,
+        similarityUnusedReason:resolvedSimilarity.similarityUnusedReason || (primaryRefs.length ? '' : 'no_style_or_composition_reference'),
         referenceCount:imageRefs.length,
         uploadReferenceCount:preflight.uploadReferenceCount,
         maxReferenceImages:preflight.maxReferenceImages,
@@ -2009,6 +2046,128 @@ function generatedEditBaseSimilarityIntent(weight){
     if(weight >= 60) return 'balanced_edit_base_structure';
     return 'loose_edit_base_reference';
 }
+function smartClampReferenceSimilarity(value, fallback=65){
+    const raw = Number(value);
+    if(!Number.isFinite(raw)) return smartClampReferenceSimilarity(fallback, 65);
+    return Math.max(0, Math.min(100, Math.round(raw)));
+}
+function smartNodeUiReferenceSimilarityValue(node){
+    const candidates = [node?.styleMatch?.referenceWeight, node?.referenceWeight];
+    for(const candidate of candidates){
+        const value = Number(candidate);
+        if(Number.isFinite(value)) return smartClampReferenceSimilarity(value);
+    }
+    const upstreamPromptControls = (node?.type === 'smart-prompt' || typeof promptInputNodesFor !== 'function')
+        ? []
+        : promptInputNodesFor(node).filter(input => input?.type === 'smart-prompt' || (isGeneratedImagePromptComposerNode(input) && input?.generatedPromptInitialized));
+    for(const input of upstreamPromptControls){
+        const upstreamValue = smartNodeUiReferenceSimilarityValue(input);
+        if(Number.isFinite(upstreamValue)) return upstreamValue;
+    }
+    return null;
+}
+function smartReferenceObjectSimilarityValue(refs=[]){
+    const images = imageRefsOnly(refs);
+    const primaryRefs = images.filter(ref => ['composition_reference','primary_style_reference','primary_reference'].includes(ref?.role)
+        && !smartReferenceRoleIsProduct(ref)
+        && !smartReferenceRoleIsCase(ref));
+    const candidates = primaryRefs.length ? primaryRefs : images.filter(ref => !smartReferenceRoleIsProduct(ref) && !smartReferenceRoleIsCase(ref));
+    for(const ref of candidates){
+        const value = Number(ref?.referenceWeight ?? ref?.styleReferenceWeight ?? ref?.weight);
+        if(Number.isFinite(value)) return smartClampReferenceSimilarity(value);
+    }
+    return null;
+}
+function smartResolveEffectiveReferenceSimilarity(node=null, refs=[], fallback=65){
+    const uiValue = smartNodeUiReferenceSimilarityValue(node);
+    if(Number.isFinite(uiValue)){
+        return {effectiveReferenceSimilarity:uiValue, similaritySource:'current_node_ui'};
+    }
+    const refValue = smartReferenceObjectSimilarityValue(refs);
+    if(Number.isFinite(refValue)){
+        return {effectiveReferenceSimilarity:refValue, similaritySource:'current_reference_weight'};
+    }
+    return {effectiveReferenceSimilarity:smartClampReferenceSimilarity(fallback), similaritySource:'system_default'};
+}
+function smartNormalizeReferenceSimilarityState(state=null, node=null, refs=[]){
+    const resolved = state && Number.isFinite(Number(state.effectiveReferenceSimilarity))
+        ? {
+            effectiveReferenceSimilarity:smartClampReferenceSimilarity(state.effectiveReferenceSimilarity),
+            similaritySource:state.similaritySource || 'current_reference_weight'
+        }
+        : smartResolveEffectiveReferenceSimilarity(node, refs);
+    return {
+        ...resolved,
+        removedStaleSimilarityStatements:Array.isArray(state?.removedStaleSimilarityStatements) ? state.removedStaleSimilarityStatements.slice() : [],
+        similarityAppliedToUploadDecision:state?.similarityAppliedToUploadDecision === true,
+        similarityPromptEmitted:state?.similarityPromptEmitted === true,
+        similarityUnusedReason:state?.similarityUnusedReason || ''
+    };
+}
+function smartReferenceSimilarityValue(state=null, node=null, refs=[]){
+    return smartNormalizeReferenceSimilarityState(state, node, refs).effectiveReferenceSimilarity;
+}
+function smartSimilarityRemovedUnique(values=[]){
+    const seen = new Set();
+    return (values || []).map(item => String(item || '').trim()).filter(item => {
+        if(!item || seen.has(item)) return false;
+        seen.add(item);
+        return true;
+    });
+}
+function smartStripStaleReferenceSimilarityStatements(text=''){
+    const removed = [];
+    const lines = String(text || '').split(/\r?\n/);
+    const markerAtStart = /^\s*(?:Original reference similarity|Style\/reference similarity setting|Reference similarity(?: weight)?|Person similarity)\s*:\s*(?:(?:\d{1,3}\s*\/\s*100)|(?:very low|low|medium|high)\b)/i;
+    const inlineMarker = /\s*(?:Original reference similarity|Style\/reference similarity setting|Reference similarity(?: weight)?|Person similarity)\s*:\s*(?:(?:\d{1,3}\s*\/\s*100)|(?:very low|low|medium|high)\b)[^.!?。！？\n]*(?:[.!?。！？]+|$)/gi;
+    const kept = lines.map(line => {
+        if(markerAtStart.test(line)){
+            removed.push(line.trim());
+            return '';
+        }
+        return line.replace(inlineMarker, match => {
+            removed.push(match.trim());
+            return ' ';
+        }).replace(/[ \t]{2,}/g, ' ').trimEnd();
+    });
+    return {
+        text:kept.join('\n').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim(),
+        removed:smartSimilarityRemovedUnique(removed)
+    };
+}
+function smartNormalizeCurrentReferenceSimilarityStatements(text='', similarityState=null){
+    const state = smartNormalizeReferenceSimilarityState(similarityState);
+    const current = state.effectiveReferenceSimilarity;
+    const removed = [];
+    let keptCurrent = false;
+    const sections = String(text || '').split(/\n{2,}/);
+    const cleaned = sections.map(section => {
+        const trimmed = section.trim();
+        if(!trimmed) return '';
+        const styleMatch = /^Style\/reference similarity setting\s*:\s*(\d{1,3})\s*\/\s*100\b/i.exec(trimmed);
+        if(styleMatch){
+            const value = smartClampReferenceSimilarity(styleMatch[1]);
+            if(state.similarityPromptEmitted && value === current && !keptCurrent){
+                keptCurrent = true;
+                return trimmed;
+            }
+            removed.push(trimmed.split(/\r?\n/)[0].trim());
+            return '';
+        }
+        if(/^(?:Original reference similarity|Reference similarity(?: weight)?|Person similarity)\s*:/i.test(trimmed)){
+            removed.push(trimmed.split(/\r?\n/)[0].trim());
+            return '';
+        }
+        const stripped = smartStripStaleReferenceSimilarityStatements(trimmed);
+        removed.push(...stripped.removed);
+        return stripped.text;
+    }).map(section => section.trim()).filter(Boolean);
+    return {
+        text:cleaned.join('\n\n'),
+        removed:smartSimilarityRemovedUnique(removed),
+        similarityPromptEmitted:keptCurrent
+    };
+}
 const PROMPT_CAMERA_FOCAL_MIN = 14;
 const PROMPT_CAMERA_FOCAL_MAX = 135;
 const PROMPT_CAMERA_DEFAULT_FOCAL = 50;
@@ -2247,8 +2406,8 @@ function promptNodeReferenceWeightPrompt(node){
     }
     if(weight >= 85){
         return allowHuman
-            ? `Original reference similarity: ${weight}/100. Strongly preserve the commercial visual language, palette, lighting quality, broad camera family, and product-to-subject scale, but still create a visibly new shot. Do not copy the exact crop, pose geometry, hand placement, face angle, background silhouette, or object placement. Keep the attached product-detail images as the exact SKU anchor. ${personRule} ${antiCloneRule} ${fidelityRule} ${productRule} ${caseRule}`
-            : `Original reference similarity: ${weight}/100. Strongly preserve the commercial visual language, palette, lighting quality, broad camera family, and product/environment scale, but still create a visibly new product-only shot. Do not copy any human, hand, face, body, pose, or silhouette content. Keep the attached product-detail images as the exact SKU anchor. ${personRule} ${antiCloneRule} ${fidelityRule} ${productRule} ${caseRule}`;
+            ? `Original reference similarity: ${weight}/100. Strongly preserve the recognizable poster/commercial structure: visual language, palette, lighting quality, broad camera family, panel/zone hierarchy, subject count, product-to-subject scale, and approximate placement zones. Avoid pixel-level copying of face identity, exact micro-expression, and tiny layout details, but do not redesign the composition or move the main subject/product to unrelated zones. Keep the attached product-detail images as the exact SKU anchor. ${personRule} ${antiCloneRule} ${fidelityRule} ${productRule} ${caseRule}`
+            : `Original reference similarity: ${weight}/100. Strongly preserve the recognizable product/commercial structure: visual language, palette, lighting quality, broad camera family, layout hierarchy, product/environment scale, and approximate placement zones. Do not copy any human, hand, face, body, pose, or silhouette content, but also do not redesign the product layout or move the main product to unrelated zones. Keep the attached product-detail images as the exact SKU anchor. ${personRule} ${antiCloneRule} ${fidelityRule} ${productRule} ${caseRule}`;
     }
     if(weight >= 60){
         return allowHuman
@@ -2269,6 +2428,10 @@ function promptNodePosterCopyPrompt(node){
     if(node.posterCopyEnabled){
         return 'Poster copy enabled: use the uploaded primary poster/reference image as a lightweight text guide. Preserve the main readable headline, key price/offer, CTA, and important badge text when practical, with similar placement and hierarchy. Tiny dense text may become clean non-readable marks or simplified label blocks. Product-detail references control SKU appearance only; they must not remove, suppress, replace, translate, or invent the main poster text.';
     }
+    const refs = smartAssignReferenceRoles(node, defaultReferenceImagesFor(node));
+    if(smartAspectRecomposeReferences(node, refs, settings).length){
+        return 'Poster copy disabled: remove or avoid readable poster/ad overlay text copied from the primary reference. Because the selected output canvas ratio differs from the reference poster, adapt the outer canvas by extending, cropping, scaling, or stacking while preserving the recognizable poster skeleton: panel count, panel order, subject/product relative placement, brand/header zone, badge/sale-card zone, graphic blocks, color world, lighting, and commercial hierarchy. Do not collapse a multi-panel poster into a single-person/product poster unless the user explicitly asks for a new layout. Preserve product-surface labels and strict product identity from product-detail references.';
+    }
     return 'Poster copy disabled: keep the primary reference as the visual poster-layout reference, but remove or avoid readable poster/ad overlay text copied from it, such as large headlines, slogans, price tags, CTA buttons, promotional badges, banners, UI text, external watermarks, and decorative typography outside product surfaces. Preserve poster brand identity elements such as top-corner brand logos, brand names, product-line marks, and store/festival brand tags; do not classify these as removable poster copy. Preserve the reference composition family, subject/product placement, crop, camera family, color palette, lighting, graphic panels, border/strip/badge positions, bottom sale-bar geometry, and commercial hierarchy according to the reference-weight setting. Replace removed poster copy with clean blank space, non-readable short marks, or simple graphic blocks so the poster structure remains close without readable ad copy. Preserve product-surface text as product identity: brand marks, logos, bottle/box/tube labels, SKU names, volume marks, and printed packaging graphics should remain on the product. Do not erase product labels or replace them with random new claims.';
 }
 function promptNodeAdditionalGuidancePrompt(node){
@@ -2277,7 +2440,7 @@ function promptNodeAdditionalGuidancePrompt(node){
     return [
         'Active additional generation guidance from the prompt node:',
         instruction,
-        'This is a high-priority constraint. Follow named references such as 图2/图3/图4 or Image 2/3/4 literally.'
+        'This is a high-priority constraint. Resolve any named image references through the final uploaded image role map.'
     ].join('\n');
 }
 function promptNodePromptItems(node){
@@ -5517,7 +5680,8 @@ async function loadCanvas(){
         updateProviderModels();
         applyViewport();
         render();
-        if(placeholderFiltered.removed.size || staleRunFiltered.removed.size || cleanedCaseStyleRefs || cleanedDetachedInputs || cleanedCompletedState || recoveredLoopOutputs || hiddenCompletedTimers) scheduleSave();
+        const restoredProductRecognitions = schedulePendingLinkedProductRecognitions();
+        if(placeholderFiltered.removed.size || staleRunFiltered.removed.size || cleanedCaseStyleRefs || cleanedDetachedInputs || cleanedCompletedState || recoveredLoopOutputs || hiddenCompletedTimers || restoredProductRecognitions) scheduleSave();
         resumeSmartPendingTasks();
         resumeJimengPendingNodes();
         startCanvasMetaPoll();
@@ -6641,7 +6805,7 @@ function smartRunRequestMeta(run){
     if(run?.kind === 'video') return {provider_id:s.videoProvider || '', model:s.videoModel || '', duration:s.videoDuration || '', aspect_ratio:s.videoAspect || '', resolution:s.videoResolution || ''};
     return {provider_id:s.provider_id || '', model:s.model || '', size:run?.size || '', quality:s.quality || '', n:s.count || 1};
 }
-function smartRunSnapshot(node, prompt, refs=[], kind='image'){
+function smartRunSnapshot(node, prompt, refs=[], kind='image', similarityState=null){
     const settingsSnapshot = cloneSmartSettings(settings);
     return {
         nodeId:node?.id || '',
@@ -6658,7 +6822,7 @@ function smartRunSnapshot(node, prompt, refs=[], kind='image'){
             upload:smartReferenceUploadAllowed(ref),
             weight:smartReferenceRoleWeight(ref)
         })).filter(ref => ref.url),
-        trace:smartBuildGenerationTrace({node, prompt, refs, runSettings:settingsSnapshot, kind}),
+        trace:smartBuildGenerationTrace({node, prompt, refs, runSettings:settingsSnapshot, kind, similarityState}),
         size: kind === 'image' && isApiLikeEngine(settingsSnapshot.engine) ? sizeForRun(settingsSnapshot) : ''
     };
 }
@@ -8318,9 +8482,17 @@ function bindProductFactsPanelControls(el, node){
             const editor = panel.querySelector('[data-product-facts-editor]');
             if(action === 'save'){
                 try {
-                    node.productFacts = normalizeSmartProductFacts(JSON.parse(editor?.value || '{}'));
-                    node.productFactsUserEdited = true;
-                    node.productFactsNeedsRefresh = false;
+                    const nextFacts = normalizeSmartProductFacts(JSON.parse(editor?.value || '{}'));
+                    if(!smartProductFactsSummary(nextFacts)){
+                        delete node.productFacts;
+                        node.productFactsUserEdited = false;
+                        node.productFactsNeedsRefresh = true;
+                        scheduleLinkedProductRecognition(node.id);
+                    } else {
+                        node.productFacts = nextFacts;
+                        node.productFactsUserEdited = true;
+                        node.productFactsNeedsRefresh = false;
+                    }
                     delete node.generationSpec;
                     delete node.promptBeforeGuard;
                     delete node.promptAfterGuard;
@@ -8345,11 +8517,17 @@ function bindProductFactsPanelControls(el, node){
                     return;
                 }
                 node.productFactsNeedsRefresh = true;
+                node.productFactsUserEdited = false;
                 delete node.productFacts;
                 delete node.productFactsPromptVersion;
+                delete node.productFactsReferenceSetHash;
+                delete node.productFactsRecognizedAt;
+                delete node.productFactsRecognitionModel;
+                delete node.productFactsRecognitionSource;
                 scheduleSave();
                 render();
-                toast('已标记重新识别，下次生成会重新分析产品参考图');
+                scheduleLinkedProductRecognition(node.id);
+                toast('正在重新识别产品参考图');
             }
         });
     });
@@ -11527,9 +11705,15 @@ function positionComposerForNode(node){
     const rect = nodeRect(node);
     const gap = 14;
     const cardW = isGeneratedImagePromptComposerNode(node) ? 390 : 540;
+    const nodeEl = world.querySelector(`.image-node[data-id="${CSS.escape(node.id)}"]`);
+    const factsPanel = nodeEl?.querySelector('[data-product-facts-panel]');
+    const factsPanelHeight = factsPanel && getComputedStyle(factsPanel).display !== 'none'
+        ? Math.max(0, Number(factsPanel.offsetHeight) || 0)
+        : 0;
+    const factsPanelOffset = factsPanelHeight ? factsPanelHeight + 8 : 0;
     composer.style.width = `${cardW}px`;
     composer.style.left = `${rect.x + rect.width / 2 - cardW / 2}px`;
-    composer.style.top = `${rect.y + rect.height + gap}px`;
+    composer.style.top = `${rect.y + rect.height + factsPanelOffset + gap}px`;
 }
 function updateComposer(){
     const node = selectedNode();
@@ -12213,6 +12397,63 @@ function outputCanvasLockPrompt(sourceSettings=settings){
         'Do not copy the reference image canvas shape; adapt the scene, crop, negative space, pose, and object placement to fit the selected output canvas while preserving strict product truth.'
     ].join('\n');
 }
+function smartOutputCanvasAspectForSettings(sourceSettings=null){
+    const activeSettings = sourceSettings || (typeof settings !== 'undefined' ? settings : {});
+    const parsed = parseSizePair(sizeForRun(activeSettings));
+    if(!parsed || !(parsed.width > 0 && parsed.height > 0)) return 0;
+    return parsed.width / Math.max(1, parsed.height);
+}
+function smartReferenceNaturalAspect(ref){
+    const w = Number(ref?.natural_w || ref?.naturalWidth || ref?.width || 0);
+    const h = Number(ref?.natural_h || ref?.naturalHeight || ref?.height || 0);
+    if(!(w > 0 && h > 0)) return 0;
+    return w / Math.max(1, h);
+}
+function smartReferenceAspectDiffersFromOutput(ref, sourceSettings=null, tolerance=0.14){
+    const refAspect = smartReferenceNaturalAspect(ref);
+    const outputAspect = smartOutputCanvasAspectForSettings(sourceSettings);
+    if(!(refAspect > 0 && outputAspect > 0)) return false;
+    return Math.abs(Math.log(refAspect / outputAspect)) > tolerance;
+}
+function smartHasProductTruthReference(refs=[]){
+    return imageRefsOnly(refs).some(ref => ref?.role === 'product_truth_reference' || ref?.role === 'product_detail_reference' || ref?.productTruthExplicit);
+}
+function smartStyleReferenceAspectRecomposeNeeded(node, ref, refs=[], sourceSettings=null){
+    if(!ref?.url) return false;
+    if(ref?.generatedEditBase || ref?.structureLock || ref?.styleLock || ref?.referenceLock) return false;
+    if(!['composition_reference','primary_style_reference','primary_reference'].includes(ref?.role || '')) return false;
+    if(!smartHasProductTruthReference(refs)) return false;
+    return smartReferenceAspectDiffersFromOutput(ref, sourceSettings);
+}
+function smartAspectRecomposeReferences(node, refs=[], sourceSettings=null){
+    return imageRefsOnly(refs).filter(ref => smartStyleReferenceAspectRecomposeNeeded(node, ref, refs, sourceSettings));
+}
+function smartOutputAspectRecomposePrompt(node, refs=[], sourceSettings=null){
+    const activeSettings = sourceSettings || (typeof settings !== 'undefined' ? settings : {});
+    const recomposed = smartAspectRecomposeReferences(node, refs, activeSettings)
+        .filter(ref => {
+            const index = refs.findIndex(item => smartReferenceUrlKey(item?.url || item?.sourceUrl || '') === smartReferenceUrlKey(ref?.url || ref?.sourceUrl || ''));
+            return smartReferenceIsFinalUploaded(ref, Math.max(0, index)) || smartReferenceIsAnalysisOnlyGuidance(ref);
+        });
+    if(!recomposed.length) return '';
+    const labels = recomposed.map(ref => {
+        const index = Math.max(0, refs.findIndex(item => smartReferenceUrlKey(item?.url || item?.sourceUrl || '') === smartReferenceUrlKey(ref?.url || ref?.sourceUrl || '')));
+        const label = smartReferencePromptLabel(ref, index, 'analysis-only style guidance');
+        return smartReferenceIsFinalUploaded(ref, index) ? `${label} (${ref.name || 'style reference'})` : label;
+    }).filter(Boolean).join(', ');
+    const hasUploadedStyle = recomposed.some(ref => {
+        const index = Math.max(0, refs.findIndex(item => smartReferenceUrlKey(item?.url || item?.sourceUrl || '') === smartReferenceUrlKey(ref?.url || ref?.sourceUrl || '')));
+        return smartReferenceIsFinalUploaded(ref, index);
+    });
+    const ratio = outputCanvasRatioText(activeSettings);
+    return [
+        'OUTPUT-ASPECT RECOMPOSITION OVERRIDE:',
+        `The selected output canvas ratio (${ratio}) differs from the ${hasUploadedStyle ? 'uploaded poster/style reference' : 'analysis-only style guidance'} ratio.`,
+        `${labels} must keep its recognizable campaign/poster structure while adapting to the selected canvas. Preserve panel count, panel order, subject count, subject/product scale relationship, approximate placement zones, brand/header zone, sale-card/badge zone, graphic-block rhythm, lighting, palette, and commercial hierarchy.`,
+        'Do not use the old image as a fixed pixel canvas or force its original aspect ratio. Adapt by adding vertical/horizontal breathing room, stacking existing zones, extending clean background, or proportionally scaling panels; do not invent a different single-hero layout, delete panels, move the main subject/product to an unrelated zone, or collapse a two-panel poster into one panel unless the user explicitly requests that layout change.',
+        'Recompose only the outer crop and spacing for the selected output canvas, then apply strict product truth from product-reference images. Product SKU identity has priority over the old product or accessory shown in the style/poster reference, but the style/poster reference keeps control of the layout skeleton.'
+    ].join('\n');
+}
 function expectedOutputSize(){
     const sizeStr = settings.engine === 'modelscope'
         ? apiImageSize(settings.msRatio || 'square', settings.msResolution || '1k', settings.msCustomRatio || '', settings.msCustomSize || '')
@@ -12423,6 +12664,8 @@ function connectInputNode(fromId, toId){
     }
     to.inputNodeIds = Array.from(new Set([...(to.inputNodeIds || []), from.id]));
     addConnection(from.id, to.id, 'input');
+    smartClearEmptyProductFactsBlocker(to);
+    scheduleLinkedProductRecognition(to.id);
     return true;
 }
 function upstreamNodesForKinds(node, kinds=['input']){
@@ -12609,11 +12852,13 @@ function promptNodeApplyCurrentReferenceRoles(node, refs=[]){
         const currentImageIndex = imageIndex++;
         if(splitStyleAndProductRefs){
             if(currentImageIndex === 0){
+                const weight = promptNodeReferenceWeight(node);
                 return {
                     ...ref,
                     role:'primary_style_reference',
                     productTruthExplicit:false,
-                    referenceWeight:promptNodeReferenceWeight(node)
+                    referenceWeight:weight,
+                    styleReferenceWeight:weight
                 };
             }
             return {
@@ -12624,6 +12869,19 @@ function promptNodeApplyCurrentReferenceRoles(node, refs=[]){
                 productTruthExplicit:true,
                 referenceWeight:100,
                 inputFidelity:'high'
+            };
+        }
+        const explicitStyleRole = ['composition_reference','primary_style_reference','primary_reference'].includes(ref.role || '');
+        if(node?.styleMatch && !wantsProductTruth && mediaKindForItem(ref) === 'image'
+            && !smartReferenceRoleIsProduct(ref) && !smartReferenceRoleIsCase(ref)
+            && (currentImageIndex === 0 || explicitStyleRole)){
+            const weight = promptNodeReferenceWeight(node);
+            return {
+                ...ref,
+                role:explicitStyleRole ? ref.role : 'primary_style_reference',
+                productTruthExplicit:false,
+                referenceWeight:weight,
+                styleReferenceWeight:weight
             };
         }
         return ref;
@@ -12674,8 +12932,14 @@ function selfReferenceImagesForNode(node, consume=false, ctx=smartLoopContext){
 }
 function textForNode(node, ctx=smartLoopContext){
     if(!node) return '';
-    if(node.type === 'smart-prompt') return promptNodePromptItems(node).join('\n\n');
-    if(isGeneratedImagePromptComposerNode(node) && node?.generatedPromptInitialized) return promptNodePromptItems(node).join('\n\n');
+    if(node.type === 'smart-prompt') {
+        const productPrompt = smartProductRecognitionPromptForNode(node, promptNodeCurrentReferenceImages(node, false, ctx));
+        return [productPrompt, promptNodePromptItems(node).join('\n\n')].filter(Boolean).join('\n\n');
+    }
+    if(isGeneratedImagePromptComposerNode(node) && node?.generatedPromptInitialized) {
+        const productPrompt = smartProductRecognitionPromptForNode(node, generatedImagePromptReferences(node));
+        return [productPrompt, promptNodePromptItems(node).join('\n\n')].filter(Boolean).join('\n\n');
+    }
     if(node.type === 'smart-loop') return smartLoopPrompt(node, ctx);
     if(node.type === 'smart-group') return smartGroupMembers(node).map(member => textForNode(member, ctx)).filter(Boolean).join('\n\n');
     return '';
@@ -12693,7 +12957,6 @@ function smartPromptNodeIsProductTruthOnly(node){
     const upstreamImages = inputNodesFor(node).flatMap(input => imagesForNode(input)).filter(img => img?.url && mediaKindForItem(img) === 'image');
     const analysisText = [
         node?.styleMatch?.analysis?.summary,
-        node?.styleMatch?.analysis?.reference_summary?.product_truth,
         node?.styleMatch?.analysis?.reference_summary?.style_reference,
         node?.styleMatch?.analysis?.style_fingerprint?.category
     ].map(value => String(value || '')).join(' ');
@@ -12703,15 +12966,18 @@ function smartPromptNodeIsProductTruthOnly(node){
 }
 function smartProductTruthOnlyPrompt(node){
     const analysis = node?.styleMatch?.analysis || {};
-    const truth = String(analysis?.reference_summary?.product_truth || '').trim();
-    const surface = String(analysis?.style_fingerprint?.material?.product_surface || '').trim();
-    const packaging = String(analysis?.style_fingerprint?.material?.packaging_finish || '').trim();
+    const styleSubject = String(analysis?.reference_summary?.style_reference_subject || analysis?.reference_summary?.style_reference || '').trim();
+    const surface = String(analysis?.style_fingerprint?.material?.reference_subject_surface || '').trim();
+    const packaging = String(analysis?.style_fingerprint?.material?.reference_packaging_finish || '').trim();
     const summary = String(analysis?.summary || '').trim();
+    const productPrompt = smartProductRecognitionPromptForNode(node, promptNodeCurrentReferenceImages(node));
+    const fallbackStyleDescription = productPrompt ? '' : (styleSubject || summary);
     return [
+        productPrompt,
         'Product truth input (identity only; do not inherit this node’s background, camera, layout, or no-person instructions):',
-        truth || summary,
-        surface ? `Visible product surface/material: ${surface}` : '',
-        packaging ? `Visible product construction/finish: ${packaging}` : '',
+        fallbackStyleDescription,
+        !productPrompt && surface ? `Visible style-reference surface/material: ${surface}` : '',
+        !productPrompt && packaging ? `Visible style-reference construction/finish: ${packaging}` : '',
         'Use the attached multi-view images as one exact 3D SKU. Preserve silhouette, proportions, nozzle/opening, controls, transparent parts, accent rings, seams, and component placement.'
     ].filter(Boolean).join('\n');
 }
@@ -13016,6 +13282,152 @@ function smartSelectGenerationReferenceUploads(refs=[], prompt='', runSettings=s
         .map(item => item.ref);
     return uniqueReferenceImages([...pinned, ...rest]).slice(0, limit);
 }
+function smartReferenceHasFinalUploadMapping(ref){
+    return Boolean(ref && (
+        Object.prototype.hasOwnProperty.call(ref, 'uploadIndex')
+        || Object.prototype.hasOwnProperty.call(ref, 'uploaded')
+        || Object.prototype.hasOwnProperty.call(ref, 'notUploadedReason')
+    ));
+}
+function smartReferenceSourceIndex(ref, fallbackIndex=0){
+    const value = Number(ref?.sourceIndex ?? ref?.sourceImageIndex ?? ref?.imageIndex);
+    return Number.isFinite(value) ? value : fallbackIndex;
+}
+function smartReferenceSourceId(ref, fallbackIndex=0){
+    const explicit = String(ref?.sourceReferenceId || ref?.referenceId || '').trim();
+    if(explicit) return explicit;
+    const sourceNodeId = String(ref?.sourceNodeId || ref?.nodeId || '').trim();
+    const sourceIndex = smartReferenceSourceIndex(ref, fallbackIndex);
+    if(sourceNodeId) return `${sourceNodeId}:${sourceIndex}`;
+    return smartReferenceUrlKey(ref?.url || ref?.sourceUrl || '') || `reference:${fallbackIndex}`;
+}
+function smartBuildFinalUploadReferenceMap(refs=[], uploadRefs=[]){
+    const imageRefs = imageRefsOnly(smartNormalizeReferenceManualControlsList(refs));
+    const uploaded = imageRefsOnly(smartNormalizeReferenceManualControlsList(uploadRefs));
+    const uploadIndexByKey = new Map();
+    uploaded.forEach((ref, index) => {
+        const key = smartReferenceUrlKey(ref?.url || ref?.sourceUrl || '');
+        if(key && !uploadIndexByKey.has(key)) uploadIndexByKey.set(key, index + 1);
+    });
+    return imageRefs.map((ref, index) => {
+        const key = smartReferenceUrlKey(ref?.url || ref?.sourceUrl || '');
+        const uploadIndex = uploadIndexByKey.get(key);
+        const isUploaded = Number.isFinite(uploadIndex);
+        let notUploadedReason = '';
+        if(!isUploaded){
+            if(ref?.textOnlyReference || ref?.uploadReference === false) notUploadedReason = 'analysis_only';
+            else if(!smartReferenceUploadAllowed(ref)) notUploadedReason = 'not_upload_allowed';
+            else notUploadedReason = 'over_reference_limit';
+        }
+        return {
+            sourceReferenceId:smartReferenceSourceId(ref, index),
+            sourceNodeId:ref?.sourceNodeId || ref?.nodeId || '',
+            sourceIndex:smartReferenceSourceIndex(ref, index),
+            ...(isUploaded ? {uploadIndex} : {}),
+            roles:[...new Set([ref?.role, ref?.autoRole, ref?.userRole].filter(Boolean))],
+            uploaded:isUploaded,
+            notUploadedReason
+        };
+    });
+}
+function smartApplyFinalUploadReferenceMap(refs=[], uploadMap=[]){
+    const mapBySourceId = new Map((uploadMap || []).map(item => [item.sourceReferenceId, item]));
+    const mapByUrl = new Map();
+    (refs || []).forEach((ref, index) => {
+        const item = mapBySourceId.get(smartReferenceSourceId(ref, index));
+        const key = smartReferenceUrlKey(ref?.url || ref?.sourceUrl || '');
+        if(item && key && !mapByUrl.has(key)) mapByUrl.set(key, item);
+    });
+    return (refs || []).map((ref, index) => {
+        const key = smartReferenceUrlKey(ref?.url || ref?.sourceUrl || '');
+        const mapped = mapBySourceId.get(smartReferenceSourceId(ref, index)) || mapByUrl.get(key);
+        if(!mapped) return ref;
+        const {uploadIndex:_staleUploadIndex, ...base} = ref;
+        return {...base, ...mapped};
+    });
+}
+function smartFinalUploadedReferences(refs=[]){
+    const images = imageRefsOnly(refs);
+    if(!images.some(smartReferenceHasFinalUploadMapping)) return null;
+    const uploaded = images
+        .filter(ref => ref?.uploaded === true && Number.isFinite(Number(ref?.uploadIndex)) && Number(ref.uploadIndex) >= 1)
+        .sort((a, b) => Number(a.uploadIndex) - Number(b.uploadIndex));
+    if(uploaded.some((ref, index) => Number(ref.uploadIndex) !== index + 1)) return null;
+    return uploaded;
+}
+function smartResolveFinalReferenceUploads(refs=[], prompt='', runSettings=settings, kind='image'){
+    const normalizedRefs = smartNormalizeReferenceManualControlsList(refs);
+    const mappedUploads = smartFinalUploadedReferences(normalizedRefs);
+    const selected = mappedUploads === null
+        ? smartSelectGenerationReferenceUploads(normalizedRefs, prompt, runSettings, kind)
+        : mappedUploads;
+    const uploadMap = smartBuildFinalUploadReferenceMap(normalizedRefs, selected);
+    const references = smartApplyFinalUploadReferenceMap(normalizedRefs, uploadMap);
+    const mappedByKey = new Map(imageRefsOnly(references).map(ref => [smartReferenceUrlKey(ref?.url || ref?.sourceUrl || ''), ref]));
+    const uploadReferences = selected.map(ref => {
+        const mapped = mappedByKey.get(smartReferenceUrlKey(ref?.url || ref?.sourceUrl || ''));
+        return mapped ? {...ref, ...mapped} : ref;
+    });
+    return {references, uploadReferences, uploadMap};
+}
+function smartReferenceFinalUploadIndex(ref, fallbackIndex=0){
+    const mappedIndex = Number(ref?.uploadIndex);
+    if(ref?.uploaded === true && Number.isFinite(mappedIndex) && mappedIndex >= 1) return mappedIndex;
+    if(smartReferenceHasFinalUploadMapping(ref)) return 0;
+    return smartReferenceUploadAllowed(ref) ? fallbackIndex + 1 : 0;
+}
+function smartReferenceIsFinalUploaded(ref, fallbackIndex=0){
+    return smartReferenceFinalUploadIndex(ref, fallbackIndex) > 0;
+}
+function smartReferenceIsAnalysisOnlyGuidance(ref){
+    return smartReferenceHasFinalUploadMapping(ref)
+        ? ref?.uploaded !== true && ref?.notUploadedReason === 'analysis_only'
+        : Boolean(ref?.textOnlyReference || ref?.uploadReference === false);
+}
+function smartNonUploadedReferenceDescription(ref){
+    const role = ref?.role || '';
+    if(['composition_reference','primary_style_reference','primary_reference'].includes(role)){
+        return smartReferenceIsAnalysisOnlyGuidance(ref) ? 'analysis-only style guidance' : 'non-uploaded style analysis';
+    }
+    if(role === 'product_truth_reference' || role === 'product_detail_reference'){
+        return smartReferenceIsAnalysisOnlyGuidance(ref) ? 'text-derived product guidance' : 'non-uploaded product guidance';
+    }
+    return smartReferenceIsAnalysisOnlyGuidance(ref) ? 'text-derived reference guidance' : 'non-uploaded reference guidance';
+}
+function smartRemapPromptReferenceTokens(text='', sourceRefs=[], mappedRefs=[]){
+    const mappedByKey = new Map(imageRefsOnly(mappedRefs).map(ref => [smartReferenceUrlKey(ref?.url || ref?.sourceUrl || ''), ref]));
+    const tokenTargets = imageRefsOnly(sourceRefs).map((ref, index) => {
+        const mapped = mappedByKey.get(smartReferenceUrlKey(ref?.url || ref?.sourceUrl || '')) || ref;
+        const uploadIndex = smartReferenceFinalUploadIndex(mapped, index);
+        return uploadIndex ? {uploadIndex} : {description:smartNonUploadedReferenceDescription(mapped)};
+    });
+    return String(text || '').replace(/\bImage\s*#?\s*(\d+)\b|图\s*(\d+)/gi, (match, englishIndex, chineseIndex) => {
+        const sourceIndex = Number(englishIndex || chineseIndex) - 1;
+        const target = tokenTargets[sourceIndex];
+        if(!target) return match;
+        if(!target.uploadIndex) return target.description;
+        return englishIndex ? `Image ${target.uploadIndex}` : `图${target.uploadIndex}`;
+    });
+}
+function smartRemapMentionedReferencePrompt(request, mappedRefs=[]){
+    const prompt = String(request?.prompt || '');
+    if(!request?.mentioned) return prompt;
+    const userNeedHeader = tr('smart.refUserNeed');
+    const userNeedIndex = prompt.indexOf(userNeedHeader);
+    const body = userNeedIndex >= 0
+        ? prompt.slice(userNeedIndex + userNeedHeader.length).trim()
+        : prompt;
+    const remappedBody = smartRemapPromptReferenceTokens(body, request?.refs || [], mappedRefs);
+    const mappedUploads = smartFinalUploadedReferences(mappedRefs);
+    const uploaded = mappedUploads === null ? imageRefsOnly(mappedRefs).filter(smartReferenceUploadAllowed) : mappedUploads;
+    const mapText = uploaded
+        .map((ref, index) => `图${smartReferenceFinalUploadIndex(ref, index)}：${ref.name || `图片${index + 1}`}`)
+        .join('\n');
+    return [
+        mapText ? `${tr('smart.refMapHeader')}\n${mapText}` : '',
+        `${userNeedHeader}\n${remappedBody}`
+    ].filter(Boolean).join('\n\n');
+}
 function smartReferenceRoleIsPrimary(node, ref){
     const role = ref?.role || '';
     if(role === 'primary_style_reference' || role === 'primary_reference' || role === 'composition_reference') return true;
@@ -13061,20 +13473,50 @@ function smartHumanPositivePattern(){
 function smartHumanInteractionPositivePattern(){
     return /(?:\u4eba\u7269|\u4eba\u50cf|\u771f\u4eba|\u6a21\u7279|\u5973\u6027|\u5973\u4eba|\u7537\u6027|\u7537\u4eba|\u8138\u90e8|\u624b\u90e8|\u80a2\u4f53|\u8eab\u4f53|\u817f|\u817f\u90e8|\u811a|\u53cc\u811a|\u4e24\u53ea\u811a|\u811a\u638c|\u811a\u8dbe|\u819d\u76d6|\u5750\u59ff|\u7ad9\u59ff|\u7a7f\u7740|\u624b\u6301|\u62ff\u7740|\u63e1\u7740|\u8e29|\u8e29\u5728|\u8e29\u8e0f|\u4f7f\u7528\u573a\u666f|\u4f7f\u7528\u6548\u679c|\u4e92\u52a8)|(?:\u4ea7\u54c1|\u5546\u54c1|\u673a\u5668|\u5668\u68b0|\u8e0f\u677f).{0,24}(?:\u4e92\u52a8|\u8e29|\u811a|\u817f|\u4f7f\u7528|\u63a5\u89e6)|(?:\u4eba|\u6a21\u7279|\u5973|\u7537).{0,24}(?:\u4ea7\u54c1|\u5546\u54c1|\u673a\u5668|\u5668\u68b0|\u8e0f\u677f|\u4e92\u52a8|\u8e29|\u811a|\u817f|\u4f7f\u7528)|\b(?:woman|man|person|people|human|model|female|male|leg|legs|foot|feet|barefoot|shoe|shoes|knee|knees|sitting|standing|wearing|holding|using|interacting|step(?:ping)?\s+on|feet\s+on)\b/i;
 }
+function smartTextHasDirectHumanSubject(text=''){
+    return /\b(?:person|people|human|human model|model|woman|man|girl|boy|female|male|portrait|face|facial|hand|hands|finger|palm|arm|body|torso|shoulder|leg|legs|limb|foot|feet|barefoot|shoe|shoes|knee|knees)\b|\u4eba\u7269|\u4eba\u50cf|\u771f\u4eba|\u6a21\u7279|\u5973\u6027|\u5973\u4eba|\u7537\u6027|\u7537\u4eba|\u8138\u90e8|\u624b\u90e8|\u624b\u6307|\u624b\u638c|\u624b\u81c2|\u80a2\u4f53|\u8eab\u4f53|\u80a9|\u817f|\u811a|\u819d\u76d6/i.test(String(text || ''));
+}
+function smartPartialHumanReferencePattern(){
+    return /\b(?:partial|cropped|cut[-\s]?off|incomplete|partial\s+face|half\s+face|face\s+edge|cropped\s+face|partial\s+body|body[-\s]?part|hand[-\s]?only|arm[-\s]?only|foot[-\s]?only|leg[-\s]?only|face[-\s]?only|limb[-\s]?only|half[-\s]?body|missing\s+(?:head|torso|legs|arms))\b|(?:局部|部分|不完整|截断|裁切|只露|仅露|露出一部分|缺少(?:头|躯干|身体|手臂|双臂|腿|双腿)).{0,12}(?:人物|人体|人像|身体|脸|面部|手|手部|手指|手掌|手腕|手臂|胳膊|肢体|四肢|腿|脚|膝盖)|(?:人物|人体|人像|身体|脸|面部|手|手部|手指|手掌|手腕|手臂|胳膊|肢体|四肢|腿|脚|膝盖).{0,12}(?:局部|部分|不完整|截断|裁切|只露|仅露|缺少|露出一部分)|半张脸|局部脸|局部面部|面部局部|手部特写|手持产品特写|只露出手|只露出脸|只露出四肢/i;
+}
+function smartFullHumanCompletionPattern(){
+    return /\b(?:full[-\s]?body|whole\s+body|complete\s+(?:person|human|model|face|body)|entire\s+(?:person|human|model|face|body)|head[-\s]?to[-\s]?toe|full\s+person|full\s+model|full\s+face|portrait|beauty\s+portrait)\b|完整(?:人物|人体|人像|真人|模特|脸|面部|身体)|(?:全身|半身|完整露脸|完整人脸|完整面部|完整身体|真人模特|人物人像|人像写真|肖像|正脸完整)/i;
+}
+function smartTextLikelyPartialHumanReference(text=''){
+    const value = String(text || '');
+    if(!value.trim()) return false;
+    return smartPartialHumanReferencePattern().test(value);
+}
+function smartTextExplicitlyRequestsFullHumanCompletion(text=''){
+    const value = String(text || '');
+    if(!value.trim()) return false;
+    const cleaned = value
+        .replace(/(?:do\s+not|don't|never|without|avoid|no)\s+[^.\n;。；]*(?:full[-\s]?body|complete\s+(?:person|model|face|body)|portrait|whole\s+body)[^.\n;。；]*/gi, ' ')
+        .replace(/(?:不要|不能|不得|禁止|避免|无须|无需)[^。\n；;]*(?:完整人物|完整人像|完整模特|完整脸|完整面部|全身|半身|肖像|人像写真)[^。\n；;]*/g, ' ');
+    return smartFullHumanCompletionPattern().test(cleaned);
+}
+function smartTextHasProductStandingFalsePositive(text=''){
+    const value = String(text || '');
+    if(smartTextHasDirectHumanSubject(value)) return false;
+    const productNoun = '(?:product|products|pack|packs|package|packages|packaging|bottle|bottles|box|boxes|jar|jars|can|cans|device|devices|machine|machines|object|objects|sku|hero product|pet food|\\u4ea7\\u54c1|\\u5546\\u54c1|\\u5305\\u88c5|\\u5305\\u88c5\\u888b|\\u74f6|\\u76d2|\\u7f50|\\u8bbe\\u5907|\\u673a\\u5668|\\u4e3b\\u4f53|\\u4e3b\\u4ea7\\u54c1|\\u5ba0\\u7269\\u98df\\u54c1)';
+    return new RegExp(`${productNoun}[^.\\n;]{0,80}\\bstanding\\b|\\bstanding\\b[^.\\n;]{0,80}${productNoun}`, 'i').test(value);
+}
 function smartStripHumanAntiCopyClauses(text){
     return String(text || '')
-        .replace(/(?:do not|don't|never|avoid|ignore|without)\s+[^.\n;。；]*(?:person|people|human|model|face|hand|hands|finger|arm|body|limb|pose|skin|hair)[^.\n;。；]*[.\n;。；]?/gi, ' ')
-        .replace(/(?:不要|避免|不得|不应|禁止|忽略)[^。\n；;]*(?:人物|人像|人|模特|脸|面部|手|手部|肢体|身体|姿势|皮肤|头发)[^。\n；;]*[。\n；;]?/g, ' ');
+        .replace(/(?:do not|don't|never|avoid|ignore|without)\s+[^.\n;。；,，]*(?:person|people|human|model|face|hand|hands|finger|arm|body|limb|pose|skin|hair)[^.\n;。；,，]*[.\n;。；,，]?/gi, ' ')
+        .replace(/(?:不要|避免|不得|不应|禁止|忽略)[^。\n；;,，]*(?:人物|人像|人|模特|脸|面部|手|手部|肢体|身体|姿势|皮肤|头发)[^。\n；;,，]*[。\n；;,，]?/g, ' ');
 }
 function smartTextExplicitlyForbidsHuman(text){
     const value = String(text || '');
     const cnNegative = /(?:\u4e0d\u8981|\u65e0|\u4e0d\u51fa\u73b0|\u7981\u6b62|\u53bb\u6389|\u6392\u9664|不要|无|不出现|禁止|去掉|排除).{0,12}(?:\u4eba\u7269|\u4eba\u50cf|\u771f\u4eba|\u6a21\u7279|\u4eba\u8138|\u8138|\u624b|\u624b\u90e8|\u80a2\u4f53|人物|人像|真人|模特|人脸|脸|手|手部|肢体)/i;
-    return smartHumanNegativePattern().test(value) || cnNegative.test(value);
+    const cnHardNegative = /(?:(?:\u4e0d\u8981|\u4e0d\u9700\u8981|\u65e0\u9700|\u65e0\u987b|\u4e0d\u51fa\u73b0|\u7981\u6b62|\u4e0d\u80fd|\u4e0d\u5f97|\u4e0d\u51c6|\u53bb\u6389|\u79fb\u9664|\u5220\u9664|\u6392\u9664)(?:\u518d|\u51fa\u73b0|\u52a0\u5165|\u6dfb\u52a0|\u751f\u6210|\u5305\u542b|\u4f7f\u7528|\u6709)?(?:\u4efb\u4f55)?(?:\u4eba\u7269|\u4eba\u50cf|\u771f\u4eba|\u6a21\u7279|\u4eba\u8138|\u8138\u90e8|\u624b|\u624b\u90e8|\u80a2\u4f53|\u4eba\u4f53)|(?:\u65e0|\u6ca1\u6709)(?:\u4efb\u4f55)?(?:\u4eba\u7269|\u4eba\u50cf|\u771f\u4eba|\u6a21\u7279|\u4eba\u8138|\u8138\u90e8|\u624b|\u624b\u90e8|\u80a2\u4f53|\u4eba\u4f53)|(?:\u4e0d\u8981|\u4e0d\u80fd|\u4e0d\u51c6|\u7981\u6b62)(?:\u518d)?\u6709\u4eba|(?:\u4eba\u7269|\u4eba\u50cf|\u771f\u4eba|\u6a21\u7279|\u4eba\u8138|\u8138\u90e8|\u624b\u90e8|\u80a2\u4f53)(?:\u4e0d\u8981\u51fa\u73b0|\u4e0d\u51fa\u73b0|\u7981\u6b62\u51fa\u73b0|\u53bb\u6389|\u79fb\u9664|\u5220\u9664))/i;
+    return smartHumanNegativePattern().test(value) || cnHardNegative.test(value);
 }
 function smartTextExplicitlyRequestsHuman(text){
     const value = String(text || '');
     if(!value.trim()) return false;
     const stripped = smartStripHumanAntiCopyClauses(value);
+    if(smartTextHasProductStandingFalsePositive(stripped)) return false;
     if(/(?:\u4eba\u7269|\u4eba\u50cf|\u771f\u4eba|\u6a21\u7279|\u4eba\u8138|\u8138\u90e8|\u624b\u90e8|\u624b\u6301|\u62ff\u7740|\u63e1\u7740|\u4f7f\u7528\u573a\u666f|\u4f7f\u7528\u6548\u679c|\u4e0a\u8138|\u62a4\u7406\u573a\u666f|人物|人像|真人|模特|人脸|脸部|手部|手持|拿着|握着|使用场景|使用效果|上脸|护理场景)/i.test(stripped)) return true;
     if(smartHumanInteractionPositivePattern().test(stripped)) return true;
     return smartHumanPositivePattern().test(stripped);
@@ -13169,10 +13611,19 @@ function smartStyleMatchValuesText(node){
         analysis?.lighting_material_lock_prompt
     ]).join(' ');
 }
-function smartStyleMatchLikelyContainsPerson(node){
+function smartStyleMatchLikelyContainsPerson(node, ref=null, seen=new Set()){
+    if(!node?.id || seen.has(node.id)) return false;
+    seen.add(node.id);
     const text = smartStyleMatchValuesText(node);
-    if(!text.trim() || smartTextExplicitlyForbidsHuman(text)) return false;
-    return smartHumanPositivePattern().test(text);
+    const normalizeImageKey = value => String(value || '').split('?')[0].replace(/\\/g, '/').trim().toLowerCase();
+    const analyzedImageKey = normalizeImageKey(node?.styleMatch?.image);
+    const referenceImageKey = normalizeImageKey(ref?.url || ref?.sourceUrl);
+    const analysisMatchesReference = ref
+        ? Boolean(analyzedImageKey && referenceImageKey && analyzedImageKey === referenceImageKey)
+        : Boolean(node?.styleMatch?.analysis);
+    if(analysisMatchesReference && smartTextLikelyPartialHumanReference(text)) return false;
+    if(analysisMatchesReference && text.trim() && !smartTextExplicitlyForbidsHuman(text) && smartTextExplicitlyRequestsHuman(text)) return true;
+    return inputNodesFor(node).some(input => smartStyleMatchLikelyContainsPerson(input, ref, seen));
 }
 function smartPromptExplicitlyRequestsHuman(node, prompt=''){
     return smartTextExplicitlyRequestsHuman([prompt, smartNodeUserIntentText(node)].filter(Boolean).join('\n\n'));
@@ -13189,7 +13640,10 @@ function smartPromptAllowsHumanByIntent(node, prompt=''){
 function smartTextExplicitlyRequestsSamePerson(text=''){
     const value = String(text || '');
     if(!value.trim()) return false;
-    return /same\s+(?:person|model|face|character|subject)|preserve\s+(?:the\s+)?(?:person|model|face|character|subject)\s+identity|keep\s+(?:the\s+)?(?:same\s+)?(?:person|model|face|character|subject)\s+identity|identity\s+reference|\u540c\u4e00(?:\u4e2a)?(?:\u4eba|\u4eba\u7269|\u6a21\u7279|\u4e3b\u4f53)|(?:\u4eba\u7269|\u4eba\u50cf|\u6a21\u7279|\u8138|\u9762\u90e8|\u4e94\u5b98).{0,12}(?:\u4e00\u81f4|\u76f8\u540c|\u4e0d\u53d8|\u4fdd\u6301|\u8fd8\u539f)|(?:\u4fdd\u6301|\u8fd8\u539f).{0,12}(?:\u539f|\u540c\u4e00|\u8fd9\u4e2a).{0,8}(?:\u4eba|\u4eba\u7269|\u6a21\u7279|\u8138|\u9762\u90e8|\u4e94\u5b98)/i.test(value);
+    const cleaned = value
+        .replace(/(?:do\s+not|don't|never|must\s+not|not|without|avoid)\s+[^.\n;。；]*(?:same\s+(?:person|model|face|character|subject)|person\s+identity|model\s+identity|face\s+identity|same-person)[^.\n;。；]*/gi, ' ')
+        .replace(/(?:不要|不能|不得|禁止|并非|不是|不应|避免|无须|无需)[^。\n；;]*(?:同一(?:个)?(?:人|人物|模特|主体)|相同(?:人|人物|模特|脸|面部)|人物身份|模特身份|人脸身份|脸部身份)[^。\n；;]*/g, ' ');
+    return /same\s+(?:person|model|face|character|subject)|preserve\s+(?:the\s+)?(?:person|model|face|character|subject)\s+identity|keep\s+(?:the\s+)?(?:same\s+)?(?:person|model|face|character|subject)\s+identity|identity\s+reference|\u540c\u4e00(?:\u4e2a)?(?:\u4eba|\u4eba\u7269|\u6a21\u7279|\u4e3b\u4f53)|(?:\u4eba\u7269|\u4eba\u50cf|\u6a21\u7279|\u8138|\u9762\u90e8|\u4e94\u5b98).{0,12}(?:\u4e00\u81f4|\u76f8\u540c|\u4e0d\u53d8|\u4fdd\u6301|\u8fd8\u539f)|(?:\u4fdd\u6301|\u8fd8\u539f).{0,12}(?:\u539f|\u540c\u4e00|\u8fd9\u4e2a).{0,8}(?:\u4eba|\u4eba\u7269|\u6a21\u7279|\u8138|\u9762\u90e8|\u4e94\u5b98)/i.test(cleaned);
 }
 function smartPromptExplicitlyRequestsSamePerson(node, prompt=''){
     return smartTextExplicitlyRequestsSamePerson([
@@ -13198,25 +13652,93 @@ function smartPromptExplicitlyRequestsSamePerson(node, prompt=''){
         prompt
     ].filter(Boolean).join('\n\n'));
 }
+function smartCurrentUserExplicitlyRequestsSamePerson(node, prompt=''){
+    return smartTextExplicitlyRequestsSamePerson([
+        smartPromptHighestPriorityRequestText(prompt),
+        node?.llmInstruction,
+        node?.llmSystemPrompt
+    ].filter(Boolean).join('\n\n'));
+}
+function smartPromptExplicitlyRequestsFullHumanCompletion(node, prompt=''){
+    return smartTextExplicitlyRequestsFullHumanCompletion([
+        smartLatestUserRequestText(node, prompt),
+        node?.llmInstruction,
+        node?.llmSystemPrompt
+    ].filter(Boolean).join('\n\n'));
+}
 function smartRefsLikelyContainPerson(node, refs=[]){
     return imageRefsOnly(refs).some(ref => smartReferenceLikelyContainsPerson(node, ref));
 }
+function smartStyleMatchPartialHumanText(node, ref=null, seen=new Set()){
+    if(!node?.id || seen.has(node.id)) return '';
+    seen.add(node.id);
+    const normalizeImageKey = value => String(value || '').split('?')[0].replace(/\\/g, '/').trim().toLowerCase();
+    const analyzedImageKey = normalizeImageKey(node?.styleMatch?.image);
+    const referenceImageKey = normalizeImageKey(ref?.url || ref?.sourceUrl);
+    const analysisMatchesReference = ref
+        ? Boolean(analyzedImageKey && referenceImageKey && analyzedImageKey === referenceImageKey)
+        : Boolean(node?.styleMatch?.analysis);
+    const current = analysisMatchesReference ? smartStyleMatchValuesText(node) : '';
+    const upstream = inputNodesFor(node).map(input => smartStyleMatchPartialHumanText(input, ref, seen)).filter(Boolean).join(' ');
+    return [current, upstream].filter(Boolean).join(' ');
+}
+function smartReferencePartialHumanText(node, ref){
+    return smartFlattenTextValues([
+        ref?.containsPartialHumanOnly,
+        ref?.containsHandOnly,
+        ref?.partialHumanReference,
+        ref?.subjectKind,
+        ref?.mediaCategory,
+        ref?.name,
+        ref?.title,
+        ref?.categoryName,
+        ref?.sourceName,
+        ref?.description,
+        ref?.caption,
+        ref?.alt,
+        ref?.prompt,
+        ref?.runPrompt,
+        ref?.llmInstruction,
+        smartStyleMatchPartialHumanText(node, ref)
+    ]).join(' ');
+}
+function smartReferenceLikelyContainsPartialHumanContent(node, ref){
+    if(smartReferenceRoleIsProduct(ref) || smartReferenceRoleIsCase(ref)) return false;
+    if(ref?.containsPartialHumanOnly === true || ref?.containsHandOnly === true || ref?.partialHumanReference === true) return true;
+    if(ref?.containsPartialHumanOnly === false || ref?.containsHandOnly === false || ref?.partialHumanReference === false) return false;
+    return smartTextLikelyPartialHumanReference(smartReferencePartialHumanText(node, ref));
+}
+function smartRefsLikelyContainPartialHumanContent(node, refs=[]){
+    return imageRefsOnly(refs).some(ref => smartReferenceLikelyContainsPartialHumanContent(node, ref));
+}
 function smartPromptLooksSystemGenerated(text=''){
-    return /NO HUMAN SUBJECT LOCK:|UPLOADED IMAGE ROLE MAP:|Product truth references:|Product recognition summary from product reference images:|Reference priority:|Original reference similarity:|Style\/reference similarity setting:|HIGHEST PRIORITY|PRODUCT IDENTITY|BRAND IDENTITY LOCK:|POSTER COPY|Negative prompt:|Reference summary:|Shared style anchor:|Generation guidance:|Case-library support:|Lighting\/material lock:/i.test(String(text || ''));
+    return /NO HUMAN SUBJECT LOCK:|PARTIAL HUMAN REFERENCE LOCK:|UPLOADED IMAGE ROLE MAP:|Product truth references:|Product recognition summary from product reference images:|Reference priority:|Original reference similarity:|Style\/reference similarity setting:|HIGHEST PRIORITY|PRODUCT IDENTITY|BRAND IDENTITY LOCK:|POSTER COPY|Negative prompt:|Reference summary:|Shared style anchor:|Generation guidance:|Case-library support:|Lighting\/material lock:/i.test(String(text || ''));
 }
 function smartGenerationAllowsHuman(node, refs=[], prompt=''){
     const latestUserRequest = smartLatestUserRequestText(node, prompt);
-    if(smartTextExplicitlyRequestsHuman(latestUserRequest)) return true;
+    const partialHumanRefs = smartRefsLikelyContainPartialHumanContent(node, refs);
     if(smartTextExplicitlyForbidsHuman(latestUserRequest)) return false;
+    if(smartTextExplicitlyRequestsHuman(latestUserRequest)) return true;
+    if(partialHumanRefs) return false;
     if(String(latestUserRequest || '').trim()) return smartRefsLikelyContainPerson(node, refs);
     const intentText = smartNodeUserIntentText(node);
-    if(smartTextExplicitlyRequestsHuman(intentText)) return true;
     if(smartTextExplicitlyForbidsHuman(intentText)) return false;
+    if(smartTextExplicitlyRequestsHuman(intentText)) return true;
     if(smartTextExplicitlyForbidsHuman(prompt)) return false;
     if(!smartPromptLooksSystemGenerated(prompt) && smartTextExplicitlyRequestsHuman(prompt)) return true;
     return smartRefsLikelyContainPerson(node, refs);
 }
-function smartNoHumanSubjectPrompt(allowHuman=false){
+function smartNoHumanSubjectPrompt(allowHuman=false, partialHuman=false, fullHumanRequested=false){
+    if(fullHumanRequested) return '';
+    if(partialHuman){
+        return [
+            'PARTIAL HUMAN REFERENCE LOCK:',
+            'The reference image contains only a partial human subject such as a hand, cropped face, arm, leg, or another incomplete body area.',
+            'Preserve exactly the visible partial human/body content from the reference. Do not complete it into a full person, full model, full face, full body, or full portrait.',
+            'Do not add missing head, torso, extra limbs, or full-body framing unless the latest user request explicitly asks for a complete human subject.',
+            'The partial human content should remain subordinate to the reference composition, copy layout, palette, lighting, product position, and commercial hierarchy.'
+        ].join(' ');
+    }
     if(allowHuman) return '';
     return [
         'NO HUMAN SUBJECT LOCK:',
@@ -13247,9 +13769,13 @@ function smartPosterCopyDisabledForGeneration(node){
 }
 function smartReferenceLikelyContainsPerson(node, ref){
     if(smartReferenceRoleIsProduct(ref) || smartReferenceRoleIsCase(ref)) return false;
+    if(smartReferenceLikelyContainsPartialHumanContent(node, ref)) return false;
     if(ref?.containsPerson === true || ref?.hasPerson === true || ref?.personReference === true || ref?.humanReference === true) return true;
     if(ref?.containsPerson === false || ref?.hasPerson === false || ref?.personReference === false || ref?.humanReference === false) return false;
-    if(['composition_reference','primary_style_reference','primary_reference'].includes(ref?.role || '') && smartPromptAllowsHumanByIntent(node) && smartStyleMatchLikelyContainsPerson(node)) return true;
+    if(['composition_reference','primary_style_reference','primary_reference'].includes(ref?.role || '') && (
+        smartStyleMatchLikelyContainsPerson(node, ref)
+        || (smartPromptAllowsHumanByIntent(node) && smartStyleMatchLikelyContainsPerson(node))
+    )) return true;
     const text = smartFlattenTextValues([
         ref?.subjectKind,
         ref?.mediaCategory,
@@ -13275,8 +13801,10 @@ function smartStyleReferenceShouldUpload(node, ref, weight, prompt=''){
     const role = ref?.role || '';
     if(!['composition_reference','primary_style_reference','primary_reference'].includes(role)) return true;
     const value = Math.max(0, Math.min(100, Math.round(Number(weight) || 0)));
+    const containsPartialHuman = smartReferenceLikelyContainsPartialHumanContent(node, ref);
     const containsPerson = smartReferenceLikelyContainsPerson(node, ref);
     const samePersonRequested = smartPromptExplicitlyRequestsSamePerson(node, prompt);
+    if(containsPartialHuman) return true;
     if(containsPerson && !samePersonRequested && value < 85) return false;
     if(smartPosterCopyEnabledForGeneration(node)) return true;
     if(smartPosterCopyDisabledForGeneration(node) && value >= 60) return true;
@@ -13393,8 +13921,10 @@ function smartReferenceRoleWeight(ref){
     if(ref?.role === 'case_style_reference') return 25;
     return 50;
 }
-function smartDecorateReferenceWeights(node, refs=[], prompt=''){
-    const styleWeight = promptNodeReferenceWeight(node);
+function smartDecorateReferenceWeights(node, refs=[], prompt='', runSettings=null, similarityState=null){
+    const activeRunSettings = runSettings || (typeof settings !== 'undefined' ? settings : {});
+    const resolvedSimilarity = smartNormalizeReferenceSimilarityState(similarityState, node, refs);
+    const styleWeight = resolvedSimilarity.effectiveReferenceSimilarity;
     const latestChangesBackgroundPalette = smartLatestRequestChangesBackgroundPalette(node);
     const posterCopyLock = smartPosterCopyEnabledForGeneration(node);
     const posterCopyOff = smartPosterCopyDisabledForGeneration(node);
@@ -13410,6 +13940,7 @@ function smartDecorateReferenceWeights(node, refs=[], prompt=''){
             };
         }
         if(role === 'composition_reference' || role === 'primary_style_reference' || role === 'primary_reference'){
+            const containsPerson = smartReferenceLikelyContainsPerson(node, ref);
             if(ref?.generatedEditBase || ref?.structureLock){
                 const editBaseWeight = smartReferenceRoleWeight(ref);
                 const strictEditBase = editBaseWeight >= 85;
@@ -13430,37 +13961,49 @@ function smartDecorateReferenceWeights(node, refs=[], prompt=''){
                     posterCopyReference:posterCopyLock,
                     copyTextLock:posterCopyLock && strictEditBase,
                     posterCopyDisabledReference:posterCopyOff,
-                    copyTextRemovalOnly:posterCopyOff
+                    copyTextRemovalOnly:posterCopyOff,
+                    containsPerson
                 };
             }
+            const aspectRecompose = typeof smartStyleReferenceAspectRecomposeNeeded === 'function'
+                && smartStyleReferenceAspectRecomposeNeeded(node, ref, refs, activeRunSettings);
+            const effectiveStyleWeight = aspectRecompose && styleWeight < 85 ? Math.min(styleWeight, 65) : styleWeight;
             const upload = latestChangesBackgroundPalette
-                && styleWeight < 85
+                && effectiveStyleWeight < 85
                 && !ref?.styleLock
                 && !ref?.referenceLock
                 && !posterCopyLock
                 ? false
-                : smartStyleReferenceShouldUpload(node, ref, styleWeight, prompt);
-            const styleIntent = styleWeight >= 85 ? 'strong_style_not_clone' : styleWeight >= 60 ? 'balanced_style' : 'loose_style';
+                : aspectRecompose && effectiveStyleWeight < 85 && !posterCopyLock
+                    ? false
+                    : smartStyleReferenceShouldUpload(node, ref, effectiveStyleWeight, prompt);
+            const styleIntent = effectiveStyleWeight >= 85 ? 'strong_style_not_clone' : effectiveStyleWeight >= 60 ? 'balanced_style' : 'loose_style';
             return {
                 ...ref,
-                referenceWeight:styleWeight,
-                similarityIntent:posterCopyLock
-                    ? smartPosterCopySimilarityIntent(styleWeight, styleIntent)
-                    : posterCopyOff && styleWeight >= 60
+                referenceWeight:effectiveStyleWeight,
+                similarityIntent:aspectRecompose
+                    ? effectiveStyleWeight >= 85 ? 'aspect_recompose_strong_layout_reference' : 'aspect_recompose_style_guidance'
+                    : posterCopyLock
+                    ? smartPosterCopySimilarityIntent(effectiveStyleWeight, styleIntent)
+                    : posterCopyOff && effectiveStyleWeight >= 60
                         ? 'poster_copy_off_layout_reference'
                         : styleIntent,
                 inputFidelity:posterCopyLock
-                    ? smartPosterCopyReferenceFidelity(styleWeight)
-                    : posterCopyOff && styleWeight >= 60
+                    ? smartPosterCopyReferenceFidelity(effectiveStyleWeight)
+                    : aspectRecompose
+                        ? effectiveStyleWeight >= 85 ? 'high' : 'low'
+                    : posterCopyOff && effectiveStyleWeight >= 60
                         ? 'high'
                         : 'low',
                 uploadReference:upload,
                 textOnlyReference:!upload,
+                containsPerson,
                 latestVisualOverride:latestChangesBackgroundPalette,
                 posterCopyReference:posterCopyLock,
-                copyTextLock:posterCopyLock && styleWeight >= 85,
+                copyTextLock:posterCopyLock && effectiveStyleWeight >= 85,
                 posterCopyDisabledReference:posterCopyOff && upload,
-                copyTextRemovalOnly:posterCopyOff && upload
+                copyTextRemovalOnly:posterCopyOff && upload,
+                aspectRecomposeReference:aspectRecompose
             };
         }
         if(role === 'case_style_reference'){
@@ -13473,13 +14016,14 @@ function smartNormalizeProductReferenceText(value){
     return String(value || '').replace(/[０-９]/g, char => String.fromCharCode(char.charCodeAt(0) - 0xFEE0));
 }
 function smartProductIntentText(node){
+    // Style-match analysis is visual/style context only. Product words extracted
+    // from a matched style image must not become product-truth cues after the
+    // user links a real SKU/product reference.
     return [
         node?.text,
         node?.promptDraftText,
         node?.llmInstruction,
-        node?.llmSystemPrompt,
-        node?.styleMatch?.analysis?.reference_summary?.product_truth,
-        node?.styleMatch?.analysis?.style_fingerprint?.material?.product_surface
+        node?.llmSystemPrompt
     ].map(v => typeof v === 'string' ? v : '').join(' ');
 }
 function smartProductCuePattern(){
@@ -13492,7 +14036,7 @@ function smartCleanProductIdentityName(value){
     text = text.replace(/\s*(?:\u53c2\u8003|\u6309|\u6839\u636e|\u751f\u6210|\u51fa\u56fe|\u505a|\u753b|\u4f5c\u4e3a)\s*.*$/i, '').trim();
     text = text.replace(/\s+/g, ' ');
     if(text.length < 2 || text.length > 60) return '';
-    if(/^(?:\u4ea7\u54c1|\u5546\u54c1|\u56fe\u7247|\u53c2\u8003\u56fe|\u4e00\u5f20\u56fe|image|product|item)$/i.test(text)) return '';
+    if(/^(?:\u4ea7\u54c1|\u5546\u54c1|\u56fe\u7247|\u53c2\u8003\u56fe|\u4e00\u5f20\u56fe|\u8be5|\u6b64|\u8fd9|\u8fd9\u4e2a|\u8fd9\u6b3e|image|product|item|the|this|that|same|old|new|strict|authoritative)$/i.test(text)) return '';
     return text;
 }
 function smartExtractProductIdentityName(text){
@@ -13515,6 +14059,7 @@ function smartLatestProductIdentityOverrideValue(node, prompt=''){
     const latest = smartLatestUserRequestText(node, prompt);
     const fromLatest = smartExtractProductIdentityName(latest);
     if(fromLatest) return fromLatest;
+    if(smartPromptLooksSystemGenerated(prompt)) return '';
     return smartExtractProductIdentityName(prompt);
 }
 function smartLatestProductIdentityOverridePrompt(node, prompt='', refs=[]){
@@ -13522,8 +14067,9 @@ function smartLatestProductIdentityOverridePrompt(node, prompt='', refs=[]){
     if(!identity) return '';
     const productRefs = imageRefsOnly(refs)
         .map((ref, index) => ({ref, index}))
-        .filter(item => item.ref?.role === 'product_truth_reference' || item.ref?.role === 'product_detail_reference');
-    const labels = productRefs.map(item => smartReferenceDisplayLabel(item.index)).join(', ');
+        .filter(item => (item.ref?.role === 'product_truth_reference' || item.ref?.role === 'product_detail_reference')
+            && smartReferenceIsFinalUploaded(item.ref, item.index));
+    const labels = productRefs.map(item => smartReferenceDisplayLabel(item.ref, item.index)).filter(Boolean).join(', ');
     return [
         'LATEST PRODUCT IDENTITY OVERRIDE:',
         `The latest user request names the product/category as "${identity}". Treat this as the authoritative product identity.`,
@@ -13596,26 +14142,35 @@ function smartAssignReferenceRoles(node, refs=[]){
         return {...ref, role:explicit || 'supporting_reference'};
     });
 }
-function smartReferenceDisplayLabel(index){
-    return `Image ${index + 1} / \u56fe${index + 1}`;
+function smartReferenceDisplayLabel(refOrIndex, fallbackIndex=0){
+    if(typeof refOrIndex === 'number') return `Image ${refOrIndex + 1} / \u56fe${refOrIndex + 1}`;
+    const uploadIndex = smartReferenceFinalUploadIndex(refOrIndex, fallbackIndex);
+    return uploadIndex ? `Image ${uploadIndex} / \u56fe${uploadIndex}` : '';
+}
+function smartReferencePromptLabel(ref, fallbackIndex=0, nonUploadedDescription='non-uploaded reference guidance'){
+    const uploadedLabel = smartReferenceDisplayLabel(ref, fallbackIndex);
+    if(uploadedLabel) return uploadedLabel;
+    return smartReferenceIsAnalysisOnlyGuidance(ref) ? nonUploadedDescription : '';
 }
 function smartProductTruthRolePrompt(refs=[], allowHuman=false){
     const imageRefs = imageRefsOnly(refs);
     const productRefs = imageRefs
         .map((ref, index) => ({ref, index}))
-        .filter(item => item.ref?.role === 'product_truth_reference' || item.ref?.role === 'product_detail_reference');
+        .filter(item => (item.ref?.role === 'product_truth_reference' || item.ref?.role === 'product_detail_reference')
+            && smartReferenceIsFinalUploaded(item.ref, item.index));
     if(!productRefs.length) return '';
-    const labels = productRefs.map(item => `${smartReferenceDisplayLabel(item.index)} (${item.ref.name || 'product reference'})`).join(', ');
+    const labels = productRefs.map(item => `${smartReferenceDisplayLabel(item.ref, item.index)} (${item.ref.name || 'product reference'})`).join(', ');
     const parts = [
         `Product truth references: ${labels}.`,
         'These images define strict SKU identity and override conflicting objects in portrait, pose, or style references. If a style/poster reference shows a similar same-category product, treat that old product as a decoy placeholder, not product anatomy.',
+        'Product-truth references are identity/material/structure anchors only. They do not mean “generate a product main image”, “make a single hero-product poster”, “create a product-only scene”, or “redesign the composition” unless the latest user request explicitly asks for that.',
         allowHuman
             ? 'Preserve category, silhouette, proportions, structural parts, opening/cap/nozzle geometry, material, colors, product-surface brand marks, logos, printed label text/graphics, label-block placement, edge thickness, finish, and real-world scale.'
             : 'Preserve category, silhouette, proportions, structural parts, shell seams, layer relationships, opening/cap/nozzle/display/control geometry, material, colors, product-surface brand marks, logos, printed label text/graphics, label-block placement, edge thickness, finish, and real-world scale.',
         allowHuman
-            ? 'Treat multiple views as one consistent 3D product. Adapt hands, pose, placement, lighting, and composition around this exact product; never substitute a generic same-category object.'
-            : 'Treat multiple views as one consistent 3D product. Adapt product placement, lighting, props, surface contact, and composition around this exact product; never substitute a generic same-category object and do not introduce hands or people.',
-        'This product lock applies to the SKU only, not to the whole source photo; keep freedom to create a new shot.'
+            ? 'Treat multiple views as one consistent 3D product. Fit that exact product into the existing style/poster composition and hand/contact zone; never substitute a generic same-category object.'
+            : 'Treat multiple views as one consistent 3D product. Fit that exact product into the existing style/poster composition, support surface, and product zone; never substitute a generic same-category object and do not introduce hands or people.',
+        'This product lock applies to the SKU only, not to the whole source photo and not to the target layout; the style/poster reference or latest user request still controls the scene type and layout skeleton.'
     ];
     if(!allowHuman){
         parts.splice(parts.length - 1, 0, 'For appliances, electronics, tools, furniture, or mechanical products, preserve how the upper shell, lower shell, controls, feet, internal modules, motors, coils, wiring, brackets, supports, and seams physically connect.');
@@ -13626,48 +14181,71 @@ function smartProductTruthContrastLockPrompt(refs=[], allowHuman=false){
     const imageRefs = imageRefsOnly(refs);
     const productRefs = imageRefs
         .map((ref, index) => ({ref, index}))
-        .filter(item => item.ref?.role === 'product_truth_reference' || item.ref?.role === 'product_detail_reference');
+        .filter(item => (item.ref?.role === 'product_truth_reference' || item.ref?.role === 'product_detail_reference')
+            && smartReferenceIsFinalUploaded(item.ref, item.index));
     const styleRefs = imageRefs
         .map((ref, index) => ({ref, index}))
-        .filter(item => ['composition_reference','primary_style_reference','primary_reference'].includes(item.ref?.role));
+        .filter(item => ['composition_reference','primary_style_reference','primary_reference'].includes(item.ref?.role)
+            && (smartReferenceIsFinalUploaded(item.ref, item.index) || smartReferenceIsAnalysisOnlyGuidance(item.ref)));
     if(!productRefs.length || !styleRefs.length) return '';
-    const productLabels = productRefs.map(item => smartReferenceDisplayLabel(item.index)).join(', ');
-    const styleLabels = styleRefs.map(item => smartReferenceDisplayLabel(item.index)).join(', ');
+    const productLabels = productRefs.map(item => smartReferenceDisplayLabel(item.ref, item.index)).filter(Boolean).join(', ');
+    const styleLabels = [...new Set(styleRefs
+        .map(item => smartReferencePromptLabel(item.ref, item.index, 'analysis-only style guidance'))
+        .filter(Boolean))].join(', ');
     return [
         'PRODUCT TRUTH VS STYLE PRODUCT CONTRAST LOCK:',
-        `${styleLabels} are composition/poster references only; ${productLabels} are strict SKU references.`,
+        `${styleLabels} ${styleRefs.length === 1 ? 'provides' : 'provide'} composition/poster guidance only; ${productLabels} ${productRefs.length === 1 ? 'is a strict SKU reference' : 'are strict SKU references'}.`,
         'When a composition/poster reference contains an old or similar same-category product, treat that old product as a decoy placeholder. Do not use it as the product anatomy.',
+        'Replace the old product inside the same intended poster/interaction zone whenever possible. Do not convert the reference poster into a standalone product main image, single-person product close-up, or unrelated e-commerce hero layout solely because product-truth images are linked.',
         'Do not average, merge, or transplant any head/cap/nozzle shape, light or LED area, bristles, teeth, pins, circular control/display disk, button icons, handle curve, shell seam, accessory, color accent, or functional part from the composition/poster reference unless the same feature is clearly visible in the product-truth references.',
         'Preserve the product-truth silhouette and distinguishing visible features across views: front/side/top/back proportions, head or cap geometry, teeth/pins/bristle pattern, display/control placement, button/icon layout, seams, ridges, materials, color blocks, and real-world scale.',
         allowHuman
-            ? 'Adapt the hand grip and pose around the exact product-truth geometry; hands may touch or hold the product but must not hide or redesign the distinguishing head, control, button, teeth/pins/bristles, or handle details.'
-            : 'Adapt placement, lighting, props, and support surfaces around the exact product-truth geometry; do not add hands, people, or extra product-like parts.'
+            ? 'Adapt the hand grip/contact to the exact product-truth geometry inside the reference interaction zone; hands may touch or hold the product but must not hide or redesign the distinguishing head, control, button, teeth/pins/bristles, or handle details.'
+            : 'Adapt placement, lighting, props, and support surfaces around the exact product-truth geometry inside the reference product zone; do not add hands, people, or extra product-like parts.'
     ].join(' ');
 }
 function smartProductReplacementRolePrompt(refs=[], allowHuman=false){
     const images = imageRefsOnly(refs);
-    const hasProduct = images.some(ref => ref?.role === 'product_truth_reference' || ref?.role === 'product_detail_reference');
-    const hasStyle = images.some(ref => ['composition_reference','primary_style_reference','primary_reference'].includes(ref?.role));
-    if(!hasProduct || !hasStyle) return '';
+    const hasProduct = images.some((ref, index) => (ref?.role === 'product_truth_reference' || ref?.role === 'product_detail_reference')
+        && smartReferenceIsFinalUploaded(ref, index));
+    const styleRefs = images.filter((ref, index) => ['composition_reference','primary_style_reference','primary_reference'].includes(ref?.role)
+        && (smartReferenceIsFinalUploaded(ref, index) || smartReferenceIsAnalysisOnlyGuidance(ref)));
+    if(!hasProduct || !styleRefs.length) return '';
+    const styleWeight = Math.max(...styleRefs.map(ref => smartReferenceRoleWeight(ref)));
+    const aspectRecompose = styleRefs.some(ref => ref?.aspectRecomposeReference);
+    const strongLayout = styleWeight >= 85;
     return [
         'PRODUCT IDENTITY PRIORITY WITH NON-CLONE STYLE REFERENCE:',
-        'The composition/style reference is a loose visual-direction reference for campaign mood, lighting quality, color world, styling level, and broad subject relationship only.',
-        'Do not recreate the style reference as an identical or near-identical image. Change the exact pose, hand placement, facial expression, crop, product position, and small layout details unless the user explicitly requests exact copying.',
+        strongLayout
+            ? 'The composition/style reference is a strong layout and visual-structure reference. Preserve its recognizable poster skeleton, panel count, subject count, subject/product relative placement, scale hierarchy, graphic zones, lighting quality, color world, styling level, and broad subject relationship while replacing only the old product identity with the linked product truth.'
+            : 'The composition/style reference still controls the scene type, layout family, visual hierarchy, campaign mood, lighting quality, color world, styling level, and broad subject relationship according to its reference weight. The product reference does not demote it into loose inspiration.',
+        strongLayout
+            ? (aspectRecompose
+                ? 'The output aspect may differ, so adapt only the outer crop, blank space, stacking, or panel proportions needed to fit the selected canvas. Do not collapse the original multi-zone layout, delete panels, invent a new single-hero poster, or move the main subject/product to an unrelated zone.'
+                : 'Do not recreate the style reference as a pixel-identical image, but keep the same composition family and approximate placement zones. Vary only small details needed for product replacement and generation realism.')
+            : 'Avoid pixel-level copying, but do not treat product replacement as permission to redesign the scene. Preserve the reference layout family and main relationship; vary only crop/spacing/details according to the selected reference weight and latest user request.',
         'Any bottle, box, device, package, or old product visible or described in the composition/style reference is a replaceable placeholder and is NOT product truth.',
         allowHuman
-            ? 'Only the product-truth reference images define the generated SKU. Replace the old reference product with that exact SKU and adapt the hand grip around its real geometry.'
-            : 'Only the product-truth reference images define the generated SKU. Replace the old reference product with that exact SKU and adapt props, support surfaces, shadows, environment, and composition around its real geometry; do not add hands or people.',
+            ? 'Only the product-truth reference images define the generated SKU. Replace the old reference product with that exact SKU and adapt the hand grip/contact around its real geometry while keeping the poster/scene structure from the style reference.'
+            : 'Only the product-truth reference images define the generated SKU. Replace the old reference product with that exact SKU and adapt props, support surfaces, shadows, and environment around its real geometry while keeping the poster/scene structure from the style reference; do not add hands or people.',
+        'Do not infer a product main image, standalone product hero, single-product close-up, product-only render, or new e-commerce layout from the mere presence of product-truth references.',
         'Product-truth prompt nodes contribute identity and materials only. Ignore their standalone black/white background, floating-object, product-only, no-person, camera, crop, and layout instructions.',
         'Ignore every earlier phrase that calls the old reference object a hero product, generic product, serum bottle, dropper bottle, box, or alternate product shape.'
     ].join(' ');
 }
-function smartReferenceSimilarityRolePrompt(refs=[], allowHuman=false, node=null, prompt=''){
+function smartReferenceSimilarityRolePrompt(refs=[], allowHuman=false, node=null, prompt='', similarityState=null){
     const images = imageRefsOnly(refs);
-    const editBaseRefs = images.filter(ref => ref?.generatedEditBase || ref?.structureLock);
-    const styleRefs = images.filter(ref => ['composition_reference','primary_style_reference','primary_reference'].includes(ref?.role) && !(ref?.generatedEditBase || ref?.structureLock));
-    const productRefs = images.filter(ref => ref?.role === 'product_truth_reference' || ref?.role === 'product_detail_reference');
+    const editBaseRefs = images.filter((ref, index) => (ref?.generatedEditBase || ref?.structureLock) && smartReferenceIsFinalUploaded(ref, index));
+    const styleRefs = images.filter((ref, index) => ['composition_reference','primary_style_reference','primary_reference'].includes(ref?.role)
+        && !(ref?.generatedEditBase || ref?.structureLock)
+        && (smartReferenceIsFinalUploaded(ref, index) || smartReferenceIsAnalysisOnlyGuidance(ref)));
+    const productRefs = images.filter((ref, index) => (ref?.role === 'product_truth_reference' || ref?.role === 'product_detail_reference')
+        && smartReferenceIsFinalUploaded(ref, index));
     if(!editBaseRefs.length && !styleRefs.length && !productRefs.length) return '';
-    const styleWeight = styleRefs.length ? Math.max(...styleRefs.map(ref => smartReferenceRoleWeight(ref))) : 0;
+    const styleWeight = styleRefs.length ? smartReferenceSimilarityValue(similarityState, node, styleRefs) : 0;
+    const aspectRecompose = styleRefs.some(ref => ref?.aspectRecomposeReference);
+    const hasUploadedStyle = styleRefs.some((ref, index) => smartReferenceIsFinalUploaded(ref, index));
+    const styleSource = hasUploadedStyle ? 'uploaded poster' : 'analysis-only style guidance';
     const parts = [];
     if(editBaseRefs.length){
         const editBaseWeight = Math.max(...editBaseRefs.map(ref => smartReferenceRoleWeight(ref)));
@@ -13696,29 +14274,43 @@ function smartReferenceSimilarityRolePrompt(refs=[], allowHuman=false, node=null
                 : 'loose style inspiration';
         const samePersonRequested = smartPromptExplicitlyRequestsSamePerson(node, prompt);
         parts.push(allowHuman
-            ? `Style/reference similarity setting: ${styleWeight}/100 (${mode}). Use style references for mood, lighting quality, palette, beauty-ad polish, broad subject relationship, and approximate scale only.`
-            : `Style/reference similarity setting: ${styleWeight}/100 (${mode}). Use style references for mood, lighting quality, palette, advertising polish, product/environment relationship, and approximate scale only.`);
+            ? `Style/reference similarity setting: ${styleWeight}/100 (${mode}). ${styleWeight >= 85 ? 'Use style references as strong poster/layout and visual-structure references: preserve recognizable composition skeleton, panel/zone count, subject count, subject-product relationship, placement zones, scale hierarchy, lighting quality, palette, beauty-ad polish, and commercial hierarchy.' : 'Use style references for mood, lighting quality, palette, beauty-ad polish, broad subject relationship, and approximate scale only.'}`
+            : `Style/reference similarity setting: ${styleWeight}/100 (${mode}). ${styleWeight >= 85 ? 'Use style references as strong poster/layout and visual-structure references: preserve recognizable composition skeleton, panel/zone count, product-environment relationship, placement zones, scale hierarchy, lighting quality, palette, and commercial hierarchy.' : 'Use style references for mood, lighting quality, palette, advertising polish, product/environment relationship, and approximate scale only.'}`);
+        if(aspectRecompose){
+            parts.push(styleWeight >= 85
+                ? 'Output aspect differs from the style/poster reference: keep the recognizable poster skeleton while adapting the outer canvas. Preserve panel count, panel order, subject count, approximate subject/product placement zones, graphic-block rhythm, brand/header zone, sale-card/badge zone, lighting, palette, and hierarchy. Fit the selected canvas by extending clean background, adding breathing room, stacking existing zones, or proportionally scaling panels; do not invent a different layout.'
+                : 'Output aspect differs from the style/poster reference: preserve broad campaign layout logic and visual language, but adapt crop, spacing, and panel proportions for the selected output canvas without deleting key panels or changing the main subject/product relationship.');
+        }
         if(styleWeight < 85 && styleRefs.some(ref => ref?.posterCopyReference || ref?.copyTextLock)){
-            parts.push('Poster-copy text lock does not increase visual similarity: keep readable copy cues, but redesign the surrounding layout, product placement, background, camera, crop, props, and negative-space distribution as a new image.');
+            parts.push(productRefs.length
+                ? 'Poster-copy text lock plus product-SKU lock: keep readable copy cues and preserve the style/poster reference layout according to the selected reference weight. Replace only incompatible product identity/details with the linked SKU; do not redesign the surrounding layout into a product main image, single-hero close-up, or unrelated e-commerce composition.'
+                : 'Poster-copy text lock does not increase visual similarity: keep readable copy cues, but redesign the surrounding layout, product placement, background, camera, crop, props, and negative-space distribution as a new image.');
         }
         if(styleWeight >= 60 && styleRefs.some(ref => ref?.posterCopyDisabledReference || ref?.copyTextRemovalOnly)){
-            parts.push('Poster-copy disabled does not reduce visual similarity: preserve the uploaded poster composition family, subject/product placement, camera family, crop, palette, lighting, graphic panels, border/strip/badge positions, bottom sale-bar geometry, and commercial hierarchy. Remove only readable poster overlay copy; keep product/package labels.');
+            parts.push(aspectRecompose
+                ? `Poster-copy disabled: remove only readable poster overlay copy. Because the output aspect differs, adapt the exact crop and spacing, but preserve the ${styleSource} skeleton: panel count, panel order, approximate border/strip/badge zones, sale-card geometry family, subject/product placement zones, palette, lighting, and commercial hierarchy.`
+                : `Poster-copy disabled does not reduce visual similarity: preserve the ${styleSource} composition family, subject/product placement, camera family, crop, palette, lighting, graphic panels, border/strip/badge positions, bottom sale-bar geometry, and commercial hierarchy. Remove only readable poster overlay copy; keep product/package labels.`);
         }
         if(allowHuman) parts.push(smartPersonSimilarityInstruction(styleWeight, samePersonRequested));
         else parts.push('Human/body similarity is disabled: do not transfer any person, face, model, skin, hands, pose, hand placement, or body-part content from the reference or case library.');
-        parts.push(allowHuman
-            ? 'Never reproduce the reference image as a one-to-one copy. Always alter exact crop, pose, hand placement, expression, product position, and small layout details unless the user explicitly asks for exact duplication.'
-            : 'Never reproduce the reference image as a one-to-one copy. Always alter exact crop, product position, prop arrangement, surface contact, shadow, and small layout details unless the user explicitly asks for exact duplication.');
+        parts.push(styleWeight >= 85
+            ? (allowHuman
+                ? 'Avoid pixel-level duplication, but do not treat anti-copy as permission to redesign the poster. Keep the recognizable layout skeleton, subject count, approximate pose family, hand/product relationship, product zone, and commercial hierarchy; vary only micro-details, expression, and spacing needed for realism and the requested canvas.'
+                : 'Avoid pixel-level duplication, but do not treat anti-copy as permission to redesign the poster. Keep the recognizable layout skeleton, product zone, support-surface relationship, prop family, and commercial hierarchy; vary only micro-details and spacing needed for realism and the requested canvas.')
+            : (allowHuman
+                ? 'Never reproduce the reference image as a one-to-one copy. Always alter exact crop, pose, hand placement, expression, product position, and small layout details unless the user explicitly asks for exact duplication.'
+                : 'Never reproduce the reference image as a one-to-one copy. Always alter exact crop, product position, prop arrangement, surface contact, shadow, and small layout details unless the user explicitly asks for exact duplication.'));
     }
     if(productRefs.length){
-        parts.push('Product reference strength: 100/100 for SKU identity only. Product strength does not mean copying the whole reference photo.');
+        parts.push('Product reference strength: 100/100 for SKU identity only. Product strength does not mean copying the whole product-reference photo and does not request a product main image; preserve the style/poster reference or latest user prompt as the layout driver.');
     }
     return parts.join(' ');
 }
 function smartEditBaseStructureLockPrompt(refs=[], userPrompt=''){
-    const bases = imageRefsOnly(refs).filter(ref => ref?.generatedEditBase || ref?.structureLock);
+    const bases = imageRefsOnly(refs).filter((ref, index) => (ref?.generatedEditBase || ref?.structureLock)
+        && smartReferenceIsFinalUploaded(ref, index));
     if(!bases.length) return '';
-    const labels = bases.map((ref, index) => `${smartReferenceDisplayLabel(index)} (${ref.name || 'generated edit base'})`).join(', ');
+    const labels = bases.map((ref, index) => `${smartReferenceDisplayLabel(ref, index)} (${ref.name || 'generated edit base'})`).join(', ');
     const request = String(userPrompt || '').trim();
     const weight = Math.max(...bases.map(ref => smartReferenceRoleWeight(ref)));
     if(weight < 60){
@@ -13748,7 +14340,8 @@ function smartEditBaseStructureLockPrompt(refs=[], userPrompt=''){
 function smartPersonIdentityOverridePrompt(refs=[], allowHuman=false, node=null, prompt=''){
     if(!allowHuman) return '';
     const images = imageRefsOnly(refs);
-    const styleRefs = images.filter(ref => ['composition_reference','primary_style_reference','primary_reference'].includes(ref?.role));
+    const styleRefs = images.filter((ref, index) => ['composition_reference','primary_style_reference','primary_reference'].includes(ref?.role)
+        && (smartReferenceIsFinalUploaded(ref, index) || smartReferenceIsAnalysisOnlyGuidance(ref)));
     if(!styleRefs.length) return '';
     const styleWeight = Math.max(...styleRefs.map(ref => smartReferenceRoleWeight(ref)));
     const samePersonRequested = smartPromptExplicitlyRequestsSamePerson(node, prompt);
@@ -13759,7 +14352,8 @@ function smartPersonIdentityOverridePrompt(refs=[], allowHuman=false, node=null,
     ].join(' ');
 }
 function smartUploadedReferenceMapPrompt(refs=[], allowHuman=false){
-    const uploaded = imageRefsOnly(refs).filter(smartReferenceUploadAllowed);
+    const mappedUploads = smartFinalUploadedReferences(refs);
+    const uploaded = mappedUploads === null ? imageRefsOnly(refs).filter(smartReferenceUploadAllowed) : mappedUploads;
     if(!uploaded.length) return '';
     const lines = uploaded.map((ref, index) => {
         const role = ref?.role || 'reference';
@@ -13774,7 +14368,8 @@ function smartUploadedReferenceMapPrompt(refs=[], allowHuman=false){
             : role === 'composition_reference' || role === 'primary_style_reference' || role === 'primary_reference'
                 ? 'uploaded style/composition reference'
                 : 'supporting uploaded reference';
-        return `Image ${index + 1}: ${label} (${ref?.name || role}).`;
+        const uploadIndex = smartReferenceFinalUploadIndex(ref, index);
+        return `Image ${uploadIndex}: ${label} (${ref?.name || role}).`;
     });
     return [
         'UPLOADED IMAGE ROLE MAP:',
@@ -13784,29 +14379,55 @@ function smartUploadedReferenceMapPrompt(refs=[], allowHuman=false){
             : 'Only uploaded images in this map should be treated as visual inputs. Any earlier dropped/text-only style image is prompt guidance only and must not introduce a person, face, hand, body, or human pose.'
     ].join('\n');
 }
+function smartPartialHumanReferenceLockPrompt(node, refs=[], prompt=''){
+    const images = imageRefsOnly(refs);
+    const partialRefs = images
+        .map((ref, index) => ({ref, index}))
+        .filter(item => ['composition_reference','primary_style_reference','primary_reference','supporting_reference'].includes(item.ref?.role)
+            && smartReferenceLikelyContainsPartialHumanContent(node, item.ref)
+            && (smartReferenceIsFinalUploaded(item.ref, item.index) || smartReferenceIsAnalysisOnlyGuidance(item.ref)));
+    if(!partialRefs.length) return '';
+    if(smartPromptExplicitlyRequestsFullHumanCompletion(node, prompt)) return '';
+    const labels = partialRefs
+        .map(item => smartReferencePromptLabel(item.ref, item.index, 'analysis-only partial-human guidance'))
+        .filter(Boolean)
+        .join(', ');
+    return [
+        'PARTIAL HUMAN REFERENCE LOCK:',
+        `${labels || 'The reference image'} contains only partial human/body content such as a hand, fingers, arm, limb, cropped face, or incomplete body area.`,
+        'Use exactly the visible human/body parts from the reference as composition evidence. If the reference only shows a hand holding the product, output only that hand/partial limb relationship; if it only shows a cropped face edge or partial facial area, output only that cropped partial area.',
+        'Do not complete, extend, or invent a full person, full model, full face, full body, extra head, extra torso, extra arms, or full portrait from a partial-human reference.',
+        'Keep the partial human/body content subordinate to the non-person reference logic: composition, copy layout, palette, lighting, product placement, and commercial hierarchy remain the main reference targets.',
+        'A complete person/model is allowed only when the latest user request explicitly asks for a full person, full model, full face, full body, portrait, or complete human subject.'
+    ].join(' ');
+}
 function smartPosterCopyLockPrompt(node, refs=[]){
     if(!smartPosterCopyEnabledForGeneration(node)) return '';
-    const uploaded = imageRefsOnly(refs).filter(ref => (ref?.posterCopyReference || ref?.copyTextLock) && smartReferenceUploadAllowed(ref));
+    const uploaded = imageRefsOnly(refs).filter((ref, index) => (ref?.posterCopyReference || ref?.copyTextLock)
+        && smartReferenceIsFinalUploaded(ref, index));
     if(!uploaded.length) return '';
-    const labels = uploaded.map((ref, index) => `${smartReferenceDisplayLabel(index)} (${ref.name || 'primary poster reference'})`).join(', ');
+    const labels = uploaded.map((ref, index) => `${smartReferenceDisplayLabel(ref, index)} (${ref.name || 'primary poster reference'})`).join(', ');
     const latestProductIdentity = smartLatestProductIdentityOverrideValue(node);
+    const hasProductTruthRefs = imageRefsOnly(refs).some(ref => ref?.role === 'product_truth_reference' || ref?.role === 'product_detail_reference');
     return [
         'POSTER COPY LOCK:',
         `Use ${labels} as the authoritative source for readable poster/ad copy.`,
-        'Use this as a text-reading reference, not as a full-image composition template.',
-        'Preserve only the main readable headline, key price/offer, CTA, and important badge text when practical, with similar text-block placement and visual hierarchy.',
+        'Use this as a text-reading reference for poster copy; this copy lock must not downgrade the same uploaded image’s separate role as a style/layout/poster reference.',
+        'Preserve the main readable headline, key price/offer, CTA, important badge text, similar text-block placement, and visual hierarchy when practical.',
         latestProductIdentity ? `Product-copy compatibility override: the latest product identity is "${latestProductIdentity}". Do not preserve copied poster words that describe a different product category, body area, function, or usage scenario; adapt or simplify those words so the copy matches "${latestProductIdentity}".` : '',
         'Do not force exact line breaks, every small label, dense fine print, or pixel-level typography reconstruction; tiny text may become clean non-readable marks or simplified label blocks.',
-        'Do not copy the whole poster layout, border treatment, badge positions, arrows, product placement, background, camera, crop, aspect ratio, or negative-space map unless the reference weight is high and the latest request explicitly asks for a close recreation.',
-        'Product-detail references control only SKU/product appearance and must not suppress, remove, replace, translate, or invent the poster copy.',
+        'Do not force a pixel-level copy of the whole poster layout, border treatment, badge positions, arrows, product placement, background, camera, crop, aspect ratio, or negative-space map. When the reference weight is high, preserve the recognizable poster skeleton and relative zones rather than redesigning it.',
+        hasProductTruthRefs ? 'Product-detail references control only SKU/product appearance. They are not a request for a standalone product main image, single-product hero poster, product-only layout, or new e-commerce composition.' : '',
+        'Product-detail references must not suppress, remove, replace, translate, or invent the poster copy.',
         'This lock overrides earlier no-readable-text, no-brand-text, clean-no-text, or text-removal instructions unless the user explicitly switched Poster copy off. Do not interpret “do not invent random text” as permission to erase readable copy that already exists in the primary poster reference.',
         'Prefer a timely completed generation over perfect OCR of every minor text element.'
     ].filter(Boolean).join(' ');
 }
 function smartBrandIdentityPrompt(refs=[]){
-    const uploaded = imageRefsOnly(refs).filter(smartReferenceUploadAllowed);
+    const mappedUploads = smartFinalUploadedReferences(refs);
+    const uploaded = mappedUploads === null ? imageRefsOnly(refs).filter(smartReferenceUploadAllowed) : mappedUploads;
     if(!uploaded.length) return '';
-    const labels = uploaded.map((ref, index) => `${smartReferenceDisplayLabel(index)} (${ref.name || 'reference'})`).join(', ');
+    const labels = uploaded.map((ref, index) => `${smartReferenceDisplayLabel(ref, index)} (${ref.name || 'reference'})`).join(', ');
     return [
         'BRAND IDENTITY LOCK:',
         `Preserve visible brand identity marks in ${labels} as mandatory anchors: top-left or top-corner brand logo, brand name/wordmark, product-line mark, and store/festival brand tag when present.`,
@@ -13818,11 +14439,30 @@ function smartBrandIdentityPrompt(refs=[]){
 }
 function smartPosterCopyDisabledPrompt(node, refs=[]){
     if(smartPosterCopyEnabledForGeneration(node)) return '';
-    const uploaded = imageRefsOnly(refs).filter(smartReferenceUploadAllowed);
-    if(!uploaded.length) return '';
+    const images = imageRefsOnly(refs);
+    const mappedUploads = smartFinalUploadedReferences(images);
+    const uploaded = mappedUploads === null ? images.filter(smartReferenceUploadAllowed) : mappedUploads;
+    const styleRefs = images.filter((ref, index) => ['composition_reference','primary_style_reference','primary_reference'].includes(ref?.role)
+        && (smartReferenceIsFinalUploaded(ref, index) || smartReferenceIsAnalysisOnlyGuidance(ref)));
+    const hasUploadedStyle = styleRefs.some((ref, index) => smartReferenceIsFinalUploaded(ref, index));
+    const hasAnalysisOnlyStyle = styleRefs.some(smartReferenceIsAnalysisOnlyGuidance);
+    if(!uploaded.length && !hasAnalysisOnlyStyle) return '';
+    const styleSource = hasUploadedStyle ? 'the uploaded primary reference' : 'analysis-only style guidance';
+    const aspectRecompose = smartAspectRecomposeReferences(node, refs, settings).length > 0;
+    if(aspectRecompose){
+        return [
+            'POSTER COPY OFF / PRODUCT LABELS ON:',
+            `Use ${styleSource} as strong campaign-layout and visual-style guidance while removing readable poster/ad overlay text.`,
+            'Because the selected output canvas ratio differs from the source poster, adapt only the outer crop, spacing, and panel proportions needed for the new canvas. Preserve the recognizable poster skeleton: panel count, panel order, subject/product placement zones, brand/header zone, badge/sale-card geometry family, graphic blocks, palette, lighting, and commercial hierarchy.',
+            'Replace removed poster copy with clean blank space, non-readable short marks, or simple graphic blocks in the same relative zones. Do not collapse a multi-panel poster into a single hero image or invent a new poster layout unless the user explicitly requests it.',
+            'Preserve poster brand identity elements when present; adapt their scale/spacing for the selected canvas instead of deleting the header zone.',
+            'Do not remove text printed on the product or package itself. Preserve product-surface brand marks, logos, bottle/box/tube labels, SKU names, volume marks, and printed packaging graphics as part of product identity.',
+            'Product-detail references keep strict SKU identity; poster-copy-off is not permission to redesign the product.'
+        ].join(' ');
+    }
     return [
         'POSTER COPY OFF / PRODUCT LABELS ON:',
-        'Use the uploaded primary reference as a close poster-layout and campaign-composition reference while removing readable poster/ad overlay text.',
+        `Use ${styleSource} as close poster-layout and campaign-composition guidance while removing readable poster/ad overlay text.`,
         'Preserve the reference composition family according to the reference weight: subject/product placement, crop, camera family, color palette, lighting mood, background gradient, graphic panels, border/strip/badge positions, bottom sale-bar geometry, and commercial hierarchy.',
         'Remove or avoid readable poster/ad overlay text copied from the reference image: large headlines, slogans, price tags, CTA buttons, promotional badges, ranking medallions, banners, UI text, external watermarks, and decorative typography outside product surfaces.',
         'Preserve poster brand identity elements from the reference, including top-corner brand logos, brand names, product-line marks, and store/festival brand tags. These are identity anchors, not removable poster copy.',
@@ -13833,7 +14473,8 @@ function smartPosterCopyDisabledPrompt(node, refs=[]){
     ].join(' ');
 }
 function smartProductHandInteractionPrompt(refs=[], allowHuman=false){
-    const hasProduct = imageRefsOnly(refs).some(ref => ref?.role === 'product_truth_reference' || ref?.role === 'product_detail_reference');
+    const hasProduct = imageRefsOnly(refs).some((ref, index) => (ref?.role === 'product_truth_reference' || ref?.role === 'product_detail_reference')
+        && smartReferenceIsFinalUploaded(ref, index));
     if(!hasProduct || !allowHuman) return '';
     return [
         'MANDATORY PRODUCT-HAND INTERACTION:',
@@ -13841,6 +14482,22 @@ function smartProductHandInteractionPrompt(refs=[], allowHuman=false){
         'Do not let the product float, merely touch the cheek, stick to the face, appear as an earring, appear behind the hand, or be unsupported.',
         'If hands are visible, at least one fingertip or palm edge must overlap the product with correct occlusion and contact shadows. Rebuild the hand pose around the exact product geometry.'
     ].join(' ');
+}
+function smartFinalProductCheckPrompt(refs=[], allowHuman=false, partialHuman=false, fullHumanRequested=false){
+    const productRefs = imageRefsOnly(refs)
+        .map((ref, index) => ({ref, index}))
+        .filter(item => (item.ref?.role === 'product_truth_reference' || item.ref?.role === 'product_detail_reference')
+            && smartReferenceIsFinalUploaded(item.ref, item.index));
+    if(!productRefs.length) return '';
+    const labels = productRefs.map(item => smartReferenceDisplayLabel(item.ref, item.index)).filter(Boolean).join(', ');
+    if(fullHumanRequested || allowHuman){
+        return partialHuman && !fullHumanRequested
+            ? `FINAL PRODUCT CHECK: any visible partial human/body part must stay partial and match the reference layout around ${labels}; do not complete it into a full person, full model, full face, or full body.`
+            : `FINAL PRODUCT CHECK: any object held or touched by the permitted human must match ${labels}, not the old object in the style reference.`;
+    }
+    return partialHuman
+        ? `FINAL PRODUCT CHECK: the hero object must match ${labels}, not the old object in the style reference. Preserve only the partial human/body parts already present in the reference; do not complete them into a full person, full model, full face, or full body.`
+        : `FINAL PRODUCT CHECK: the hero object must match ${labels}, not the old object in the style reference. No person, hand, arm, face, or body part may appear.`;
 }
 function smartMechanicalStructureIntentText(node, prompt='', refs=[]){
     const refText = (refs || []).map(ref => [ref?.name, ref?.role, ref?.title, ref?.categoryName].filter(Boolean).join(' ')).join(' ');
@@ -13869,19 +14526,73 @@ function smartMechanicalStructurePrompt(node, refs=[], prompt=''){
         'If a specific motor count or component count is requested, render exactly that many compact internal modules and keep them attached to the product structure.'
     ].join(' ');
 }
-function smartSanitizeProductReplacementPrompt(prompt){
+function smartProductIdentityOverrideIsGeneric(section=''){
+    const match = /LATEST PRODUCT IDENTITY OVERRIDE:[\s\S]{0,220}?product\/category as "([^"]+)"/i.exec(String(section || ''));
+    return Boolean(match && !smartCleanProductIdentityName(match[1]));
+}
+function smartCleanPromptNegativeConflicts(section, options={}){
+    let text = String(section || '');
+    const posterCopyActive = options?.posterCopyEnabled === true || /POSTER COPY LOCK:|Poster copy enabled:/i.test(text);
+    const brandIdentityActive = options?.brandIdentityEnabled === true || /BRAND IDENTITY LOCK:/i.test(text);
+    if(!(posterCopyActive || brandIdentityActive)) return text;
+    text = text
+        .replace(/\bno\s+(?:brand\s+)?logos?\b\s*,?\s*/gi, '')
+        .replace(/\bno\s+(?:copied|readable|brand)\s+text\b\s*,?\s*/gi, '')
+        .replace(/\bno\s+logo\/?text\b\s*,?\s*/gi, '')
+        .replace(/(?:do not|don't|never|avoid)\s+copy(?:ing)?\s+(?:brand\s*)?(?:text|logo|logos|wordmark|watermark)(?:\s*\/\s*(?:text|logo|logos|wordmark|watermark))*\s*[;,.]?/gi, 'do not add unrelated external watermarks; ')
+        .replace(/(?:不要|避免|禁止|不得|不能)[^。\n；;,，]*(?:复制|保留)?[^。\n；;,，]*(?:品牌文字|品牌标识|logo|Logo|LOGO|文案|文字|水印)[^。\n；;,，]*[。\n；;,，]?/g, '不要添加无关外部水印；');
+    text = text.replace(/Negative prompt:\s*(?:[,，;；\s]*)/i, 'Negative prompt:\n');
+    text = text.replace(/[ \t]*[,，;；][ \t]*([,，;；])/g, '$1').replace(/\n\s*[,，;；]\s*/g, '\n');
+    return text.trim();
+}
+function smartSanitizeProductReplacementPrompt(prompt, options={}){
+    const opts = typeof options === 'boolean' ? {allowHuman:options} : (options || {});
+    const allowHuman = opts.allowHuman === true;
     const sections = String(prompt || '').split(/\n{2,}/).map(section => section.trim()).filter(Boolean);
     const dropHeadingPattern = /^(?:Reference anchors|Reference summary|Shared style anchor|Generation guidance|Variant plan|Case-library support|Loose style guidance|Composition lock|Lighting\/material lock):/i;
-    const oldProductPattern = /\b(?:pink|gold|beige|champagne|dusty pink|silicone top|raised massage nodes|old product|reference object|serum bottle|dropper bottle|generic product)\b|粉|金|米色|香槟|硅胶|按摩凸点|旧产品|参考图产品/i;
+    const oldProductPattern = /\b(?:pink|gold|beige|champagne|dusty pink|orange|weighted cuffs?|wrist[-\s]?worn fitness accessories?|wrist[-\s]?(?:weights?|accessor(?:y|ies)|bands?)|wearable wrist|fitness accessories?|silicone top|raised massage nodes|old product|reference object|serum bottle|dropper bottle|generic product)\b|粉|金|米色|香槟|橙色腕|腕饰|配饰产品|负重|腕带|硅胶|按摩凸点|旧产品|参考图产品/i;
+    const productHeroConflictPattern = /\b(?:hero product|style-reference hero object|style-reference subject|reference_subject_surface|unmistakable hero product|product category|product_truth|reference product|old product|wrong product hierarchy)\b|主角产品|主体产品|产品类别|参考图产品|旧产品/i;
     const keepPriorityPattern = /^(?:Highest priority user modification request|Active additional generation guidance|Latest product identity override|Product truth references|Product recognition summary|MECHANICAL STRUCTURE LOCK|NO HUMAN SUBJECT LOCK|UPLOADED IMAGE ROLE MAP|PRODUCT IDENTITY PRIORITY|LATEST PRODUCT IDENTITY OVERRIDE|Style\/reference similarity setting|Original reference similarity|Negative prompt|FINAL PRODUCT CHECK)/i;
-    const kept = sections.filter(section => {
-        if(keepPriorityPattern.test(section)) return true;
-        if(dropHeadingPattern.test(section)) return false;
-        if(oldProductPattern.test(section) && /(?:product_truth|hero product|product material|product surface|product body|massage device|appliance|SKU|产品|商品|主体|机身|材质|颜色)/i.test(section)){
-            return false;
+    const cleanedSections = sections.map(section => {
+        let next = section;
+        if(smartProductIdentityOverrideIsGeneric(next)) return '';
+        if(/^Negative prompt:/i.test(next)) next = smartCleanPromptNegativeConflicts(next, opts);
+        if(opts?.preservePersonIdentityLock !== true
+            && /^PERSON IDENTITY CONTROL:/i.test(next)
+            && /(?:Person identity lock enabled|same recognizable model\/person|Keep the same recognizable|same-person identity)/i.test(next)){
+            return '';
         }
-        return true;
-    });
+        if(opts?.preservePersonIdentityLock !== true
+            && /^Style\/reference similarity setting:/i.test(next)
+            && /(?:Person identity lock enabled|same recognizable model\/person|Keep the same recognizable|same-person identity)/i.test(next)){
+            return '';
+        }
+        if(keepPriorityPattern.test(next)) return next;
+        if(!allowHuman && dropHeadingPattern.test(next)) return '';
+        if(/^Reference summary:/i.test(next)){
+            const lines = next.split('\n').map(line => line.trim()).filter(Boolean);
+            const styleOnly = lines.filter(line => {
+                if(/^product_truth\s*:/i.test(line)) return false;
+                if(/^key_constraints\s*:/i.test(line) && productHeroConflictPattern.test(line)) return false;
+                if(oldProductPattern.test(line) && productHeroConflictPattern.test(line)) return false;
+                return true;
+            }).join('\n').trim();
+            return /^Reference summary:\s*$/i.test(styleOnly) ? '' : styleOnly;
+        }
+        if(/^Generation guidance:/i.test(next)
+            && oldProductPattern.test(next)
+            && productHeroConflictPattern.test(next)
+            && !/Latest user modification request|Highest priority user modification request/i.test(next)){
+            return '';
+        }
+        if(oldProductPattern.test(next)
+            && productHeroConflictPattern.test(next)
+            && /(?:product_truth|hero product|product material|product surface|product body|massage device|appliance|SKU|产品|商品|主体|机身|材质|颜色)/i.test(next)){
+            return '';
+        }
+        return next;
+    }).map(section => section.trim()).filter(Boolean);
+    const kept = cleanedSections;
     return smartNormalizePromptText(kept.join('\n\n'));
 }
 function smartProductReplacementStyleBridgePrompt(allowHuman=false){
@@ -13895,6 +14606,7 @@ function smartProductReplacementStyleBridgePrompt(allowHuman=false){
     ].join(' ');
 }
 const smartProductRecognitionCache = new Map();
+const smartLinkedProductRecognitionInFlight = new Map();
 const SMART_PRODUCT_RECOGNITION_PROMPT_VERSION = 'phase4-product-facts-v1';
 function smartProductTruthRefs(refs=[]){
     return imageRefsOnly(refs).filter(ref => ref?.role === 'product_truth_reference' || ref?.role === 'product_detail_reference');
@@ -13935,7 +14647,10 @@ function normalizeSmartProductFacts(value){
     Object.keys(facts).forEach(key => {
         if(Array.isArray(facts[key])) facts[key] = Array.isArray(raw[key]) ? raw[key].map(item => String(item || '').trim()).filter(Boolean).slice(0, 16) : [];
         else if(key === 'confidence') facts[key] = Math.max(0, Math.min(1, Number(raw[key]) || 0));
-        else facts[key] = String(raw[key] || '').trim().slice(0, 160);
+        else {
+            const text = String(raw[key] || '').trim();
+            facts[key] = text.length <= 160 ? text : '';
+        }
     });
     return facts;
 }
@@ -13945,33 +14660,114 @@ function parseSmartProductFacts(text){
     try { return normalizeSmartProductFacts(JSON.parse(jsonText)); }
     catch(_) {
         const facts = defaultSmartProductFacts();
-        facts.must_preserve = value ? [value.slice(0, 700)] : [];
+        const safeSummary = value.length <= 700 ? value : smartClipPromptSection(value, 700, true);
+        facts.must_preserve = safeSummary ? [safeSummary] : [];
         facts.uncertain = ['Product recognition returned non-JSON text; using it as a conservative summary.'];
         facts.confidence = 0.35;
         return facts;
     }
 }
+function smartSelectAtomicProductFactLines(fields=[], maxLength=1100){
+    const selected = [];
+    let used = 0;
+    [...fields]
+        .filter(field => field?.text)
+        .sort((a, b) => b.priority - a.priority || a.index - b.index)
+        .forEach(field => {
+            const separatorLength = selected.length ? 1 : 0;
+            if(used + separatorLength + field.text.length > maxLength) return;
+            selected.push(field);
+            used += separatorLength + field.text.length;
+        });
+    return selected.sort((a, b) => a.index - b.index).map(field => field.text);
+}
 function smartProductFactsSummary(facts){
     const f = normalizeSmartProductFacts(facts);
-    const parts = [
-        f.category ? `category: ${f.category}` : '',
-        f.brand ? `brand/logo: ${f.brand}` : '',
-        f.model ? `model: ${f.model}` : '',
-        f.main_colors.length ? `colors: ${f.main_colors.join(', ')}` : '',
-        f.materials.length ? `materials: ${f.materials.join(', ')}` : '',
-        f.silhouette.length ? `silhouette: ${f.silhouette.join(', ')}` : '',
-        f.controls.length ? `controls: ${f.controls.join(', ')}` : '',
-        f.ports.length ? `ports: ${f.ports.join(', ')}` : '',
-        f.logos.length ? `logos/text: ${f.logos.join(', ')}` : '',
-        f.must_preserve.length ? `must preserve: ${f.must_preserve.join('; ')}` : '',
-        f.forbidden_changes.length ? `forbidden changes: ${f.forbidden_changes.join('; ')}` : '',
-        f.uncertain.length ? `uncertain: ${f.uncertain.join('; ')}` : '',
-        f.conflicts?.length ? `conflicts: ${f.conflicts.join('; ')}` : ''
-    ].filter(Boolean);
-    return parts.join('\n').slice(0, 1100);
+    const fields = [
+        {index:0, priority:140, text:f.category ? `category: ${f.category}` : ''},
+        {index:1, priority:100, text:f.brand ? `brand/logo: ${f.brand}` : ''},
+        {index:2, priority:95, text:f.model ? `model: ${f.model}` : ''},
+        {index:3, priority:130, text:f.main_colors.length ? `colors: ${f.main_colors.join(', ')}` : ''},
+        {index:4, priority:129, text:f.materials.length ? `materials: ${f.materials.join(', ')}` : ''},
+        {index:5, priority:128, text:f.silhouette.length ? `silhouette: ${f.silhouette.join(', ')}` : ''},
+        {index:6, priority:127, text:f.controls.length ? `controls: ${f.controls.join(', ')}` : ''},
+        {index:7, priority:90, text:f.ports.length ? `ports: ${f.ports.join(', ')}` : ''},
+        {index:8, priority:85, text:f.logos.length ? `logos/text: ${f.logos.join(', ')}` : ''},
+        {index:9, priority:135, text:f.must_preserve.length ? `must preserve: ${f.must_preserve.join('; ')}` : ''},
+        {index:10, priority:134, text:f.forbidden_changes.length ? `forbidden changes: ${f.forbidden_changes.join('; ')}` : ''},
+        {index:11, priority:20, text:f.uncertain.length ? `uncertain: ${f.uncertain.join('; ')}` : ''},
+        {index:12, priority:40, text:f.conflicts?.length ? `conflicts: ${f.conflicts.join('; ')}` : ''}
+    ];
+    return smartSelectAtomicProductFactLines(fields, 1100).join('\n');
+}
+function smartProductTruthReferenceSetHash(refs=[]){
+    const productRefs = smartProductTruthRefs(refs);
+    if(!productRefs.length) return '';
+    return smartHashText(smartStableJson(productRefs.map(ref => ({
+        url:smartReferenceUrlKey(ref.url || ref.sourceUrl || ''),
+        role:ref.role || '',
+        name:ref.name || ''
+    }))));
 }
 function smartProductFactsForNode(node){
     return node?.productFacts ? normalizeSmartProductFacts(node.productFacts) : null;
+}
+function smartClearEmptyProductFactsBlocker(node){
+    if(!node) return false;
+    const hasFactsState = Boolean(node.productFacts || node.productFactsLocked || node.productFactsUserEdited || node.productFactsNeedsRefresh);
+    if(!hasFactsState || smartProductFactsSummary(node.productFacts)) return false;
+    delete node.productFacts;
+    delete node.productFactsLocked;
+    delete node.productFactsUserEdited;
+    delete node.productFactsNeedsRefresh;
+    delete node.productFactsPromptVersion;
+    delete node.productFactsReferenceSetHash;
+    delete node.productFactsRecognizedAt;
+    delete node.productFactsRecognitionModel;
+    delete node.productFactsRecognitionSource;
+    return true;
+}
+function smartNodeProductFactsMatchRefs(node, refs=[]){
+    const facts = smartProductFactsForNode(node);
+    if(!node || !facts || node.productFactsNeedsRefresh) return false;
+    if(node.productFactsPromptVersion && node.productFactsPromptVersion !== SMART_PRODUCT_RECOGNITION_PROMPT_VERSION) return false;
+    const currentHash = smartProductTruthReferenceSetHash(refs);
+    if(!currentHash) return false;
+    if(!node.productFactsReferenceSetHash) return Boolean(node.productFactsLocked || node.productFactsUserEdited);
+    return node.productFactsReferenceSetHash === currentHash;
+}
+function smartProductFactsRecordForNode(node, refs=[], seen=new Set()){
+    if(!node?.id || seen.has(node.id)) return null;
+    seen.add(node.id);
+    if(smartNodeProductFactsMatchRefs(node, refs)){
+        return {
+            facts:smartProductFactsForNode(node),
+            summary:smartProductFactsSummary(node.productFacts),
+            model:node.productFactsRecognitionModel || 'linked_product_facts',
+            linked:true,
+            locked:Boolean(node.productFactsLocked),
+            userEdited:Boolean(node.productFactsUserEdited)
+        };
+    }
+    const upstream = inputNodesFor(node);
+    for(const input of upstream){
+        const record = smartProductFactsRecordForNode(input, refs, seen);
+        if(record) return record;
+    }
+    return null;
+}
+function smartProductRecognitionPromptFromFacts(facts){
+    const summary = smartProductFactsSummary(facts);
+    if(!summary) return '';
+    return [
+        'Product recognition summary from product reference images:',
+        summary,
+        'Use this as the strict product identity and structure anchor. Keep the same product, structural relationships, shell/layer geometry, control/display placement, label-block layout, material, color, finish, and visible product-surface marks; do not substitute a generic same-category product or invent unreadable text.'
+    ].join('\n');
+}
+function smartProductRecognitionPromptForNode(node, refs=[]){
+    const record = smartProductFactsRecordForNode(node, refs);
+    return record?.facts ? smartProductRecognitionPromptFromFacts(record.facts) : '';
 }
 function smartProductFactsStatus(node){
     const facts = smartProductFactsForNode(node);
@@ -13980,14 +14776,15 @@ function smartProductFactsStatus(node){
     bits.push(`confidence ${Math.round((Number(facts.confidence) || 0) * 100)}%`);
     if(facts.uncertain?.length) bits.push(`${facts.uncertain.length} uncertain`);
     if(facts.conflicts?.length) bits.push(`${facts.conflicts.length} conflicts`);
+    if(node?.productFactsRecognizing) bits.push('recognizing');
     if(node?.productFactsUserEdited) bits.push('edited');
     if(node?.productFactsLocked) bits.push('locked');
     return bits.join(' / ');
 }
 function smartProductFactsPanelHtml(node){
     const facts = smartProductFactsForNode(node);
-    const shouldShow = Boolean(facts || node?.productFactsLocked || node?.productFactsUserEdited || node?.productFactsNeedsRefresh);
-    if(!shouldShow || !isSmartImageNode(node)) return '';
+    const shouldShow = Boolean(facts || node?.productFactsLocked || node?.productFactsUserEdited || node?.productFactsNeedsRefresh || node?.productFactsRecognizing);
+    if(!shouldShow || !(isSmartImageNode(node) || node?.type === 'smart-prompt')) return '';
     const value = facts ? JSON.stringify(facts, null, 2) : JSON.stringify(defaultSmartProductFacts(), null, 2);
     const locked = Boolean(node.productFactsLocked);
     const status = smartProductFactsStatus(node) || 'not recognized';
@@ -14040,6 +14837,91 @@ async function smartAnalyzeProductTruthRefs(refs=[], runSettings=settings){
     const record = {summary, facts, cacheHit:false, cacheKey:key, cacheSkipped:!key, model, promptVersion:SMART_PRODUCT_RECOGNITION_PROMPT_VERSION, recognizedAt:Date.now()};
     if(key) smartProductRecognitionCache.set(key, record);
     return record;
+}
+function smartProductRecognitionRefsForNode(node, ctx=smartLoopContext){
+    if(!node) return [];
+    if(node.type === 'smart-prompt'){
+        const refs = promptNodeCurrentReferenceImages(node, false, ctx);
+        return smartProductTruthRefs(smartAssignReferenceRoles(node, refs));
+    }
+    if(isGeneratedImagePromptComposerNode(node) && node?.generatedPromptInitialized){
+        return smartProductTruthRefs(generatedImagePromptReferences(node));
+    }
+    if(isSmartRunnableNode(node) || node.type === 'smart-loop'){
+        const refs = smartAssignReferenceRoles(node, uniqueReferenceImages(defaultReferenceImagesFor(node, false, ctx)));
+        return smartProductTruthRefs(refs);
+    }
+    return [];
+}
+function scheduleLinkedProductRecognition(nodeId){
+    if(!nodeId) return;
+    window.setTimeout(() => {
+        preAnalyzeLinkedProductReferences(nodeId).catch(err => {
+            console.warn('Linked product recognition failed; continuing without pre-analysis.', err);
+        });
+    }, 0);
+}
+function schedulePendingLinkedProductRecognitions(){
+    let changed = false;
+    nodes.forEach(node => {
+        const clearedEmptyBlocker = smartClearEmptyProductFactsBlocker(node);
+        if(clearedEmptyBlocker) changed = true;
+        const productRefs = smartProductRecognitionRefsForNode(node);
+        if(productRefs.length && (clearedEmptyBlocker || node?.productFactsNeedsRefresh)){
+            scheduleLinkedProductRecognition(node.id);
+        }
+    });
+    return changed;
+}
+async function preAnalyzeLinkedProductReferences(nodeId){
+    const node = nodes.find(n => n.id === nodeId);
+    const clearedEmptyBlocker = smartClearEmptyProductFactsBlocker(node);
+    if(clearedEmptyBlocker){
+        scheduleSave();
+        render();
+    }
+    if(!node || node.productFactsLocked || node.productFactsUserEdited) return;
+    const productRefs = smartEvenlySampleReferences(smartProductRecognitionRefsForNode(node), 5);
+    if(!productRefs.length) return;
+    const hash = smartProductTruthReferenceSetHash(productRefs);
+    if(!hash) return;
+    if(!node.productFactsNeedsRefresh && smartNodeProductFactsMatchRefs(node, productRefs)) return;
+    const key = `${node.id}:${hash}`;
+    if(smartLinkedProductRecognitionInFlight.has(key)) return;
+    smartLinkedProductRecognitionInFlight.set(key, true);
+    node.productFactsRecognizing = true;
+    node.productFactsReferenceSetHash = hash;
+    render();
+    try {
+        const runSettings = isSmartRunnableNode(node) ? smartSettingsForNode(node) : settings;
+        const recognized = await smartAnalyzeProductTruthRefs(productRefs, runSettings);
+        const latestNode = nodes.find(n => n.id === nodeId);
+        if(!latestNode || latestNode.productFactsLocked || latestNode.productFactsUserEdited) return;
+        const latestRefs = smartEvenlySampleReferences(smartProductRecognitionRefsForNode(latestNode), 5);
+        const latestHash = smartProductTruthReferenceSetHash(latestRefs);
+        if(latestHash !== hash) return;
+        if(recognized?.facts){
+            latestNode.productFacts = normalizeSmartProductFacts(recognized.facts);
+            latestNode.productFactsRecognizedAt = Date.now();
+            latestNode.productFactsPromptVersion = SMART_PRODUCT_RECOGNITION_PROMPT_VERSION;
+            latestNode.productFactsReferenceSetHash = hash;
+            latestNode.productFactsRecognitionModel = recognized.model || '';
+            latestNode.productFactsRecognitionSource = 'linked_reference';
+            latestNode.productFactsNeedsRefresh = false;
+            delete latestNode.promptBeforeGuard;
+            delete latestNode.promptAfterGuard;
+            delete latestNode.generationSpec;
+            scheduleSave();
+            render();
+        }
+    } finally {
+        smartLinkedProductRecognitionInFlight.delete(key);
+        const latestNode = nodes.find(n => n.id === nodeId);
+        if(latestNode?.productFactsRecognizing){
+            delete latestNode.productFactsRecognizing;
+            render();
+        }
+    }
 }
 async function smartPromptWithProductRecognition(prompt, refs=[], runSettings=settings){
     if(!runSettings?.productRecognitionEnabled) return prompt;
@@ -14556,35 +15438,75 @@ function buildPromptRequest(node, overrideDefaultImages=null, consumeDefault=fal
 const buildPromptRequestBase = buildPromptRequest;
 buildPromptRequest = function(node, overrideDefaultImages=null, consumeDefault=false, ctx=smartLoopContext){
     const request = buildPromptRequestBase(node, overrideDefaultImages, consumeDefault, ctx);
-    const refs = smartDecorateReferenceWeights(node, smartPrioritizeGenerationReferences(smartAssignReferenceRoles(node, request.refs || []), node), request.prompt || request.displayPrompt || '');
-    const allowHuman = smartGenerationAllowsHuman(node, refs, request.prompt || request.displayPrompt || '');
-    const noHumanPrompt = smartNoHumanSubjectPrompt(allowHuman);
-    const editBasePrompt = smartEditBaseStructureLockPrompt(refs, request.displayPrompt || request.prompt || '');
+    const assignedRefs = smartAssignReferenceRoles(node, request.refs || []);
+    const prioritizedRefs = smartPrioritizeGenerationReferences(assignedRefs, node);
+    const similarityState = smartResolveEffectiveReferenceSimilarity(node, prioritizedRefs);
+    const referenceSelectionBaseClean = smartStripStaleReferenceSimilarityStatements(request.prompt || request.displayPrompt || '');
+    const referenceSelectionBasePrompt = referenceSelectionBaseClean.text || request.prompt || request.displayPrompt || '';
+    const decoratedRefs = smartDecorateReferenceWeights(node, prioritizedRefs, referenceSelectionBasePrompt, settings, similarityState);
+    const preliminaryEditBasePrompt = smartEditBaseStructureLockPrompt(decoratedRefs, request.displayPrompt || referenceSelectionBasePrompt);
+    const referenceSelectionPrompt = [
+        outputCanvasLockPrompt(settings),
+        smartRelaxPromptForReferenceSimilarity(smartRelaxPromptForCameraControl(referenceSelectionBasePrompt)),
+        preliminaryEditBasePrompt,
+        smartLatestProductIdentityOverrideValue(node, referenceSelectionBasePrompt) ? 'LATEST PRODUCT IDENTITY OVERRIDE:' : ''
+    ].filter(Boolean).join('\n\n');
+    const finalReferenceState = smartResolveFinalReferenceUploads(decoratedRefs, referenceSelectionPrompt, settings, 'image');
+    const refs = finalReferenceState.references;
+    const remappedRequestPrompt = smartRemapMentionedReferencePrompt(request, refs);
+    const allowHuman = smartGenerationAllowsHuman(node, refs, remappedRequestPrompt || request.displayPrompt || '');
+    const aspectRecomposePrompt = smartOutputAspectRecomposePrompt(node, refs, settings);
+    const editBasePrompt = smartEditBaseStructureLockPrompt(refs, request.displayPrompt || remappedRequestPrompt || '');
     const rolePrompt = smartProductTruthRolePrompt(refs, allowHuman);
     const productContrastPrompt = smartProductTruthContrastLockPrompt(refs, allowHuman);
     const replacementPrompt = smartProductReplacementRolePrompt(refs, allowHuman);
     const replacementMode = Boolean(replacementPrompt);
     const productOnlyReplacementMode = replacementMode && !allowHuman;
-    const rawCleanRequestPrompt = productOnlyReplacementMode
-        ? smartSanitizeProductReplacementPrompt(request.prompt || '')
-        : (request.prompt || '');
-    const cleanRequestPrompt = smartLatestRequestChangesBackgroundPalette(node, rawCleanRequestPrompt)
-        ? smartStripStaleBackgroundPaletteLocks(rawCleanRequestPrompt)
-        : rawCleanRequestPrompt;
-    const similarityPrompt = smartReferenceSimilarityRolePrompt(refs, allowHuman, node, cleanRequestPrompt || request.displayPrompt || request.prompt || '');
-    const personOverridePrompt = smartPersonIdentityOverridePrompt(refs, allowHuman, node, cleanRequestPrompt || request.displayPrompt || request.prompt || '');
+    const rawCleanRequestPrompt = replacementMode
+        ? smartSanitizeProductReplacementPrompt(remappedRequestPrompt, {
+            allowHuman,
+            posterCopyEnabled:smartPosterCopyEnabledForGeneration(node),
+            brandIdentityEnabled:true,
+            preservePersonIdentityLock:smartCurrentUserExplicitlyRequestsSamePerson(node, remappedRequestPrompt || request.displayPrompt || '')
+        })
+        : remappedRequestPrompt;
+    const staleSimilarityClean = smartStripStaleReferenceSimilarityStatements(rawCleanRequestPrompt);
+    const requestPromptWithoutStaleSimilarity = staleSimilarityClean.text;
+    const cleanRequestPrompt = smartLatestRequestChangesBackgroundPalette(node, requestPromptWithoutStaleSimilarity)
+        ? smartStripStaleBackgroundPaletteLocks(requestPromptWithoutStaleSimilarity)
+        : requestPromptWithoutStaleSimilarity;
+    const similarityPrompt = smartReferenceSimilarityRolePrompt(refs, allowHuman, node, cleanRequestPrompt || request.displayPrompt || remappedRequestPrompt || '', similarityState);
+    const hasStyleReference = imageRefsOnly(refs).some((ref, index) => ['composition_reference','primary_style_reference','primary_reference'].includes(ref?.role)
+        && !(ref?.generatedEditBase || ref?.structureLock)
+        && (smartReferenceIsFinalUploaded(ref, index) || smartReferenceIsAnalysisOnlyGuidance(ref)));
+    const requestSimilarityStateBase = {
+        ...similarityState,
+        removedStaleSimilarityStatements:smartSimilarityRemovedUnique([...referenceSelectionBaseClean.removed, ...staleSimilarityClean.removed]),
+        similarityAppliedToUploadDecision:decoratedRefs.some(ref => ['composition_reference','primary_style_reference','primary_reference'].includes(ref?.role) && !(ref?.generatedEditBase || ref?.structureLock)),
+        similarityPromptEmitted:/^Style\/reference similarity setting:/i.test(String(similarityPrompt || '').trim()),
+        similarityUnusedReason:hasStyleReference ? '' : 'no_style_or_composition_reference'
+    };
+    const fullHumanRequested = smartPromptExplicitlyRequestsFullHumanCompletion(node, cleanRequestPrompt || request.displayPrompt || remappedRequestPrompt || '') || smartCurrentUserExplicitlyRequestsSamePerson(node, cleanRequestPrompt || request.displayPrompt || remappedRequestPrompt || '');
+    const partialHumanRefs = smartRefsLikelyContainPartialHumanContent(node, refs);
+    const noHumanPrompt = smartNoHumanSubjectPrompt(allowHuman, partialHumanRefs, fullHumanRequested);
+    const personOverridePrompt = smartPersonIdentityOverridePrompt(refs, allowHuman, node, cleanRequestPrompt || request.displayPrompt || remappedRequestPrompt || '');
     const uploadedMapPrompt = smartUploadedReferenceMapPrompt(refs, allowHuman);
     const posterCopyLockPrompt = smartPosterCopyLockPrompt(node, refs);
     const posterCopyDisabledPrompt = smartPosterCopyDisabledPrompt(node, refs);
     const handInteractionPrompt = smartProductHandInteractionPrompt(refs, allowHuman);
     const brandIdentityPrompt = smartBrandIdentityPrompt(refs);
-    const latestProductIdentityPrompt = smartLatestProductIdentityOverridePrompt(node, cleanRequestPrompt || request.displayPrompt || request.prompt || '', refs);
+    const latestProductIdentityPrompt = smartLatestProductIdentityOverridePrompt(node, cleanRequestPrompt || request.displayPrompt || remappedRequestPrompt || '', refs);
     const mechanicalStructurePrompt = allowHuman ? '' : smartMechanicalStructurePrompt(node, refs, cleanRequestPrompt || request.displayPrompt || '');
     const styleBridgePrompt = productOnlyReplacementMode ? smartProductReplacementStyleBridgePrompt(false) : '';
+    const productRecognitionPrompt = String(cleanRequestPrompt || '').includes('Product recognition summary from product reference images:')
+        ? ''
+        : smartProductRecognitionPromptForNode(node, refs);
     const roleParts = [
         noHumanPrompt,
+        aspectRecomposePrompt,
         uploadedMapPrompt,
         latestProductIdentityPrompt,
+        productRecognitionPrompt,
         replacementPrompt,
         styleBridgePrompt,
         rolePrompt && !String(cleanRequestPrompt || '').includes('Product truth references:') ? rolePrompt : '',
@@ -14598,16 +15520,22 @@ buildPromptRequest = function(node, overrideDefaultImages=null, consumeDefault=f
         similarityPrompt,
         personOverridePrompt,
         cleanRequestPrompt,
-        replacementPrompt
-            ? (allowHuman
-                ? 'FINAL PRODUCT CHECK: any object held or touched by the permitted human must match the attached product-truth images, not the old object in the style reference.'
-                : 'FINAL PRODUCT CHECK: the hero object must match the attached product-truth images, not the old object in the style reference. No person, hand, arm, face, or body part may appear.')
-            : ''
+        replacementPrompt ? smartFinalProductCheckPrompt(refs, allowHuman, partialHumanRefs, fullHumanRequested) : ''
     ];
-    const prompt = roleParts.filter(Boolean).join('\n\n');
+    const normalizedSimilarityPrompt = smartNormalizeCurrentReferenceSimilarityStatements(roleParts.filter(Boolean).join('\n\n'), requestSimilarityStateBase);
+    const requestSimilarityState = {
+        ...requestSimilarityStateBase,
+        removedStaleSimilarityStatements:smartSimilarityRemovedUnique([
+            ...requestSimilarityStateBase.removedStaleSimilarityStatements,
+            ...normalizedSimilarityPrompt.removed
+        ]),
+        similarityPromptEmitted:normalizedSimilarityPrompt.similarityPromptEmitted
+    };
+    const prompt = normalizedSimilarityPrompt.text;
     return {
         ...request,
         prompt,
+        similarityState:requestSimilarityState,
         refs:refs.map((img, index) => ({
             ...img,
             name:img.name || `Image ${index + 1}`,
@@ -15853,7 +16781,7 @@ async function runCascadeStepIntoNode(sourceNode, targetNode, inputRefs, ctx=sma
         meta.promptText = requestNode.promptDraftText || request.displayPrompt || '';
     }
     const logKind = isApiLikeEngine(runSettings.engine) && runSettings.apiKind === 'video' ? 'video' : 'image';
-    const runLog = smartRunSnapshot(requestNode, prompt, request.refs || [], logKind);
+    const runLog = smartRunSnapshot(requestNode, prompt, request.refs || [], logKind, request.similarityState);
     const runLogStart = nowMs();
     const targetPromptState = {
         promptDraftHtml:targetNode.promptDraftHtml,
@@ -15875,7 +16803,7 @@ async function runCascadeStepIntoNode(sourceNode, targetNode, inputRefs, ctx=sma
     render();
     settings = previousSettings;
     try {
-        const stepContext = createSmartRunContext({node:requestNode, prompt, displayPrompt, refs:request.refs || [], runSettings, kind:logKind});
+        const stepContext = createSmartRunContext({node:requestNode, prompt, displayPrompt, refs:request.refs || [], runSettings, kind:logKind, similarityState:request.similarityState});
         const result = await generateUrlsForCurrentSettings(outputNode, prompt, request.refs || [], runSettings, stepContext);
         if(!result.urls?.length) throw new Error(result.kind === 'video' ? tr('smart.errNoOutVideos') : tr('smart.errNoOutImages'));
         if(outpaintSize) delete requestNode.outpaintSize;
@@ -15942,7 +16870,7 @@ async function runLoopRoundIntoSlot(loopNode, rootNode, outputSlot, loopIndex, c
             createdAt:Date.now()
         };
         const logKind = isApiLikeEngine(runSettings.engine) && runSettings.apiKind === 'video' ? 'video' : 'image';
-        const runLog = smartRunSnapshot(rootNode, prompt, request.refs || [], logKind);
+        const runLog = smartRunSnapshot(rootNode, prompt, request.refs || [], logKind, request.similarityState);
         const runLogStart = nowMs();
         const expectedCount = isApiLikeEngine(runSettings.engine) && runSettings.apiKind !== 'video'
             ? Math.max(1, Math.min(8, Number(runSettings.count || 1)))
@@ -15963,7 +16891,7 @@ async function runLoopRoundIntoSlot(loopNode, rootNode, outputSlot, loopIndex, c
         settings = previousSettings;
         let result;
         if(isApiLikeEngine(runSettings.engine) && runSettings.apiKind !== 'video'){
-            const stepContext = createSmartRunContext({node:rootNode, prompt, displayPrompt, refs:request.refs || [], runSettings, kind:logKind});
+            const stepContext = createSmartRunContext({node:rootNode, prompt, displayPrompt, refs:request.refs || [], runSettings, kind:logKind, similarityState:request.similarityState});
             const taskResult = await runApiGeneration(prompt, request.refs || [], runSettings, stepContext);
             const taskIds = Array.isArray(taskResult?.taskIds) ? taskResult.taskIds : [];
             if(!taskIds.length) throw new Error(tr('smart.errRunFailed'));
@@ -15993,7 +16921,7 @@ async function runLoopRoundIntoSlot(loopNode, rootNode, outputSlot, loopIndex, c
             }
             result = {urls:(outputSlot.images || []).map(img => img?.url ? img : null).filter(Boolean), kind:'image'};
         } else {
-            const stepContext = createSmartRunContext({node:rootNode, prompt, displayPrompt, refs:request.refs || [], runSettings, kind:logKind});
+            const stepContext = createSmartRunContext({node:rootNode, prompt, displayPrompt, refs:request.refs || [], runSettings, kind:logKind, similarityState:request.similarityState});
             result = await generateUrlsForCurrentSettings(outputSlot, prompt, request.refs || [], runSettings, stepContext);
         }
         if(!result.urls?.length) throw new Error(result.kind === 'video' ? tr('smart.errNoOutVideos') : tr('smart.errNoOutImages'));
@@ -16360,7 +17288,7 @@ async function runGeneration(){
         };
     }
     const logKind = isApiLikeEngine(settings.engine) && settings.apiKind === 'video' ? 'video' : 'image';
-    let trace = smartBuildGenerationTrace({node, prompt, refs, runSettings:settings, kind:logKind});
+    let trace = smartBuildGenerationTrace({node, prompt, refs, runSettings:settings, kind:logKind, similarityState:request.similarityState});
     const confirmed = await confirmSmartGenerationPreflight(trace);
     if(!confirmed){
         settings = previousSettings;
@@ -16381,8 +17309,8 @@ async function runGeneration(){
         toast(error.message);
         return;
     }
-    trace = smartBuildGenerationTrace({node, prompt, refs, runSettings:settings, kind:logKind});
-    const runContext = createSmartRunContext({node, prompt, displayPrompt:request.displayPrompt, refs, runSettings:settings, kind:logKind});
+    trace = smartBuildGenerationTrace({node, prompt, refs, runSettings:settings, kind:logKind, similarityState:request.similarityState});
+    const runContext = createSmartRunContext({node, prompt, displayPrompt:request.displayPrompt, refs, runSettings:settings, kind:logKind, similarityState:request.similarityState});
     const meta = snapshotRunMeta(prompt, node.id, request.displayPrompt, refs, trace);
     meta.runContext = {
         requestId:runContext.requestId,
@@ -16392,10 +17320,14 @@ async function runGeneration(){
         model:runContext.model,
         promptHash:runContext.promptHash,
         referenceSetHash:runContext.referenceSetHash,
+        effectiveReferenceSimilarity:runContext.effectiveReferenceSimilarity,
+        similaritySource:runContext.similaritySource,
+        similarityAppliedToUploadDecision:runContext.similarityAppliedToUploadDecision,
+        similarityPromptEmitted:runContext.similarityPromptEmitted,
         compilerVersion:runContext.compilerVersion,
         createdAt:runContext.createdAt
     };
-    const runLog = smartRunSnapshot(node, prompt, refs, logKind);
+    const runLog = smartRunSnapshot(node, prompt, refs, logKind, request.similarityState);
     runLog.runContext = meta.runContext;
     rememberRecentSmartSettings(settings, node);
     const runLogStart = nowMs();
@@ -16770,7 +17702,7 @@ const gpt_image_reference_limit = smartGenerationReferenceLimit;
 const SMART_MATCHED_PROMPT_BUDGET = 7000;
 const SMART_IMAGE_PROMPT_BUDGET = 12000;
 const SMART_POSTER_COPY_PROMPT_BUDGET = 5200;
-const SMART_PRODUCT_REPLACEMENT_PROMPT_BUDGET = 5200;
+const SMART_PRODUCT_REPLACEMENT_PROMPT_BUDGET = 12000;
 const SMART_PRODUCT_ONLY_REPLACEMENT_PROMPT_BUDGET = 5200;
 const SMART_VIDEO_PROMPT_BUDGET = 3600;
 const SMART_LLM_MESSAGE_BUDGET = 18000;
@@ -16795,6 +17727,7 @@ function smartProviderPromptBudget(runSettings=settings, options={}){
     return {...base, providerKey:key, charSoftLimit:charSoft, charHardLimit:charHard};
 }
 function smartAssertPromptWithinHardBudget(prompt='', budget={}, label='prompt'){
+    smartAssertPromptIntegrity(prompt, label);
     const hardTokens = Math.max(1, Number(budget?.hardPromptTokenLimit || 0));
     const hardChars = Math.max(300, Number(budget?.charHardLimit || 0));
     const tokens = smartEstimateTokens(prompt);
@@ -16828,68 +17761,223 @@ function smartPromptRuleType(value){
     return 'general';
 }
 function smartPromptSectionProfile(value){
-    const brandIdentityHead = String(value || '').slice(0, 260);
-    if(/brand identity lock|latest product identity override/i.test(brandIdentityHead)){
-        return {priority:110, cap:2400, min:750};
-    }
     const head = String(value || '').slice(0, 260);
-    if(/highest priority|active additional generation guidance|llm additional guidance|product truth references|product recognition summary|product replacement|output canvas lock|camera override|camera-locked variant|latest background\/palette override|final product check|最高优先级|追加生成指导|产品事实|产品识别|产品替换|输出画布/i.test(head)){
-        return {priority:110, cap:2400, min:750};
+    if(/product recognition summary/i.test(head)){
+        return {id:'product_recognition', priority:118, cap:Infinity, min:0, critical:true, atomic:true, compactFields:true, dropAsWhole:true};
     }
-    if(/negative prompt|poster copy|must not|avoid:|负面提示|海报文字/i.test(head)){
-        return {priority:90, cap:1400, min:420};
+    if(/^(?:output canvas lock|uploaded image role map|highest priority user modification request|latest user modification request|active additional generation guidance|llm additional guidance|product truth references|mechanical structure lock|final product check)/i.test(head)){
+        return {id:'required_core', priority:150, cap:Infinity, min:0, critical:true, atomic:true, nonRemovable:true};
+    }
+    if(/^(?:no human subject lock|person identity control|highest priority camera override|camera-locked variant|final camera check)/i.test(head)){
+        return {id:'person_camera_lock', priority:144, cap:Infinity, min:0, critical:true, atomic:true, dropAsWhole:true};
+    }
+    if(/^(?:product truth vs style product contrast lock)/i.test(head)){
+        return {id:'product_contrast', priority:143, cap:Infinity, min:0, critical:true, atomic:true, dropAsWhole:true};
+    }
+    if(/^(?:mandatory product-hand interaction)/i.test(head)){
+        return {id:'hand_interaction', priority:142, cap:Infinity, min:0, critical:true, atomic:true, dropAsWhole:true};
+    }
+    if(/^(?:poster copy lock|poster copy off)/i.test(head)){
+        return {id:'poster_copy_state', priority:142, cap:Infinity, min:0, critical:true, atomic:true, dropAsWhole:true};
+    }
+    if(/^(?:style\/reference similarity setting|original reference similarity)/i.test(head)){
+        return {id:'reference_similarity', priority:141, cap:Infinity, min:0, critical:true, atomic:true, dropAsWhole:true, nonRemovable:true};
+    }
+    if(/^(?:product identity priority|product identity priority with non-clone style reference|latest product identity override)/i.test(head)){
+        return {id:'product_identity_bridge', priority:130, cap:Infinity, min:0, critical:true, atomic:true, dropAsWhole:true};
+    }
+    if(/^(?:brand identity lock)/i.test(head)){
+        return {id:'brand_identity', priority:125, cap:Infinity, min:0, critical:true, atomic:true, dropAsWhole:true};
+    }
+    if(/^(?:output-aspect recomposition override)/i.test(head)){
+        return {id:'output_recompose', priority:115, cap:Infinity, min:0, critical:true, atomic:true, dropAsWhole:true};
+    }
+    if(/highest priority|product replacement|latest background\/palette override|最高优先级|追加生成指导|产品事实|产品识别|产品替换|输出画布/i.test(head)){
+        return {id:'priority_rule', priority:105, cap:2200, min:650, critical:false, atomic:false};
+    }
+    if(/negative prompt|must not|avoid:|负面提示/i.test(head)){
+        return {id:'negative_rule', priority:90, cap:1400, min:420, critical:false, atomic:false};
     }
     if(/composition lock|original reference weight|user modification request|reference role assignment|构图锁定|参考图权重|用户修改/i.test(head)){
-        return {priority:80, cap:1900, min:520};
+        return {id:'composition_rule', priority:80, cap:1900, min:520, critical:false, atomic:false};
     }
     if(/case-library support|variant plan|reference anchors|案例库|变体计划|参考锚点/i.test(head)){
-        return {priority:20, cap:650, min:0};
+        return {id:'low_priority', priority:20, cap:650, min:0, critical:false, atomic:false, removable:true};
     }
     if(/reference priority|reference summary|shared style anchor|generation guidance|参考优先级|风格锚点|生成指导/i.test(head)){
-        return {priority:55, cap:1400, min:260};
+        return {id:'reference_guidance', priority:55, cap:1400, min:260, critical:false, atomic:false, removable:true};
     }
-    return {priority:65, cap:2600, min:360};
+    return {id:'general', priority:65, cap:2600, min:360, critical:false, atomic:false};
 }
-function smartClipPromptSection(value, maxLength, safeSentenceMode=false){
+function smartCompleteSentenceUnits(value){
+    const text = String(value || '').trim();
+    if(!text) return [];
+    const units = text.match(/[^.!?。！？；;\n]+(?:[。！？；]+|[.!?;]+(?=\s|$)|$)/g) || [text];
+    return units.map(unit => unit.trim()).filter(Boolean);
+}
+function smartPromptLineIsAtomic(line){
+    const text = String(line || '').trim();
+    if(!text) return false;
+    if(/^[{[]/.test(text) || /[}\]]$/.test(text)) return true;
+    return /^(?:[A-Za-z][A-Za-z0-9 _/()-]{1,70}|[\u4e00-\u9fff][\u4e00-\u9fffA-Za-z0-9 _/（）()_-]{1,40})[:：]/.test(text);
+}
+function smartPromptAtomicUnits(value){
+    const units = [];
+    String(value || '').replace(/\r\n?/g, '\n').split('\n').forEach(line => {
+        const text = line.trim();
+        if(!text) return;
+        const parts = smartPromptLineIsAtomic(text) ? [text] : smartCompleteSentenceUnits(text);
+        parts.forEach(part => units.push(part));
+    });
+    return units;
+}
+function smartClipPromptSection(value, maxLength, _safeSentenceMode=false){
     const text = String(value || '').trim();
     const limit = Math.max(0, Number(maxLength) || 0);
     if(!limit || text.length <= limit) return text;
-    if(limit < 120) return text.slice(0, limit).trim();
-    if(!safeSentenceMode){
-        const separator = '\n';
-        const headLimit = Math.max(80, Math.floor((limit - separator.length) * 0.72));
-        const tailLimit = Math.max(30, limit - headLimit - separator.length);
-        let head = text.slice(0, headLimit);
-        const headBoundary = Math.max(head.lastIndexOf('\n'), head.lastIndexOf('. '), head.lastIndexOf('。'), head.lastIndexOf('; '), head.lastIndexOf('；'));
-        if(headBoundary >= Math.floor(headLimit * 0.62)) head = head.slice(0, headBoundary + 1);
-        let tail = text.slice(-tailLimit);
-        const tailBoundaryCandidates = [tail.indexOf('\n'), tail.indexOf('. '), tail.indexOf('。'), tail.indexOf('; '), tail.indexOf('；')].filter(index => index >= 0);
-        const tailBoundary = tailBoundaryCandidates.length ? Math.min(...tailBoundaryCandidates) : -1;
-        if(tailBoundary >= 0 && tailBoundary <= Math.floor(tailLimit * 0.38)) tail = tail.slice(tailBoundary + 1);
-        return `${head.trim()}${separator}${tail.trim()}`.trim().slice(0, limit);
+    const kept = [];
+    let used = 0;
+    for(const unit of smartPromptAtomicUnits(text)){
+        const separatorLength = kept.length ? 1 : 0;
+        if(used + separatorLength + unit.length > limit) break;
+        kept.push(unit);
+        used += separatorLength + unit.length;
     }
-    const headLimit = Math.max(80, limit);
-    let head = text.slice(0, headLimit);
-    const boundaryPattern = /[\n。.!?！？；;]\s*/g;
-    let boundary = -1;
-    let match;
-    while((match = boundaryPattern.exec(head))){
-        const end = match.index + match[0].length;
-        if(end >= Math.floor(limit * 0.62)) boundary = end;
+    return kept.join('\n').trim();
+}
+function smartPromptKnownFieldLabel(value){
+    const label = String(value || '').toLowerCase().replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
+    return /^(?:category|brand|brand\/logo|model|colors?|main colors?|materials?|silhouette|controls?|ports?|logos?(?:\/text)?|must preserve|forbidden changes?|uncertain|conflicts?|atmosphere|mood|tone|style|subject|scene|background|foreground|lighting|material|palette|composition|camera|lens|crop|pose|layout|quality|output|resolution|aspect ratio|negative prompt|reference summary|shared style anchor|generation guidance|case library support|variant plan|text|product|user request|shadow quality|fabric texture|frame composition|subject hierarchy|color palette|reference lighting evidence|reference material evidence|reference color evidence|reference finish evidence)$/.test(label);
+}
+function smartPromptLineHasIncompleteEnd(value, strictField=false){
+    const text = String(value || '').trim();
+    if(!text) return true;
+    if(/[,，:：/\\-]\s*$/.test(text)) return true;
+    if(/\b(?:and|or|with|without|to|of|for|from|into|while|but|the|a|an)\s*$/i.test(text)) return true;
+    const lastWord = (text.match(/([A-Za-z]+)\s*[.!?。！？]?\s*$/) || [])[1] || '';
+    if(lastWord && lastWord.length <= 2 && !/^(?:ai|ar|cm|db|gb|hd|id|kg|km|mm|ml|pc|pe|pp|pu|tv|ui|ux|vr|xl|xs)$/i.test(lastWord)){
+        if(strictField || /\b(?:and|or|with|without|to|of|for|from|into|while|but)\s+[A-Za-z]{1,2}\s*[.!?。！？]?\s*$/i.test(text)) return true;
     }
-    if(boundary > 0) head = head.slice(0, boundary);
-    else {
-        const softBoundary = Math.max(head.lastIndexOf(', '), head.lastIndexOf('，'), head.lastIndexOf('、'), head.lastIndexOf(' '));
-        if(softBoundary >= Math.floor(limit * 0.72)) head = head.slice(0, softBoundary);
+    return false;
+}
+function smartPromptLineIntegrityIssues(line, previousLine='', independent=true){
+    const text = String(line || '').trim();
+    if(!text) return [];
+    const issues = [];
+    if(/\bImage\s*#?\s*$|\bImage\s+\d+\s*\/\s*图\s*$|图\s*$/i.test(text)) issues.push('truncated_image_reference');
+    const field = /^([A-Za-z][A-Za-z0-9 _/()-]{1,70}):\s*(.*)$/.exec(text);
+    if(field){
+        const label = field[1];
+        const fieldValue = field[2];
+        if(!fieldValue && /^[A-Z]/.test(label)) return issues;
+        if(/^[a-z]/.test(label) && !smartPromptKnownFieldLabel(label)) issues.push('unknown_lowercase_field');
+        if(smartPromptLineHasIncompleteEnd(fieldValue, true)) issues.push('incomplete_field_value');
+        return issues;
     }
-    head = head.trim().slice(0, limit).replace(/[,:：，、;；-]\s*$/, '').trim();
-    const lines = head.split('\n');
-    const lastLine = lines[lines.length - 1] || '';
-    if(lines.length > 1 && /[:：]\s*$/.test(lastLine) && lastLine.length <= 80){
-        lines.pop();
-        head = lines.join('\n').trim();
+    if(independent && /^[a-z]/.test(text)){
+        const words = text.match(/[A-Za-z]+/g) || [];
+        const first = words[0] || '';
+        const allowedStart = /^(?:a|an|the|this|that|these|those|it|use|keep|make|create|generate|preserve|do|avoid|ensure|render|show|place|remove|add|maintain|treat|follow|match|adapt|replace|include|exclude|let|allow|change|retain|apply|no|without|with|for|from|when|while|if|only|never|always|prefer|prioritize)$/i;
+        if((first.length <= 2 && words.length >= 2) || (words.length >= 6 && !allowedStart.test(first))){
+            issues.push('lowercase_fragment_start');
+        }
     }
-    return head;
+    if(smartPromptLineHasIncompleteEnd(text)) issues.push('incomplete_line_end');
+    const shortWords = text.match(/[A-Za-z]+/g) || [];
+    if(/^[A-Za-z ]{1,18}$/.test(text) && shortWords[0]?.length <= 2){
+        issues.push('short_english_fragment');
+    }
+    if(previousLine && /[:：]\s*$/.test(previousLine.trim()) && /^[a-z]{1,3}\b/.test(text)){
+        issues.push('truncated_field_continuation');
+    }
+    return issues;
+}
+function smartPromptJsonStructureValid(value){
+    const text = String(value || '');
+    if(!/[{[]/.test(text)) return true;
+    const stack = [];
+    let inString = false;
+    let escaped = false;
+    for(const char of text){
+        if(inString){
+            if(escaped) escaped = false;
+            else if(char === '\\') escaped = true;
+            else if(char === '"') inString = false;
+            continue;
+        }
+        if(char === '"'){
+            inString = true;
+            continue;
+        }
+        if(char === '{' || char === '[') stack.push(char);
+        else if(char === '}' || char === ']'){
+            const expected = char === '}' ? '{' : '[';
+            if(stack.pop() !== expected) return false;
+        }
+    }
+    return !inString && stack.length === 0;
+}
+function smartPromptUnicodeValid(value){
+    const text = String(value || '');
+    if(text.includes('\uFFFD')) return false;
+    for(let index = 0; index < text.length; index += 1){
+        const code = text.charCodeAt(index);
+        if(code >= 0xD800 && code <= 0xDBFF){
+            const next = text.charCodeAt(index + 1);
+            if(!(next >= 0xDC00 && next <= 0xDFFF)) return false;
+            index += 1;
+        } else if(code >= 0xDC00 && code <= 0xDFFF){
+            return false;
+        }
+    }
+    return true;
+}
+function smartPromptIntegrityCheck(value){
+    const text = String(value || '').replace(/\r\n?/g, '\n');
+    const errors = [];
+    if(!smartPromptJsonStructureValid(text)) errors.push('unbalanced_json_or_quotes');
+    if(!smartPromptUnicodeValid(text)) errors.push('broken_unicode');
+    const lines = text.split('\n');
+    let previousLine = '';
+    lines.forEach((line, index) => {
+        const textLine = line.trim();
+        if(!textLine){
+            previousLine = '';
+            return;
+        }
+        const independent = index === 0 || !previousLine || /[.!?。！？;；:：]\s*$/.test(previousLine.trim());
+        smartPromptLineIntegrityIssues(textLine, previousLine, independent).forEach(issue => errors.push(`${issue}:${index + 1}`));
+        previousLine = textLine;
+    });
+    return {valid:errors.length === 0, errors:[...new Set(errors)]};
+}
+function smartAssertPromptIntegrity(value, label='prompt'){
+    const result = smartPromptIntegrityCheck(value);
+    if(!result.valid){
+        throw new Error(`${label} failed local integrity validation: ${result.errors.slice(0, 4).join(', ')}`);
+    }
+    return result;
+}
+function smartRemoveIncompletePromptUnits(value){
+    return String(value || '')
+        .replace(/\r\n?/g, '\n')
+        .split(/\n{2,}/)
+        .map(section => {
+            if(!smartPromptJsonStructureValid(section)) return '';
+            const kept = [];
+            let previousLine = '';
+            section.split('\n').forEach((line, index) => {
+                const text = line.trim();
+                if(!text) return;
+                const independent = index === 0 || !previousLine || /[.!?。！？;；:：]\s*$/.test(previousLine);
+                if(smartPromptLineIntegrityIssues(text, previousLine, independent).length) return;
+                kept.push(text);
+                previousLine = text;
+            });
+            return kept.join('\n').trim();
+        })
+        .filter(Boolean)
+        .join('\n\n');
 }
 function smartPromptSections(value){
     const normalized = smartNormalizePromptText(value);
@@ -16911,20 +17999,25 @@ function smartPromptSections(value){
     });
 }
 function smartRepairPromptFragments(value){
-    return String(value || '')
-        .split(/\n{2,}/)
-        .map(section => section.trim())
-        .filter(section => {
-            if(!section) return false;
-            if(/^(?:bject|ground tone|h components|selected output|hile keeping|g, crisp|, watermark|Case-library su|for|ver|shadow_quality|fabric_tex)\b/i.test(section)) return false;
-            return true;
-        })
-        .join('\n\n');
+    return smartRemoveIncompletePromptUnits(value);
+}
+function smartPromptSingletonModuleKey(value){
+    const head = String(value || '').trim();
+    if(/^OUTPUT CANVAS LOCK:/i.test(head)) return 'output_canvas';
+    if(/^UPLOADED IMAGE ROLE MAP:/i.test(head)) return 'uploaded_image_map';
+    if(/^BRAND IDENTITY LOCK:/i.test(head)) return 'brand_identity';
+    if(/^POSTER COPY (?:LOCK|OFF)/i.test(head)) return 'poster_copy_state';
+    if(/^(?:Style\/reference similarity setting|Original reference similarity):/i.test(head)) return 'reference_similarity';
+    if(/^PERSON IDENTITY CONTROL:|^NO HUMAN SUBJECT LOCK:/i.test(head)) return 'person_state';
+    if(/^Product recognition summary/i.test(head)) return 'product_recognition';
+    if(/^FINAL PRODUCT CHECK:/i.test(head)) return 'final_product_check';
+    return '';
 }
 function smartDedupePromptSections(value){
     const sections = smartPromptSections(value);
     const seenExact = new Set();
     const seenRule = new Set();
+    const seenSingletonModule = new Set();
     const deduped = [];
     const mergedRuleCounts = {};
     const keepAlways = /^(?:Highest priority user modification request|Latest user modification request|Active additional generation guidance|Product truth references|Product recognition summary|NO HUMAN SUBJECT LOCK|POSTER COPY LOCK|HIGHEST PRIORITY CAMERA OVERRIDE|FINAL PRODUCT CHECK|Negative prompt)/i;
@@ -16945,6 +18038,13 @@ function smartDedupePromptSections(value){
             return;
         }
         seenExact.add(exact);
+        const singletonKey = smartPromptSingletonModuleKey(normalized);
+        if(singletonKey && seenSingletonModule.has(singletonKey)){
+            const type = smartPromptRuleType(normalized);
+            mergedRuleCounts[type] = (mergedRuleCounts[type] || 0) + 1;
+            return;
+        }
+        if(singletonKey) seenSingletonModule.add(singletonKey);
         const key = ruleKey(normalized);
         const duplicateRule = seenRule.has(key);
         if(duplicateRule && !keepAlways.test(normalized)){
@@ -16966,38 +18066,174 @@ function smartDedupePromptSections(value){
         changed:prompt.length !== String(value || '').length
     };
 }
-function smartCompressPromptToBudget(value, budget=SMART_IMAGE_PROMPT_BUDGET, options={}){
-    const safeSentenceMode = options?.repairFragments === true;
-    const dedupe = smartDedupePromptSections(safeSentenceMode ? smartRepairPromptFragments(value) : value);
-    const original = smartNormalizePromptText(dedupe.prompt);
-    const maxLength = Math.max(300, Number(budget) || SMART_IMAGE_PROMPT_BUDGET);
-    if(!original || original.length <= maxLength){
-        return {prompt:original, originalLength:String(value || '').length, dedupedLength:original.length, compressedLength:original.length, deduplicatedRules:dedupe.removedCount, deduplicatedRuleTypes:dedupe.mergedRuleTypes, mergedRuleCounts:dedupe.mergedRuleCounts, changed:dedupe.changed};
-    }
-    const entries = smartPromptSections(original).map((text, index) => {
-        const profile = smartPromptSectionProfile(text);
-        return {...profile, index, text:smartClipPromptSection(text, profile.cap, safeSentenceMode)};
+function smartProductRecognitionFieldPriority(label=''){
+    const normalized = String(label || '').toLowerCase().replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
+    const priorities = {
+        'category':140,
+        'must preserve':135,
+        'forbidden changes':134,
+        'colors':130,
+        'main colors':130,
+        'materials':129,
+        'silhouette':128,
+        'controls':127,
+        'brand/logo':100,
+        'brand':100,
+        'model':95,
+        'ports':90,
+        'logos/text':85,
+        'logos':85,
+        'conflicts':40,
+        'uncertain':20
+    };
+    return priorities[normalized] || 60;
+}
+function smartCompactProductRecognitionSection(value, maxLength){
+    const text = String(value || '').trim();
+    const limit = Math.max(0, Number(maxLength) || 0);
+    if(!limit || text.length <= limit) return text;
+    const lines = text.split('\n').map(line => line.trim()).filter(Boolean);
+    const fields = [];
+    const fixed = [];
+    lines.forEach((line, index) => {
+        const match = /^([A-Za-z][A-Za-z0-9 _/()-]{1,70}):\s+(.+)$/.exec(line);
+        if(index > 0 && match && smartPromptKnownFieldLabel(match[1])){
+            fields.push({index, priority:smartProductRecognitionFieldPriority(match[1]), text:line});
+        } else {
+            fixed.push({index, text:line});
+        }
     });
-    const joinedLength = () => entries.filter(entry => entry.text).map(entry => entry.text).join('\n\n').length;
-    const lowPriority = [...entries].sort((a, b) => a.priority - b.priority || b.text.length - a.text.length);
+    const selected = [...fixed];
+    let used = fixed.reduce((sum, item) => sum + item.text.length, 0) + Math.max(0, fixed.length - 1);
+    if(used > limit) return text;
+    [...fields].sort((a, b) => b.priority - a.priority || a.index - b.index).forEach(field => {
+        const separatorLength = selected.length ? 1 : 0;
+        if(used + separatorLength + field.text.length > limit) return;
+        selected.push(field);
+        used += separatorLength + field.text.length;
+    });
+    return selected.sort((a, b) => a.index - b.index).map(item => item.text).join('\n');
+}
+function smartPromptEntriesText(entries=[]){
+    return entries
+        .filter(entry => entry.text)
+        .sort((a, b) => a.index - b.index)
+        .map(entry => entry.text)
+        .join('\n\n');
+}
+function smartCompressPromptEntries(value, maxLength, options={}){
+    const entries = smartPromptSections(value).map((text, index) => ({
+        ...smartPromptSectionProfile(text),
+        index,
+        text,
+        originalText:text
+    }));
+    const currentLength = () => smartPromptEntriesText(entries).length;
+    const lowPriority = [...entries]
+        .filter(entry => !entry.critical && (entry.removable || entry.priority <= 55))
+        .sort((a, b) => a.priority - b.priority || b.text.length - a.text.length);
     for(const entry of lowPriority){
-        let overflow = joinedLength() - maxLength;
-        if(overflow <= 0) break;
-        const target = Math.max(entry.min, entry.text.length - overflow);
-        if(target < entry.text.length) entry.text = target > 0 ? smartClipPromptSection(entry.text, target, safeSentenceMode) : '';
+        if(currentLength() <= maxLength) break;
+        entry.text = '';
     }
-    let prompt = entries.filter(entry => entry.text).sort((a, b) => a.index - b.index).map(entry => entry.text).join('\n\n');
-    if(prompt.length > maxLength) prompt = smartClipPromptSection(prompt, maxLength, safeSentenceMode);
-    prompt = smartNormalizePromptText(prompt).slice(0, maxLength);
+    for(const entry of entries.filter(item => item.text && item.compactFields)){
+        if(currentLength() <= maxLength) break;
+        const overflow = currentLength() - maxLength;
+        const target = Math.max(0, entry.text.length - overflow);
+        entry.text = smartCompactProductRecognitionSection(entry.text, target);
+    }
+    if(options.blockOnly !== true){
+        const compactable = [...entries]
+            .filter(entry => entry.text && !entry.critical)
+            .sort((a, b) => a.priority - b.priority || b.text.length - a.text.length);
+        for(const entry of compactable){
+            if(currentLength() <= maxLength) break;
+            const overflow = currentLength() - maxLength;
+            const target = Math.max(entry.min || 0, entry.text.length - overflow);
+            const compacted = smartClipPromptSection(entry.text, target, true);
+            if(compacted && compacted.length < entry.text.length) entry.text = compacted;
+        }
+    }
+    const removable = [...entries]
+        .filter(entry => entry.text && !entry.critical)
+        .sort((a, b) => a.priority - b.priority || b.text.length - a.text.length);
+    for(const entry of removable){
+        if(currentLength() <= maxLength) break;
+        entry.text = '';
+    }
+    if(currentLength() > maxLength){
+        const atomicDroppable = [...entries]
+            .filter(entry => entry.text && entry.critical && entry.dropAsWhole && !entry.nonRemovable)
+            .sort((a, b) => b.priority - a.priority || a.text.length - b.text.length);
+        atomicDroppable.forEach(entry => {
+            entry.atomicCandidateText = entry.text;
+            entry.text = '';
+        });
+        for(const entry of atomicDroppable){
+            entry.text = entry.atomicCandidateText;
+            if(currentLength() > maxLength) entry.text = '';
+        }
+    }
+    const prompt = smartNormalizePromptText(smartPromptEntriesText(entries));
+    const droppedAtomicModules = entries
+        .filter(entry => entry.critical && entry.dropAsWhole && !entry.text)
+        .map(entry => entry.id);
+    return {prompt, overBudget:prompt.length > maxLength, droppedAtomicModules};
+}
+function smartCompressPromptToBudget(value, budget=SMART_IMAGE_PROMPT_BUDGET, _options={}){
+    const maxLength = Math.max(300, Number(budget) || SMART_IMAGE_PROMPT_BUDGET);
+    const input = smartNormalizePromptText(value);
+    const inputIntegrity = smartPromptIntegrityCheck(input);
+    if((!input || input.length <= maxLength) && inputIntegrity.valid){
+        return {
+            prompt:input,
+            originalLength:String(value || '').length,
+            dedupedLength:input.length,
+            compressedLength:input.length,
+            deduplicatedRules:0,
+            deduplicatedRuleTypes:[],
+            mergedRuleCounts:{},
+            changed:false,
+            integrityValid:true,
+            integrityErrors:[],
+            droppedAtomicModules:[]
+        };
+    }
+    const repairedInput = inputIntegrity.valid ? input : smartRepairPromptFragments(input);
+    const dedupe = smartDedupePromptSections(repairedInput);
+    const dedupedPrompt = smartNormalizePromptText(dedupe.prompt);
+    let compressed = smartCompressPromptEntries(dedupedPrompt, maxLength);
+    let integrity = smartPromptIntegrityCheck(compressed.prompt);
+    if(!integrity.valid){
+        const retrySource = smartRepairPromptFragments(dedupedPrompt);
+        compressed = smartCompressPromptEntries(retrySource, maxLength, {blockOnly:true});
+        integrity = smartPromptIntegrityCheck(compressed.prompt);
+    }
+    let prompt = compressed.prompt;
+    let integrityFallback = false;
+    if(!integrity.valid || compressed.overBudget){
+        const fallback = inputIntegrity.valid ? input : repairedInput;
+        const fallbackIntegrity = smartPromptIntegrityCheck(fallback);
+        if(fallbackIntegrity.valid){
+            prompt = fallback;
+            integrity = fallbackIntegrity;
+            integrityFallback = true;
+        }
+    }
     return {
         prompt,
         originalLength:String(value || '').length,
-        dedupedLength:original.length,
+        dedupedLength:dedupedPrompt.length,
         compressedLength:prompt.length,
         deduplicatedRules:dedupe.removedCount,
         deduplicatedRuleTypes:dedupe.mergedRuleTypes,
         mergedRuleCounts:dedupe.mergedRuleCounts,
-        changed:prompt.length < String(value || '').length
+        changed:prompt !== input,
+        integrityValid:integrity.valid,
+        integrityErrors:integrity.errors,
+        integrityFallback,
+        droppedAtomicModules:compressed.droppedAtomicModules || [],
+        overBudget:prompt.length > maxLength
     };
 }
 function smartNotifyPromptCompression(result, label='提示词'){
@@ -17117,6 +18353,7 @@ async function runApiGeneration(prompt, refs, runSettings=settings, runContext=n
     if(!runSettings.provider_id || !runSettings.model) throw new Error(tr('smart.errNoApiModel'));
     const ctx = runContext || createSmartRunContext({node:null, prompt, refs, runSettings, kind:'image'});
     const diag = ctx.diagnostics || createSmartGenerationDiagnostics(ctx.requestId);
+    const similarityState = smartNormalizeReferenceSimilarityState(ctx, null, refs);
     diag.mark('prompt_build');
     const count = Math.max(1, Math.min(8, Number(runSettings.count || 1)));
     const canvasLock = outputCanvasLockPrompt(runSettings);
@@ -17125,17 +18362,22 @@ async function runApiGeneration(prompt, refs, runSettings=settings, runContext=n
         .join('\n\n');
     diag.measure('prompt_build_ms', 'prompt_build');
     diag.mark('reference_resolve');
-    const referenceImages = smartSelectGenerationReferenceUploads(refs, effectivePrompt, runSettings, 'image');
-    const preflight = smartAnalyzeReferencePreflight({node:null, prompt:effectivePrompt, refs, runSettings, kind:'image'});
-    const requestUploadKeys = new Set(referenceImages.map(ref => smartReferenceUrlKey(ref.url || ref.sourceUrl || '')));
-    const preflightUploadKeys = new Set((preflight.uploadReferences || []).map(ref => smartReferenceUrlKey(ref.url || ref.sourceUrl || '')));
-    const referencePreflightMatchesRequest = requestUploadKeys.size === preflightUploadKeys.size
-        && [...requestUploadKeys].every(key => preflightUploadKeys.has(key));
+    const finalReferenceState = smartResolveFinalReferenceUploads(refs, effectivePrompt, runSettings, 'image');
+    const referenceImages = finalReferenceState.uploadReferences;
+    const preflight = smartAnalyzeReferencePreflight({node:null, prompt:effectivePrompt, refs:finalReferenceState.references, runSettings, kind:'image', similarityState});
+    const requestUploadKeys = referenceImages.map(ref => smartReferenceUrlKey(ref.url || ref.sourceUrl || ''));
+    const preflightUploadKeys = (preflight.uploadReferences || []).map(ref => smartReferenceUrlKey(ref.url || ref.sourceUrl || ''));
+    const referencePreflightMatchesRequest = requestUploadKeys.length === preflightUploadKeys.length
+        && requestUploadKeys.every((key, index) => key === preflightUploadKeys[index]);
     diag.measure('reference_resolve_ms', 'reference_resolve');
     diag.mark('product_recognition');
-    const lockedProductFacts = ctx?.nodeId ? smartProductFactsForNode(nodes.find(item => item.id === ctx.nodeId && (item.productFactsLocked || item.productFactsUserEdited))) : null;
+    const requestNode = ctx?.nodeId ? nodes.find(item => item.id === ctx.nodeId) : null;
+    const lockedProductFacts = requestNode && (requestNode.productFactsLocked || requestNode.productFactsUserEdited) ? smartProductFactsForNode(requestNode) : null;
+    const linkedProductFacts = lockedProductFacts ? null : smartProductFactsRecordForNode(requestNode, referenceImages);
     const recognizedProduct = lockedProductFacts
         ? {summary:smartProductFactsSummary(lockedProductFacts), facts:lockedProductFacts, cacheHit:false, locked:true, userEdited:true, model:'locked_node_facts'}
+        : linkedProductFacts?.facts
+            ? {...linkedProductFacts, cacheHit:true, model:linkedProductFacts.model || 'linked_product_facts'}
         : runSettings?.productRecognitionEnabled ? await smartAnalyzeProductTruthRefs(referenceImages, runSettings).catch(err => {
         console.warn('Product recognition failed; continuing with product truth lock.', err);
         return {summary:'', facts:null, cacheHit:false, error:String(err?.message || err || '')};
@@ -17151,6 +18393,14 @@ async function runApiGeneration(prompt, refs, runSettings=settings, runContext=n
         productPrompt = [lock, productPrompt].filter(Boolean).join('\n\n');
     }
     const productReplacement = Boolean(smartProductReplacementRolePrompt(referenceImages));
+    if(productReplacement){
+        productPrompt = smartSanitizeProductReplacementPrompt(productPrompt, {
+            allowHuman:!String(productPrompt || '').includes('NO HUMAN SUBJECT LOCK:'),
+            posterCopyEnabled:smartPosterCopyEnabledInRequest(productPrompt, referenceImages),
+            brandIdentityEnabled:true,
+            preservePersonIdentityLock:requestNode ? smartCurrentUserExplicitlyRequestsSamePerson(requestNode, productPrompt) : false
+        });
+    }
     const productOnlyReplacement = productReplacement && String(effectivePrompt || '').includes('NO HUMAN SUBJECT LOCK:');
     const posterCopyEnabledRun = smartPosterCopyEnabledInRequest(productPrompt || effectivePrompt, referenceImages);
     const requestBudget = productOnlyReplacement
@@ -17173,9 +18423,12 @@ async function runApiGeneration(prompt, refs, runSettings=settings, runContext=n
     const requestId = ctx.requestId || uid('smart_req');
     const basePayload = {provider_id:runSettings.provider_id, model:runSettings.model, size:sizeForRun(runSettings), quality:runSettings.quality || 'auto', n:1, reference_images:referenceImages};
     diag.mark('request_prepare');
+    const submitRemovedSimilarityStatements = [];
     const submitPayloads = Array.from({length:count}, (_, index) => {
         const variantPrompt = smartVariantPrompt(compressedBase.prompt, index, count, referenceImages);
-        const finalPrompt = smartCompressPromptToBudget(variantPrompt, Math.min(providerBudget.charSoftLimit, requestBudget), compressionOptions).prompt;
+        const normalizedVariantPrompt = smartNormalizeCurrentReferenceSimilarityStatements(variantPrompt, similarityState);
+        submitRemovedSimilarityStatements.push(...normalizedVariantPrompt.removed);
+        const finalPrompt = smartCompressPromptToBudget(normalizedVariantPrompt.text, Math.min(providerBudget.charSoftLimit, requestBudget), compressionOptions).prompt;
         smartAssertPromptWithinHardBudget(finalPrompt, providerBudget, 'image request');
         return {
             ...basePayload,
@@ -17240,6 +18493,14 @@ async function runApiGeneration(prompt, refs, runSettings=settings, runContext=n
         provider_prompt_budget:providerBudget,
         request_id:requestId,
         task_id:tasks.map(task => task.taskId).join(','),
+        effectiveReferenceSimilarity:similarityState.effectiveReferenceSimilarity,
+        similaritySource:similarityState.similaritySource,
+        removedStaleSimilarityStatements:smartSimilarityRemovedUnique([
+            ...(similarityState.removedStaleSimilarityStatements || []),
+            ...submitRemovedSimilarityStatements
+        ]),
+        similarityAppliedToUploadDecision:preflight.similarityAppliedToUploadDecision === true || similarityState.similarityAppliedToUploadDecision === true,
+        similarityPromptEmitted:preflight.similarityPromptEmitted === true || similarityState.similarityPromptEmitted === true,
         product_recognition_cache_hit:Boolean(recognizedProduct?.cacheHit),
         product_recognition_model:recognizedProduct?.model || '',
         product_recognition_confidence:recognizedProduct?.facts?.confidence ?? '',
@@ -17250,6 +18511,9 @@ async function runApiGeneration(prompt, refs, runSettings=settings, runContext=n
         deduplicated_rules:compressedBase.deduplicatedRules || 0,
         deduplicated_rule_types:compressedBase.deduplicatedRuleTypes || [],
         merged_rule_counts:compressedBase.mergedRuleCounts || {},
+        dropped_atomic_prompt_modules:compressedBase.droppedAtomicModules || [],
+        prompt_integrity_valid:compressedBase.integrityValid !== false,
+        prompt_integrity_fallback:Boolean(compressedBase.integrityFallback),
         reference_preflight_matches_request:referencePreflightMatchesRequest,
         pinned_reference_overflow_count:preflight.pinnedOverflowCount || 0,
         product_recognition_cache_skipped:Boolean(recognizedProduct?.cacheSkipped),
@@ -17331,6 +18595,7 @@ async function runModelscopeGeneration(prompt, refs, runSettings=settings){
     const compressedPrompt = smartCompressPromptToBudget(prompt, SMART_IMAGE_PROMPT_BUDGET);
     smartNotifyPromptCompression(compressedPrompt);
     prompt = compressedPrompt.prompt;
+    smartAssertPromptIntegrity(prompt, 'modelscope image request');
     refs = imageRefsOnly(refs);
     const modelKey = runSettings.msgenModel || 'zimage';
     const msModel = MS_GEN_MODELS[modelKey] || MS_GEN_MODELS.zimage;
